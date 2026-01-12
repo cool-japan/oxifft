@@ -1,0 +1,34 @@
+[package]
+name = "oxifft-bench"
+description = "Benchmarks and FFTW comparison tests for OxiFFT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oxifft = { path = "../oxifft" }
+num-complex.workspace = true
+criterion.workspace = true
+rustfft.workspace = true
+
+# FFTW is optional and feature-gated
+fftw = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable FFTW comparison tests (requires libfftw3 installed on the system)
+fftw-compare = ["dep:fftw"]
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "fft_comparison"
+harness = false
+
+[[test]]
+name = "fftw_comparison"
+required-features = ["fftw-compare"]

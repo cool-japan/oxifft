@@ -1,0 +1,87 @@
+[package]
+name = "oxifft"
+description = "Pure Rust implementation of FFTW - the Fastest Fourier Transform in the West"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+num-complex.workspace = true
+num-traits.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+seahash.workspace = true
+hashbrown.workspace = true
+spin.workspace = true
+libm.workspace = true
+rayon = { workspace = true, optional = true }
+mpi = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+oxifft-codegen = { version = "0.1.0", path = "../oxifft-codegen" }
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+approx.workspace = true
+rustfft.workspace = true
+
+[features]
+default = ["std", "threading"]
+# Standard library support (enables file I/O, timing, etc.)
+std = ["dep:serde_json", "num-complex/std", "num-traits/std", "serde/std"]
+# Threading support (requires std)
+threading = ["std", "dep:rayon"]
+simd = []
+# Requires nightly Rust with #![feature(portable_simd)]
+portable_simd = []
+# Quad-precision (128-bit) floating-point support (pure Rust)
+f128-support = []
+# Half-precision (16-bit) floating-point support (pure Rust)
+f16-support = []
+# MPI distributed computing support (requires MPI library)
+mpi = ["dep:mpi"]
+# Sparse FFT support (O(k log n) for k-sparse signals)
+sparse = []
+# Pruned FFT support (partial input/output computation)
+pruned = []
+# ARM SVE (Scalable Vector Extension) support
+sve = ["dep:libc"]
+# WebAssembly support
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+# Streaming FFT support (STFT, window functions, overlap-add)
+streaming = []
+# Compile-time FFT with const generics
+const-fft = []
+# GPU support (CUDA backend for NVIDIA GPUs)
+cuda = []
+# GPU support (Metal backend for Apple GPUs)
+metal = []
+# GPU support (enables both CUDA and Metal when available)
+gpu = []
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "dft_1d"
+harness = false
+
+[[bench]]
+name = "beyond_fftw"
+harness = false
+required-features = ["sparse", "pruned", "streaming", "const-fft"]
+
+[[example]]
+name = "sparse_fft"
+required-features = ["sparse"]
+
+[[example]]
+name = "streaming_fft"
+required-features = ["streaming"]
