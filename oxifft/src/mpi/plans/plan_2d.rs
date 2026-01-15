@@ -109,7 +109,7 @@ where
             local_0_start,
             direction,
             flags,
-            pool: pool as *const _,
+            pool: std::ptr::from_ref(pool),
             row_plan,
             col_plan,
             scratch,

@@ -106,7 +106,7 @@ impl<T: Float> Hc2cSolver<T> {
         }
 
         // Nyquist component for even N (purely real)
-        if self.n % 2 == 0 {
+        if self.n.is_multiple_of(2) {
             complex[self.n / 2] = Complex::new(halfcomplex[self.n - 1], T::ZERO);
         }
     }
@@ -192,7 +192,7 @@ impl<T: Float> C2hcSolver<T> {
         }
 
         // Nyquist component for even N
-        if self.n % 2 == 0 {
+        if self.n.is_multiple_of(2) {
             halfcomplex[self.n - 1] = complex[self.n / 2].re;
         }
     }

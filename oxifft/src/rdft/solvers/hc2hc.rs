@@ -129,7 +129,7 @@ impl<T: Float> Hc2hcSolver<T> {
         }
 
         // Nyquist component for even N (real * real)
-        if self.n % 2 == 0 {
+        if self.n.is_multiple_of(2) {
             result[self.n - 1] = a[self.n - 1] * b[self.n - 1];
         }
     }
@@ -162,7 +162,7 @@ impl<T: Float> Hc2hcSolver<T> {
         }
 
         // Nyquist (real)
-        if self.n % 2 == 0 {
+        if self.n.is_multiple_of(2) {
             result[self.n - 1] = data[self.n - 1];
         }
     }
@@ -197,7 +197,7 @@ impl<T: Float> Hc2hcSolver<T> {
         }
 
         // Nyquist
-        if self.n % 2 == 0 {
+        if self.n.is_multiple_of(2) {
             result[self.n - 1] = data[self.n - 1] * data[self.n - 1];
         }
     }

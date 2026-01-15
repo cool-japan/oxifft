@@ -125,7 +125,7 @@ where
             local_0_start,
             direction,
             flags,
-            pool: pool as *const _,
+            pool: std::ptr::from_ref(pool),
             plan_n2,
             plan_n1,
             plan_n0,

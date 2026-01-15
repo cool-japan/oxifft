@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.1.1] - 2026-01-15
+
+### Changed
+
+- **Dependency updates**:
+  - `hashbrown`: 0.15.5 → 0.16.1
+  - `spin`: 0.9.8 → 0.10.0
+- Removed `rust-version` field (MSRV) to allow using latest Rust features
+
+### Fixed
+
+- **48 clippy warnings eliminated**:
+  - `manual_is_multiple_of`: Replaced `n % x == 0` with `n.is_multiple_of(x)`
+  - `ref_as_ptr`: Replaced `x as *const _` with `std::ptr::from_ref(x)`
+- All tests passing (652 tests)
+- Zero clippy warnings with `-D warnings`
+
 ## [0.1.0] - 2026-01-12
 
 ### Highlights
@@ -295,5 +312,5 @@ _No unreleased changes._
 - wasm-bindgen 0.2 (WebAssembly bindings)
 - js-sys 0.3 (JavaScript interop)
 
-[Unreleased]: https://github.com/oxifft/oxifft/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/oxifft/oxifft/releases/tag/v0.1.0
+[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/cool-japan/oxifft/releases/tag/v0.1.0

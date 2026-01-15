@@ -104,7 +104,7 @@ where
             local_0_start,
             direction,
             flags,
-            pool: pool as *const _,
+            pool: std::ptr::from_ref(pool),
             local_plans,
             scratch,
             _phantom: core::marker::PhantomData,

@@ -489,4 +489,4 @@ After running benchmarks:
 ---
 
 For questions or issues with benchmarking, please open an issue at:
-https://github.com/oxifft/oxifft/issues
+https://github.com/cool-japan/oxifft/issues

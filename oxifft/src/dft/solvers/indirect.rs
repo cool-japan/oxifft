@@ -328,7 +328,7 @@ fn is_smooth(n: usize, b: usize) -> bool {
 
     let mut m = n;
     for p in 2..=b {
-        while m % p == 0 {
+        while m.is_multiple_of(p) {
             m /= p;
         }
         if m == 1 {

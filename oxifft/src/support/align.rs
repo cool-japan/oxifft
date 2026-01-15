@@ -7,7 +7,7 @@ pub const SIMD_ALIGNMENT: usize = 64;
 #[inline]
 #[must_use]
 pub fn is_aligned<T>(ptr: *const T, alignment: usize) -> bool {
-    (ptr as usize) % alignment == 0
+    (ptr as usize).is_multiple_of(alignment)
 }
 
 /// Check if a pointer is SIMD-aligned.

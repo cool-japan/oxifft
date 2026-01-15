@@ -246,9 +246,10 @@ impl<T: Float> GenericSolver<T> {
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f64>() {
             // Safety: We've verified T is f64
             let temp_f64: &mut [Complex<f64>] =
-                unsafe { &mut *(temp as *mut [Complex<T>] as *mut [Complex<f64>]) };
-            let twiddles_f64: &[Complex<f64>] =
-                unsafe { &*(twiddles as *const [Complex<T>] as *const [Complex<f64>]) };
+                unsafe { &mut *(std::ptr::from_mut::<[Complex<T>]>(temp) as *mut [Complex<f64>]) };
+            let twiddles_f64: &[Complex<f64>] = unsafe {
+                &*(std::ptr::from_ref::<[Complex<T>]>(twiddles) as *const [Complex<f64>])
+            };
 
             Self::apply_twiddles_f64(temp_f64, twiddles_f64);
             return;
@@ -367,7 +368,7 @@ impl<T: Float> GenericSolver<T> {
         // Priority 1: Try to extract powers of 2 (largest first)
         // These map directly to efficient Cooley-Tukey radix-2 kernels
         for radix in [16, 8, 4, 2] {
-            if n % radix == 0 {
+            if n.is_multiple_of(radix) {
                 let n2 = n / radix;
                 if n2 > 0 {
                     return (radix, n2);
@@ -377,7 +378,7 @@ impl<T: Float> GenericSolver<T> {
 
         // Priority 2: Try small odd primes we'll have kernels for
         for radix in [3, 5, 7] {
-            if n % radix == 0 {
+            if n.is_multiple_of(radix) {
                 let n2 = n / radix;
                 if n2 > 0 {
                     return (radix, n2);
@@ -391,7 +392,7 @@ impl<T: Float> GenericSolver<T> {
 
         // Search from sqrt(n) downward for a divisor
         for d in (2..=sqrt_n).rev() {
-            if n % d == 0 {
+            if n.is_multiple_of(d) {
                 return (d, n / d);
             }
         }

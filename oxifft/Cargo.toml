@@ -3,7 +3,6 @@ name = "oxifft"
 description = "Pure Rust implementation of FFTW - the Fastest Fourier Transform in the West"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,7 +23,7 @@ mpi = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-oxifft-codegen = { version = "0.1.0", path = "../oxifft-codegen" }
+oxifft-codegen = { version = "0.1.1", path = "../oxifft-codegen" }
 
 [dev-dependencies]
 criterion.workspace = true

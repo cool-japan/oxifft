@@ -809,7 +809,7 @@ fn is_smooth(n: usize, max_factor: usize) -> bool {
         if p > max_factor {
             break;
         }
-        while n % p == 0 {
+        while n.is_multiple_of(p) {
             n /= p;
         }
     }
@@ -824,12 +824,12 @@ fn is_prime(n: usize) -> bool {
     if n == 2 || n == 3 {
         return true;
     }
-    if n % 2 == 0 || n % 3 == 0 {
+    if n.is_multiple_of(2) || n.is_multiple_of(3) {
         return false;
     }
     let mut i = 5;
     while i * i <= n {
-        if n % i == 0 || n % (i + 2) == 0 {
+        if n.is_multiple_of(i) || n.is_multiple_of(i + 2) {
             return false;
         }
         i += 6;
@@ -859,13 +859,13 @@ fn solver_from_name(name: &str) -> SolverChoice {
 /// Check if n is a power of 4.
 #[cfg(feature = "std")]
 fn is_power_of_4(n: usize) -> bool {
-    n != 0 && (n & (n - 1)) == 0 && (n.trailing_zeros() % 2 == 0)
+    n != 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(2)
 }
 
 /// Check if n is a power of 8.
 #[cfg(feature = "std")]
 fn is_power_of_8(n: usize) -> bool {
-    n != 0 && (n & (n - 1)) == 0 && (n.trailing_zeros() % 3 == 0)
+    n != 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(3)
 }
 
 /// Batch execution strategy.

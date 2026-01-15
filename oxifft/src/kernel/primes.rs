@@ -15,13 +15,13 @@ pub fn is_prime(n: usize) -> bool {
     if n == 2 || n == 3 {
         return true;
     }
-    if n % 2 == 0 || n % 3 == 0 {
+    if n.is_multiple_of(2) || n.is_multiple_of(3) {
         return false;
     }
 
     let mut i = 5;
     while i * i <= n {
-        if n % i == 0 || n % (i + 2) == 0 {
+        if n.is_multiple_of(i) || n.is_multiple_of(i + 2) {
             return false;
         }
         i += 6;
@@ -37,9 +37,9 @@ pub fn factor(mut n: usize) -> Vec<(usize, usize)> {
     let mut factors = Vec::new();
 
     // Factor out 2s
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         let mut exp = 0;
-        while n % 2 == 0 {
+        while n.is_multiple_of(2) {
             n /= 2;
             exp += 1;
         }
@@ -49,9 +49,9 @@ pub fn factor(mut n: usize) -> Vec<(usize, usize)> {
     // Factor odd primes
     let mut p = 3;
     while p * p <= n {
-        if n % p == 0 {
+        if n.is_multiple_of(p) {
             let mut exp = 0;
-            while n % p == 0 {
+            while n.is_multiple_of(p) {
                 n /= p;
                 exp += 1;
             }

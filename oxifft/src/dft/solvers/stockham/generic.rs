@@ -21,17 +21,17 @@ pub fn stockham_generic<T: Float>(input: &[Complex<T>], output: &mut [Complex<T>
 
     // Copy input to appropriate buffer based on log_n parity
     // After log_n stages, we want result in output buffer
-    let (mut src, mut dst) = if log_n % 2 == 0 {
+    let (mut src, mut dst) = if log_n.is_multiple_of(2) {
         output.copy_from_slice(input);
         (
-            output as *mut [Complex<T>],
-            scratch.as_mut_slice() as *mut [Complex<T>],
+            std::ptr::from_mut::<[Complex<T>]>(output),
+            std::ptr::from_mut::<[Complex<T>]>(scratch.as_mut_slice()),
         )
     } else {
         scratch.copy_from_slice(input);
         (
-            scratch.as_mut_slice() as *mut [Complex<T>],
-            output as *mut [Complex<T>],
+            std::ptr::from_mut::<[Complex<T>]>(scratch.as_mut_slice()),
+            std::ptr::from_mut::<[Complex<T>]>(output),
         )
     };
 
@@ -141,7 +141,7 @@ fn stockham_radix4_scalar_wip(input: &[Complex<f64>], output: &mut [Complex<f64>
     // - If total_writes is odd: final result in dst → start with dst=output
     // - If total_writes is even: final result in src after last swap → start with src=output
     let (mut src_ptr, mut dst_ptr): (*mut Complex<f64>, *mut Complex<f64>) =
-        if total_writes % 2 == 0 {
+        if total_writes.is_multiple_of(2) {
             output.copy_from_slice(input);
             (output.as_mut_ptr(), scratch.as_mut_ptr())
         } else {
@@ -283,13 +283,14 @@ pub fn stockham_scalar(input: &[Complex<f64>], output: &mut [Complex<f64>], sign
     let mut twiddles: Vec<Complex<f64>> = Vec::with_capacity(half_n);
 
     // Copy input to appropriate buffer
-    let (mut src_ptr, mut dst_ptr): (*mut Complex<f64>, *mut Complex<f64>) = if log_n % 2 == 0 {
-        output.copy_from_slice(input);
-        (output.as_mut_ptr(), scratch.as_mut_ptr())
-    } else {
-        scratch.copy_from_slice(input);
-        (scratch.as_mut_ptr(), output.as_mut_ptr())
-    };
+    let (mut src_ptr, mut dst_ptr): (*mut Complex<f64>, *mut Complex<f64>) =
+        if log_n.is_multiple_of(2) {
+            output.copy_from_slice(input);
+            (output.as_mut_ptr(), scratch.as_mut_ptr())
+        } else {
+            scratch.copy_from_slice(input);
+            (scratch.as_mut_ptr(), output.as_mut_ptr())
+        };
 
     // Process stages
     let mut m = 1;

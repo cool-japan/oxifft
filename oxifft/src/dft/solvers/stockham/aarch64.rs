@@ -40,7 +40,7 @@ pub unsafe fn stockham_radix4_neon(
         let has_final = usize::from(log_n % 2 == 1);
         let total_writes = num_fused + has_final;
 
-        let (mut src_ptr, mut dst_ptr): (*mut f64, *mut f64) = if total_writes % 2 == 0 {
+        let (mut src_ptr, mut dst_ptr): (*mut f64, *mut f64) = if total_writes.is_multiple_of(2) {
             output.copy_from_slice(input);
             (
                 output.as_mut_ptr() as *mut f64,
@@ -421,13 +421,14 @@ unsafe fn stockham_neon(input: &[Complex<f64>], output: &mut [Complex<f64>], sig
         let mut scratch: Vec<Complex<f64>> = vec![Complex::zero(); n];
 
         // Copy input to appropriate buffer
-        let (mut src_ptr, mut dst_ptr): (*mut Complex<f64>, *mut Complex<f64>) = if log_n % 2 == 0 {
-            output.copy_from_slice(input);
-            (output.as_mut_ptr(), scratch.as_mut_ptr())
-        } else {
-            scratch.copy_from_slice(input);
-            (scratch.as_mut_ptr(), output.as_mut_ptr())
-        };
+        let (mut src_ptr, mut dst_ptr): (*mut Complex<f64>, *mut Complex<f64>) =
+            if log_n.is_multiple_of(2) {
+                output.copy_from_slice(input);
+                (output.as_mut_ptr(), scratch.as_mut_ptr())
+            } else {
+                scratch.copy_from_slice(input);
+                (scratch.as_mut_ptr(), output.as_mut_ptr())
+            };
 
         // Sign pattern for complex multiply: [-1, 1]
         let sign_arr = [-1.0_f64, 1.0];

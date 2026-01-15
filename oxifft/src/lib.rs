@@ -88,7 +88,7 @@
 #![allow(clippy::manual_clamp)] // explicit bounds checking is clearer
 #![allow(clippy::used_underscore_binding)] // underscore prefix for internal use
 #![cfg_attr(not(feature = "std"), no_std)]
-#![feature(portable_simd)]
+#![cfg_attr(feature = "portable_simd", feature(portable_simd))]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;

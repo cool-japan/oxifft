@@ -10,3 +10,4 @@ Cargo.lock
 .vscode/
 *.log
 **/CLAUDE.md
+**/.claude/

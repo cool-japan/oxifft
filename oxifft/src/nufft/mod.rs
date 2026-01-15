@@ -432,13 +432,13 @@ fn next_smooth_number(n: usize) -> usize {
     let mut candidate = n;
     loop {
         let mut temp = candidate;
-        while temp % 2 == 0 {
+        while temp.is_multiple_of(2) {
             temp /= 2;
         }
-        while temp % 3 == 0 {
+        while temp.is_multiple_of(3) {
             temp /= 3;
         }
-        while temp % 5 == 0 {
+        while temp.is_multiple_of(5) {
             temp /= 5;
         }
         if temp == 1 {

@@ -80,13 +80,13 @@ impl<T: Float> CooleyTukeySolver<T> {
     /// Check if size is a power of 8 (suitable for radix-8).
     #[must_use]
     pub fn is_power_of_8(n: usize) -> bool {
-        n > 0 && (n & (n - 1)) == 0 && (n.trailing_zeros() % 3 == 0)
+        n > 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(3)
     }
 
     /// Check if size is a power of 4 (suitable for radix-4).
     #[must_use]
     pub fn is_power_of_4(n: usize) -> bool {
-        n > 0 && (n & (n - 1)) == 0 && (n.trailing_zeros() % 2 == 0)
+        n > 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(2)
     }
 
     /// Check if size is a power of 2.
@@ -274,7 +274,7 @@ impl<T: Float> CooleyTukeySolver<T> {
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f64>() {
             // Safety: We've verified T is f64, so this pointer cast is safe
             let data_f64: &mut [Complex<f64>] =
-                unsafe { &mut *(data as *mut [Complex<T>] as *mut [Complex<f64>]) };
+                unsafe { &mut *(std::ptr::from_mut::<[Complex<T>]>(data) as *mut [Complex<f64>]) };
             dit_butterflies_f64(data_f64, sign);
             return;
         }

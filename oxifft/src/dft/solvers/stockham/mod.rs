@@ -76,9 +76,10 @@ impl<T: Float> StockhamSolver<T> {
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f64>() {
             // Safety: We've verified T is f64
             let input_f64: &[Complex<f64>] =
-                unsafe { &*(input as *const [Complex<T>] as *const [Complex<f64>]) };
-            let output_f64: &mut [Complex<f64>] =
-                unsafe { &mut *(output as *mut [Complex<T>] as *mut [Complex<f64>]) };
+                unsafe { &*(std::ptr::from_ref::<[Complex<T>]>(input) as *const [Complex<f64>]) };
+            let output_f64: &mut [Complex<f64>] = unsafe {
+                &mut *(std::ptr::from_mut::<[Complex<T>]>(output) as *mut [Complex<f64>])
+            };
             stockham_f64(input_f64, output_f64, sign);
             return;
         }

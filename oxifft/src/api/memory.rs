@@ -215,7 +215,7 @@ pub unsafe fn free<T>(_ptr: *mut T) {
 
 /// Check if a pointer is properly aligned for SIMD operations.
 pub fn is_aligned<T>(ptr: *const T) -> bool {
-    (ptr as usize) % DEFAULT_ALIGNMENT == 0
+    (ptr as usize).is_multiple_of(DEFAULT_ALIGNMENT)
 }
 
 #[cfg(test)]
