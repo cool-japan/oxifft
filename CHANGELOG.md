@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.1.2] - 2026-01-26
+
+### Fixed
+
+- **Windows compatibility**: Removed `examples/**/CLAUDE.md` directory which caused package unpacking errors on Windows
+  - Windows does not allow `**` as directory or filename
+  - Error: "The filename, directory name, or volume label syntax is incorrect. (os error 123)"
+  - This fix enables cross-platform PyPI publishing for dependent crates (e.g., scirs2-python)
+
 ## [0.1.1] - 2026-01-15
 
 ### Changed

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["oxifft", "oxifft-codegen", "oxifft-bench"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["COOLJAPAN OU (Team KitaSan)"]
 license = "MIT OR Apache-2.0"

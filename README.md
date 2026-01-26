@@ -1,5 +1,10 @@
 # OxiFFT
 
+[![Crates.io](https://img.shields.io/crates/v/oxifft.svg)](https://crates.io/crates/oxifft)
+[![Documentation](https://docs.rs/oxifft/badge.svg)](https://docs.rs/oxifft)
+[![License](https://img.shields.io/crates/l/oxifft.svg)](https://github.com/cool-japan/oxifft#license)
+[![Downloads](https://img.shields.io/crates/d/oxifft.svg)](https://crates.io/crates/oxifft)
+
 **Pure Rust implementation of FFTW (Fastest Fourier Transform in the West)**
 
 OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It brings FFTW's sophisticated algorithms, planning system, and performance optimizations to the Rust ecosystem while leveraging Rust's safety guarantees and modern language features.

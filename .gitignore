@@ -11,3 +11,4 @@ Cargo.lock
 *.log
 **/CLAUDE.md
 **/.claude/
+**/CLAUDE.md
