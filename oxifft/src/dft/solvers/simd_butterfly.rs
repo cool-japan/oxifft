@@ -10,6 +10,32 @@ use crate::dft::problem::Sign;
 use crate::kernel::Complex;
 use crate::prelude::*;
 
+/// Convert a `Vec<[f64; 2]>` of exactly 65535 elements into `Box<[[f64; 2]; 65535]>`
+/// without panicking. This avoids `unwrap()`/`expect()` on the `try_into()` conversion.
+///
+/// # Safety invariant
+/// The caller must pass a Vec with exactly 65535 elements. This is enforced by
+/// a debug assertion; in release builds the length is guaranteed by construction
+/// (the Vec is created with `vec![[0.0_f64; 2]; 65535]` and never resized).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn vec_to_boxed_twiddles(v: Vec<[f64; 2]>) -> Box<[[f64; 2]; 65535]> {
+    debug_assert_eq!(
+        v.len(),
+        65535,
+        "twiddle vec must have exactly 65535 elements"
+    );
+    let boxed_slice = v.into_boxed_slice();
+    // The length is guaranteed to be 65535 by construction (allocated as
+    // `vec![[0.0_f64; 2]; 65535]` with no subsequent push/pop/resize).
+    // We perform the conversion via raw pointer to avoid a fallible try_into
+    // that would require unwrap()/expect().
+    let raw = Box::into_raw(boxed_slice) as *mut [[f64; 2]; 65535];
+    // SAFETY: The boxed slice has exactly 65535 elements of type [f64; 2],
+    // which is layout-identical to [[f64; 2]; 65535]. The pointer was obtained
+    // from Box::into_raw, so it is properly aligned and non-null.
+    unsafe { Box::from_raw(raw) }
+}
+
 /// DIT butterfly stages with SIMD acceleration for f64.
 ///
 /// Detects CPU features at runtime and uses the fastest available implementation.
@@ -84,14 +110,8 @@ impl PrecomputedTwiddlesNeon {
         }
 
         Self {
-            forward: forward
-                .into_boxed_slice()
-                .try_into()
-                .expect("twiddle size mismatch"),
-            inverse: inverse
-                .into_boxed_slice()
-                .try_into()
-                .expect("twiddle size mismatch"),
+            forward: vec_to_boxed_twiddles(forward),
+            inverse: vec_to_boxed_twiddles(inverse),
             offsets,
         }
     }
@@ -324,8 +344,8 @@ impl PrecomputedTwiddles {
         }
 
         Self {
-            forward: forward.into_boxed_slice().try_into().unwrap(),
-            inverse: inverse.into_boxed_slice().try_into().unwrap(),
+            forward: vec_to_boxed_twiddles(forward),
+            inverse: vec_to_boxed_twiddles(inverse),
             offsets,
         }
     }

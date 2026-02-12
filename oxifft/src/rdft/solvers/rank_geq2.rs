@@ -14,6 +14,7 @@ impl<T: Float> Default for RdftRankGeq2Solver<T> {
 }
 
 impl<T: Float> RdftRankGeq2Solver<T> {
+    /// Creates a new multi-dimensional RDFT solver instance.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -21,6 +22,7 @@ impl<T: Float> RdftRankGeq2Solver<T> {
         }
     }
 
+    /// Returns the solver name identifier (`"rdft-rank-geq2"`).
     #[must_use]
     pub fn name(&self) -> &'static str {
         "rdft-rank-geq2"

@@ -488,10 +488,10 @@ ms_print massif.out.*
 
 ```bash
 # Create baseline
-cargo bench --all-features -- --save-baseline v0.1.2
+cargo bench --all-features -- --save-baseline v0.1.3
 
 # After changes
-cargo bench --all-features -- --baseline v0.1.2
+cargo bench --all-features -- --baseline v0.1.3
 
 # Check for regressions
 # Look for "Performance has regressed" messages

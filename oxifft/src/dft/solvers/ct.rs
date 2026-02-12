@@ -260,7 +260,7 @@ impl<T: Float> CooleyTukeySolver<T> {
     }
 
     /// Decimation-in-Time in-place.
-    fn execute_dit_inplace(&self, data: &mut [Complex<T>], sign: Sign) {
+    pub fn execute_dit_inplace(&self, data: &mut [Complex<T>], sign: Sign) {
         // Bit-reversal permutation
         bit_reverse_permute(data);
 

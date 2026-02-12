@@ -340,4 +340,4 @@ cocomo .
 
 ## License
 
-By contributing to OxiFFT, you agree that your contributions will be dual-licensed under MIT OR Apache-2.0, matching the project license.
+By contributing to OxiFFT, you agree that your contributions will be licensed under Apache-2.0, matching the project license.

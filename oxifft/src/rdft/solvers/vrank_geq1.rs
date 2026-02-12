@@ -88,6 +88,7 @@ impl<T: Float> RdftVrankGeq1Solver<T> {
         )
     }
 
+    /// Returns the solver name identifier (`"rdft-vrank-geq1"`).
     #[must_use]
     pub fn name(&self) -> &'static str {
         "rdft-vrank-geq1"

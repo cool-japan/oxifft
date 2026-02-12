@@ -6,6 +6,9 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage = "https://github.com/cool-japan/oxifft"
+documentation = "https://docs.rs/oxifft-codegen"
+readme = "README.md"
 keywords = ["fft", "codegen", "proc-macro", "simd"]
 categories = ["development-tools::procedural-macro-helpers"]
 

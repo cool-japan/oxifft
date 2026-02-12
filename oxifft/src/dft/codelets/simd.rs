@@ -187,16 +187,17 @@ pub fn notw_512_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
         notw_512_simd_f64(x_f64, sign);
         return;
     }
-    // Fallback to CT solver's iterative DIT for other types
+    // Fallback to iterative DIT for other types.
+    // Note: Must use execute_inplace directly to avoid infinite recursion,
+    // since CooleyTukeySolver::execute dispatches back to this codelet.
     use crate::dft::problem::Sign;
     use crate::dft::solvers::CooleyTukeySolver;
-    let output = x.to_vec();
     let sign_enum = if sign < 0 {
         Sign::Forward
     } else {
         Sign::Backward
     };
-    CooleyTukeySolver::default().execute(&output, x, sign_enum);
+    CooleyTukeySolver::default().execute_dit_inplace(x, sign_enum);
 }
 
 /// Size-1024 DFT with automatic SIMD dispatch.
@@ -213,16 +214,17 @@ pub fn notw_1024_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
         notw_1024_simd_f64(x_f64, sign);
         return;
     }
-    // Fallback to CT solver's iterative DIT for other types
+    // Fallback to iterative DIT for other types.
+    // Note: Must use execute_inplace directly to avoid infinite recursion,
+    // since CooleyTukeySolver::execute dispatches back to this codelet.
     use crate::dft::problem::Sign;
     use crate::dft::solvers::CooleyTukeySolver;
-    let output = x.to_vec();
     let sign_enum = if sign < 0 {
         Sign::Forward
     } else {
         Sign::Backward
     };
-    CooleyTukeySolver::default().execute(&output, x, sign_enum);
+    CooleyTukeySolver::default().execute_dit_inplace(x, sign_enum);
 }
 
 /// Size-4096 DFT with automatic SIMD dispatch.
@@ -239,16 +241,17 @@ pub fn notw_4096_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
         notw_4096_simd_f64(x_f64, sign);
         return;
     }
-    // Fallback to CT solver's iterative DIT for other types
+    // Fallback to iterative DIT for other types.
+    // Note: Must use execute_inplace directly to avoid infinite recursion,
+    // since CooleyTukeySolver::execute dispatches back to this codelet.
     use crate::dft::problem::Sign;
     use crate::dft::solvers::CooleyTukeySolver;
-    let output = x.to_vec();
     let sign_enum = if sign < 0 {
         Sign::Forward
     } else {
         Sign::Backward
     };
-    CooleyTukeySolver::default().execute(&output, x, sign_enum);
+    CooleyTukeySolver::default().execute_dit_inplace(x, sign_enum);
 }
 
 // ============================================================================

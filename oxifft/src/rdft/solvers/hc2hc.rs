@@ -38,6 +38,7 @@ impl<T: Float> Hc2hcSolver<T> {
         }
     }
 
+    /// Returns the solver name identifier (`"rdft-hc2hc"`).
     #[must_use]
     pub fn name(&self) -> &'static str {
         "rdft-hc2hc"

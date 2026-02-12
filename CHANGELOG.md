@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.1.3] - 2026-02-12
+
+### Fixed
+
+- **CUDA SIMD fallback infinite recursion**: Fixed infinite recursion bug in `notw_512_dispatch`, `notw_1024_dispatch`, and `notw_4096_dispatch` SIMD fallback paths
+  - The fallback for non-f32/f64 types previously called `CooleyTukeySolver::execute`, which dispatched back to the same codelet, causing infinite recursion
+  - Now calls `CooleyTukeySolver::execute_dit_inplace` directly to perform iterative DIT without re-entering the codelet dispatch
+  - Made `execute_dit_inplace` public on `CooleyTukeySolver` to support this fix
+  - Removed unnecessary `output` buffer allocation in fallback paths
+
+### Changed
+
+- **License consolidation**: Consolidated dual license files (`LICENSE-APACHE` + `LICENSE-MIT`) into a single `LICENSE` file (Apache-2.0)
+
 ## [0.1.2] - 2026-01-26
 
 ### Fixed
@@ -321,5 +335,8 @@ _No unreleased changes._
 - wasm-bindgen 0.2 (WebAssembly bindings)
 - js-sys 0.3 (JavaScript interop)
 
-[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/cool-japan/oxifft/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/cool-japan/oxifft/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/cool-japan/oxifft/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cool-japan/oxifft/releases/tag/v0.1.0
