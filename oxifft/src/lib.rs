@@ -109,6 +109,8 @@ pub mod mpi;
 pub mod pruned;
 pub mod rdft;
 pub mod reodft;
+#[cfg(feature = "signal")]
+pub mod signal;
 pub mod simd;
 #[cfg(feature = "sparse")]
 pub mod sparse;
@@ -162,9 +164,9 @@ pub use wasm::{fft_f32, fft_f64, ifft_f32, ifft_f64, rfft_f64, WasmFft, WasmSimd
 // Re-export streaming FFT when streaming feature is enabled
 #[cfg(feature = "streaming")]
 pub use streaming::{
-    blackman, cola_normalization, hamming, hann, istft, kaiser, magnitude_spectrogram,
-    phase_spectrogram, power_spectrogram, rectangular, stft, RingBuffer, StreamingFft,
-    WindowFunction,
+    blackman, build_mel_filterbank, cola_normalization, hamming, hann, istft, kaiser,
+    magnitude_spectrogram, mel_spectrogram, mfcc, phase_spectrogram, power_spectrogram,
+    rectangular, stft, MelConfig, RingBuffer, StreamingFft, WindowFunction,
 };
 
 // Re-export compile-time FFT when const-fft feature is enabled
@@ -219,4 +221,12 @@ pub use conv::{
 // Re-export Automatic Differentiation
 pub use autodiff::{
     fft_dual, fft_jacobian, grad_fft, grad_ifft, jvp_fft, vjp_fft, DiffFftPlan, Dual, DualComplex,
+};
+
+// Re-export signal processing when signal feature is enabled
+#[cfg(feature = "signal")]
+pub use signal::{
+    coherence, complex_cepstrum, cross_spectral_density, envelope, hilbert,
+    instantaneous_frequency, instantaneous_phase, minimum_phase, periodogram, real_cepstrum,
+    resample, resample_to, welch, SpectralWindow, WelchConfig,
 };

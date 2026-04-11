@@ -263,13 +263,6 @@ impl<T: Float> RaderSolver<T> {
     }
 }
 
-impl<T: Float> Default for RaderSolver<T> {
-    fn default() -> Self {
-        // Default to prime 3 (smallest valid prime for Rader)
-        Self::new(3).expect("Prime 3 should always work")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

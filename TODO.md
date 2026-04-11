@@ -430,3 +430,46 @@
 - [x] Idiomatic Rust API with good documentation (partial)
 - [x] Support all major FFTW features (complex/real/r2r transforms, all dimensions, wisdom, threading, split-complex, aligned memory)
 - [x] Works on x86_64 (SSE2+) and aarch64 (NEON) - SIMD backends implemented
+
+---
+
+## Phase 10: Signal Processing
+
+### Hilbert Transform & Analytic Signal
+- [x] Implement `hilbert()` for analytic signal computation (zero negative frequencies via FFT)
+- [x] Implement `envelope()` via analytic signal magnitude
+- [x] Implement `instantaneous_phase()` via atan2 of analytic signal
+- [x] Implement `instantaneous_frequency()` via phase differentiation with unwrapping
+- [x] Add `signal` feature flag (depends on `std`)
+
+### Power Spectral Density
+- [x] Implement `periodogram()` for simple Hann-windowed PSD estimation
+- [x] Implement `welch()` for Welch's averaged method PSD
+- [x] Implement `cross_spectral_density()` for two-signal spectral analysis
+- [x] Implement `coherence()` for magnitude-squared coherence
+- [x] Implement `SpectralWindow` enum (Rectangular, Hann, Hamming, Blackman)
+- [x] Implement `WelchConfig` struct for parameter control
+
+### Cepstral Analysis
+- [x] Implement `real_cepstrum()` — `IFFT(log(|FFT(x)|))`
+- [x] Implement `complex_cepstrum()` with incremental phase unwrapping
+- [x] Implement `minimum_phase()` reconstruction via cepstral liftering
+- [x] Implement `unwrap_phase()` private helper for phase continuity
+
+### Code Quality
+- [x] Refactored `dft/codelets/simd.rs` (2813 lines) into `simd/` directory module (5 files, all <2000 lines)
+
+### FFT-based Resampling
+- [x] Implement `resample()` — spectral zero-padding (upsample) and truncation (downsample)
+- [x] Implement `resample_to()` — convenience wrapper using sample rates
+- [x] Handle Nyquist bin energy splitting for even-length signals
+
+### Mel-Frequency Analysis (streaming feature)
+- [x] Implement `MelConfig` struct for analysis configuration
+- [x] Implement `hz_to_mel()` / `mel_to_hz()` conversions (Hz ↔ mel scale)
+- [x] Implement `build_mel_filterbank()` — triangular mel filterbank matrix
+- [x] Implement `mel_spectrogram()` — log-mel spectrogram from signal
+- [x] Implement `mfcc()` — Mel-Frequency Cepstral Coefficients via DCT-II
+
+### Examples
+- [x] Add `signal_processing.rs` example demonstrating all signal module functions

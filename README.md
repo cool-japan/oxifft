@@ -25,12 +25,13 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 ### Advanced Features (Beyond FFTW)
 - **Sparse FFT**: O(k log n) complexity for k-sparse signals using FFAST algorithm
 - **Pruned FFT**: Input/output pruning for partial computation, Goertzel algorithm
-- **Streaming FFT**: Short-Time Fourier Transform (STFT) with window functions
+- **Streaming FFT**: STFT with window functions, mel-frequency filterbank, MFCC (`streaming` feature)
 - **Compile-time FFT**: Const FFT for fixed-size arrays (sizes 2-1024)
 - **Non-uniform FFT (NUFFT)**: Type 1/2/3 transforms with Gaussian gridding
 - **Fractional Fourier Transform (FrFT)**: Chirp decomposition for fractional orders
 - **Convolution**: FFT-based linear/circular convolution and correlation
 - **Automatic Differentiation**: Forward and backward mode gradients for FFT operations
+- **Signal Processing**: Hilbert transform, analytic signal, Welch's PSD, cross-spectral density, coherence, cepstral analysis, FFT-based resampling (`signal` feature)
 - **GPU Acceleration**: CUDA (NVIDIA) and Metal (Apple) backends
 - **MPI Distributed Computing**: 2D/3D/N-D distributed FFTs with slab decomposition
 - **WebAssembly**: Browser-compatible FFT with WASM SIMD support
@@ -38,7 +39,7 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 ## Project Status
 
 ✅ **Core FFT functionality is COMPLETE**
-✅ **357 unit tests + doc tests passing** (100% pass rate)
+✅ **688 tests passing** (all features, 4 stress tests skipped)
 ✅ **Zero clippy warnings** (all features)
 ✅ **Performance optimized** (9/15 composite sizes faster than RustFFT)
 
@@ -227,6 +228,7 @@ oxifft/
 │   ├── sparse/            # Sparse FFT (FFAST algorithm)
 │   ├── pruned/            # Pruned FFT (input/output pruning, Goertzel)
 │   ├── streaming/         # STFT and window functions
+│   ├── signal/            # Hilbert transform, PSD, cepstrum, resampling
 │   ├── const_fft/         # Compile-time FFT with const generics
 │   ├── nufft/             # Non-uniform FFT (Type 1/2/3)
 │   ├── frft/              # Fractional Fourier Transform
@@ -239,7 +241,7 @@ oxifft/
 ├── oxifft-bench/          # Benchmarks (including FFTW comparison)
 ├── benches/               # Additional benchmarks (beyond_fftw.rs)
 ├── examples/              # Usage examples
-└── tests/                 # Integration tests (629 tests passing)
+└── tests/                 # Integration tests (size coverage, FFTW comparison)
 ```
 
 ## Architecture
@@ -283,13 +285,15 @@ OxiFFT provides many features beyond RustFFT:
 | **MPI Distributed** | ✅ | ❌ |
 | **f16/f128 Support** | ✅ | ❌ |
 | **Const-FFT** | ✅ | ❌ |
+| **Signal Processing (Hilbert/PSD)** | ✅ | ❌ |
+| **Mel-Frequency / MFCC** | ✅ | ❌ |
 | **Split-Complex** | ✅ | ❌ |
 | **Guru Interface** | ✅ | ❌ |
 
 ### When to Use OxiFFT
 
 - **SAR/Radar Processing**: 2D FFT, batch processing, real FFT, convolution
-- **Audio Processing**: STFT, window functions, streaming FFT
+- **Audio Processing**: STFT, mel-frequency filterbank, MFCC, Hilbert envelope
 - **Scientific Computing**: NUFFT for irregular sampling, MPI for HPC
 - **Machine Learning**: Auto-differentiation, GPU acceleration
 - **Embedded/Web**: WASM support, const-FFT for fixed sizes
@@ -339,6 +343,7 @@ const-fft = []
 cuda = []
 metal = []
 gpu = []
+signal = ["std"]   # Signal processing (Hilbert, Welch PSD, cepstrum)
 ```
 
 ## Documentation
@@ -373,6 +378,21 @@ gpu = []
 - Cooley-Tukey: "An Algorithm for the Machine Calculation of Complex Fourier Series" (1965)
 - Rader's Algorithm: "Discrete Fourier transforms when the number of data samples is prime" (1968)
 - Bluestein: "A linear filtering approach to the computation of discrete Fourier transform" (1970)
+
+## Sponsorship
+
+OxiFFT is developed and maintained by **COOLJAPAN OU (Team Kitasan)**.
+
+If you find OxiFFT useful, please consider sponsoring the project to support continued development of the Pure Rust ecosystem.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?logo=github)](https://github.com/sponsors/cool-japan)
+
+**[https://github.com/sponsors/cool-japan](https://github.com/sponsors/cool-japan)**
+
+Your sponsorship helps us:
+- Maintain and improve the COOLJAPAN ecosystem
+- Keep the entire ecosystem (OxiBLAS, OxiFFT, SciRS2, etc.) 100% Pure Rust
+- Provide long-term support and security updates
 
 ## License
 

@@ -30,12 +30,12 @@ fn main() {
         signal[i].im += (two_pi * 50.0 * t).sin();
 
         // Frequency at bin 150
-        signal[i].re += 0.5 * (two_pi * 150.0 * t).cos();
-        signal[i].im += 0.5 * (two_pi * 150.0 * t).sin();
+        signal[i].re = 0.5f64.mul_add((two_pi * 150.0 * t).cos(), signal[i].re);
+        signal[i].im = 0.5f64.mul_add((two_pi * 150.0 * t).sin(), signal[i].im);
 
         // Frequency at bin 300
-        signal[i].re += 0.3 * (two_pi * 300.0 * t).cos();
-        signal[i].im += 0.3 * (two_pi * 300.0 * t).sin();
+        signal[i].re = 0.3f64.mul_add((two_pi * 300.0 * t).cos(), signal[i].re);
+        signal[i].im = 0.3f64.mul_add((two_pi * 300.0 * t).sin(), signal[i].im);
     }
 
     println!("Signal size: {n} points");

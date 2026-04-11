@@ -26,7 +26,7 @@ mpi = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-oxifft-codegen = { version = "0.1.3", path = "../oxifft-codegen" }
+oxifft-codegen = { version = "0.1.4", path = "../oxifft-codegen" }
 
 [dev-dependencies]
 criterion.workspace = true
@@ -67,9 +67,15 @@ cuda = []
 metal = []
 # GPU support (enables both CUDA and Metal when available)
 gpu = []
+# Signal processing: Hilbert transform, PSD (Welch's method), cepstral analysis
+signal = ["std"]
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["oxifft-codegen", "spin"]
+development = ["approx", "proptest"]
 
 [[bench]]
 name = "dft_1d"
@@ -87,3 +93,7 @@ required-features = ["sparse"]
 [[example]]
 name = "streaming_fft"
 required-features = ["streaming"]
+
+[[example]]
+name = "signal_processing"
+required-features = ["signal"]

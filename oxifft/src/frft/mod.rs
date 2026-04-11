@@ -33,10 +33,10 @@
 //! let signal = vec![Complex::new(1.0, 0.0); 256];
 //!
 //! // Fractional Fourier Transform with order 0.5
-//! let result = frft(&signal, 0.5);
+//! let result = frft(&signal, 0.5).expect("FrFT failed");
 //!
 //! // Inverse (order -0.5)
-//! let recovered = ifrft(&result, 0.5);
+//! let recovered = ifrft(&result, 0.5).expect("iFrFT failed");
 //! ```
 
 #[cfg(not(feature = "std"))]
@@ -364,14 +364,9 @@ fn reduce_order(order: f64) -> f64 {
 ///
 /// # Returns
 ///
-/// Transformed signal.
-///
-/// # Panics
-///
-/// Panics if input is empty or FFT planning fails.
-pub fn frft<T: Float>(input: &[Complex<T>], order: f64) -> Vec<Complex<T>> {
-    let plan = Frft::new(input.len(), order).expect("Failed to create FrFT plan");
-    plan.execute(input).expect("FrFT execution failed")
+/// Transformed signal or an error if the input is empty or FFT planning fails.
+pub fn frft<T: Float>(input: &[Complex<T>], order: f64) -> FrftResult<Vec<Complex<T>>> {
+    frft_checked(input, order)
 }
 
 /// Compute the inverse Fractional Fourier Transform.
@@ -385,9 +380,9 @@ pub fn frft<T: Float>(input: &[Complex<T>], order: f64) -> Vec<Complex<T>> {
 ///
 /// # Returns
 ///
-/// Recovered signal.
-pub fn ifrft<T: Float>(input: &[Complex<T>], order: f64) -> Vec<Complex<T>> {
-    frft(input, -order)
+/// Recovered signal or an error if FFT planning fails.
+pub fn ifrft<T: Float>(input: &[Complex<T>], order: f64) -> FrftResult<Vec<Complex<T>>> {
+    frft_checked(input, -order)
 }
 
 /// Compute FrFT with error handling.
@@ -416,7 +411,7 @@ mod tests {
             .map(|k| Complex::new(f64::from(k).cos(), f64::from(k).sin()))
             .collect();
 
-        let result = frft(&input, 0.0);
+        let result = frft(&input, 0.0).expect("frft order 0 should succeed");
 
         for (a, b) in input.iter().zip(result.iter()) {
             assert!(approx_eq(a.re, b.re, 1e-10));
@@ -429,7 +424,7 @@ mod tests {
         // Order 2 should be time reversal
         let input: Vec<Complex<f64>> = (0..8).map(|k| Complex::new(f64::from(k), 0.0)).collect();
 
-        let result = frft(&input, 2.0);
+        let result = frft(&input, 2.0).expect("frft order 2 should succeed");
 
         assert!(approx_eq(result[0].re, input[0].re, 1e-10));
         for k in 1..8 {
@@ -445,7 +440,7 @@ mod tests {
             .collect();
 
         let order = 0.7;
-        let result = frft(&input, order);
+        let result = frft(&input, order).expect("frft fractional order should succeed");
 
         // Result should have same length as input
         assert_eq!(result.len(), input.len());
@@ -464,7 +459,7 @@ mod tests {
             .map(|k| Complex::new(f64::from(k).cos(), 0.0))
             .collect();
 
-        let frft_result = frft(&input, 1.0);
+        let frft_result = frft(&input, 1.0).expect("frft order 1 should succeed");
 
         // Check that result is similar in structure (not exact due to normalization)
         assert_eq!(frft_result.len(), input.len());
@@ -481,8 +476,8 @@ mod tests {
             .map(|k| Complex::new((f64::from(k) * 0.2).cos(), 0.0))
             .collect();
 
-        let result_05 = frft(&input, 0.5);
-        let result_15 = frft(&input, 1.5);
+        let result_05 = frft(&input, 0.5).expect("frft order 0.5 should succeed");
+        let result_15 = frft(&input, 1.5).expect("frft order 1.5 should succeed");
 
         // Results should be different
         let diff: f64 = result_05

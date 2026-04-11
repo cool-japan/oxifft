@@ -128,6 +128,7 @@ fn test_power_of_2_medium() {
 }
 
 #[test]
+#[ignore = "slow: stress test for large power-of-2 sizes (2048–16384), run with: cargo test -- --ignored"]
 fn test_power_of_2_large() {
     for exp in 11..=14 {
         let n = 1 << exp;

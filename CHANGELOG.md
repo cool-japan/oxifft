@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.1.4] - 2026-04-11
+
+### Added
+
+- **Signal processing module** (`signal` feature, requires `std`):
+  - Hilbert transform (`hilbert()`) for computing the analytic signal via FFT
+  - Envelope detection (`envelope()`) via analytic signal magnitude
+  - Instantaneous phase (`instantaneous_phase()`) and frequency (`instantaneous_frequency()`) extraction
+  - Power spectral density via Welch's method (`welch()`, `periodogram()`)
+  - Cross-spectral density (`cross_spectral_density()`) for two-signal analysis
+  - Magnitude-squared coherence (`coherence()`)
+  - Real cepstrum (`real_cepstrum()`) — `IFFT(log(|FFT(x)|))`
+  - Complex cepstrum (`complex_cepstrum()`) with phase unwrapping
+  - Minimum-phase reconstruction (`minimum_phase()`)
+  - `SpectralWindow` enum (Rectangular, Hann, Hamming, Blackman) and `WelchConfig` struct
+  - FFT-based signal resampling (`resample()`, `resample_to()`) via spectral zero-padding/truncation
+- **Mel-frequency analysis** (`streaming` feature):
+  - `MelConfig` struct for mel filterbank configuration (sample rate, FFT size, hop size, n_mels, f_min, f_max)
+  - `build_mel_filterbank()` — builds triangular mel filterbank matrix
+  - `mel_spectrogram()` — log-mel spectrogram from a signal
+  - `mfcc()` — Mel-Frequency Cepstral Coefficients via DCT of log-mel spectrogram
+- **Example**: `signal_processing.rs` demonstrating all signal module functions
+
+### Changed
+
+- **SIMD codelet refactor**: Split `dft/codelets/simd.rs` (2813 lines, exceeding the 2000-line policy) into a directory module `dft/codelets/simd/` with 5 focused files:
+  - `mod.rs` (261 lines): dispatch functions and re-exports
+  - `backends.rs` (517 lines): SSE2, AVX2, NEON, and x86_64 SIMD backend implementations
+  - `small_sizes.rs` (95 lines): f64-specific SIMD dispatch for sizes 2–32
+  - `large_sizes.rs` (1600 lines): f64-specific SIMD dispatch for sizes 64–4096 with precomputed twiddles
+  - `tests.rs` (360 lines): correctness and roundtrip tests for SIMD codelets
+
+- **Version bump**: 0.1.3 → 0.1.4
+
 ## [0.1.3] - 2026-02-12
 
 ### Fixed
@@ -335,7 +369,8 @@ _No unreleased changes._
 - wasm-bindgen 0.2 (WebAssembly bindings)
 - js-sys 0.3 (JavaScript interop)
 
-[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/cool-japan/oxifft/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cool-japan/oxifft/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cool-japan/oxifft/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cool-japan/oxifft/compare/v0.1.0...v0.1.1

@@ -30,9 +30,11 @@
 //! }
 //! ```
 
+mod mel;
 mod stft;
 mod window;
 
+pub use mel::{build_mel_filterbank, mel_spectrogram, mfcc, MelConfig};
 pub use stft::{
     istft, magnitude_spectrogram, phase_spectrogram, power_spectrogram, stft, StreamingFft,
 };

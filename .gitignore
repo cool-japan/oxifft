@@ -12,3 +12,6 @@ Cargo.lock
 **/CLAUDE.md
 **/.claude/
 **/CLAUDE.md
+
+# Rustc ICE dumps
+rustc-ice-*.txt

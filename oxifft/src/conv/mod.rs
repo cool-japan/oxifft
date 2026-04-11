@@ -117,15 +117,12 @@ pub fn convolve_with_mode<T: Float>(a: &[T], b: &[T], mode: ConvMode) -> Vec<T> 
     }
 
     // Forward FFT
-    let fft_plan = Plan::dft_1d(fft_len, Direction::Forward, Flags::ESTIMATE);
-    let ifft_plan = Plan::dft_1d(fft_len, Direction::Backward, Flags::ESTIMATE);
-
-    if fft_plan.is_none() || ifft_plan.is_none() {
+    let Some(fft_plan) = Plan::dft_1d(fft_len, Direction::Forward, Flags::ESTIMATE) else {
         return convolve_direct(a, b, mode);
-    }
-
-    let fft_plan = fft_plan.expect("FFT plan");
-    let ifft_plan = ifft_plan.expect("IFFT plan");
+    };
+    let Some(ifft_plan) = Plan::dft_1d(fft_len, Direction::Backward, Flags::ESTIMATE) else {
+        return convolve_direct(a, b, mode);
+    };
 
     let mut a_fft = vec![Complex::<T>::zero(); fft_len];
     let mut b_fft = vec![Complex::<T>::zero(); fft_len];
