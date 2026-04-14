@@ -11,6 +11,7 @@
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
+use crate::rdft::codelets::{hc2r_4, hc2r_8};
 
 /// Complex-to-Real FFT solver.
 ///
@@ -101,6 +102,16 @@ impl<T: Float> C2rSolver<T> {
             // But we don't normalize, so:
             output[0] = input[0].re + input[1].re;
             output[1] = input[0].re - input[1].re;
+            return;
+        }
+
+        if n == 4 {
+            hc2r_4(input, output);
+            return;
+        }
+
+        if n == 8 {
+            hc2r_8(input, output);
             return;
         }
 
@@ -215,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_c2r_size_8() {
-        let original: Vec<f64> = (0..8).map(|i| f64::from(i)).collect();
+        let original: Vec<f64> = (0..8).map(f64::from).collect();
         let mut freq = vec![Complex::zero(); 5];
         let mut recovered = vec![0.0_f64; 8];
 

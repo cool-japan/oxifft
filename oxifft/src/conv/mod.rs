@@ -50,6 +50,7 @@ use crate::kernel::{Complex, Float};
 
 /// Convolution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConvMode {
     /// Full convolution, output length = len(a) + len(b) - 1.
     Full,

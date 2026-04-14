@@ -269,6 +269,71 @@ impl<T: Float> SparsePlan<T> {
         self.threshold
     }
 
+    /// Analyze bucket occupancy across all FFAST stages and suggest an
+    /// adjusted sparsity estimate.
+    ///
+    /// Computes the fraction of non-zero buckets (those whose energy exceeds
+    /// `threshold²`) across every stage and maps it to a suggested k:
+    ///
+    /// - occupancy > 50 % → increase k (buckets are crowded, true sparsity
+    ///   is likely higher than estimated).
+    /// - occupancy < 5 %  → decrease k (buckets are nearly empty, true
+    ///   sparsity is likely lower).
+    /// - 5 % – 50 %       → current k estimate is reasonable.
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_stages` - Bucket arrays already populated for the current signal.
+    ///
+    /// # Returns
+    ///
+    /// Suggested k value (clamped to `[1, n]`).
+    pub fn suggest_k(&self, bucket_stages: &[BucketArray<T>]) -> usize {
+        if bucket_stages.is_empty() {
+            return self.k;
+        }
+
+        let threshold_sq = self.threshold * self.threshold;
+        let mut total_buckets: usize = 0;
+        let mut occupied_buckets: usize = 0;
+
+        for stage in bucket_stages {
+            for bucket_idx in 0..stage.len() {
+                total_buckets += 1;
+                if let Some(bucket) = stage.get(bucket_idx) {
+                    if bucket.value.norm_sqr() >= threshold_sq {
+                        occupied_buckets += 1;
+                    }
+                }
+            }
+        }
+
+        if total_buckets == 0 {
+            return self.k;
+        }
+
+        // Use cross-multiplication to avoid integer-division rounding bias.
+        //   occupancy > 50 %  ⟺  2 * occupied > total
+        //   occupancy < 5 %   ⟺  20 * occupied < total
+        let is_crowded = 2 * occupied_buckets > total_buckets;
+        let is_sparse = 20 * occupied_buckets < total_buckets;
+
+        let suggested_k = if is_crowded {
+            // Crowded buckets — raise k by 50 % (at least +1).
+            let increase = (self.k / 2).max(1);
+            self.k.saturating_add(increase)
+        } else if is_sparse {
+            // Sparse buckets — lower k by 25 % (at least -1 but floor at 1).
+            let decrease = (self.k / 4).max(1);
+            self.k.saturating_sub(decrease).max(1)
+        } else {
+            self.k
+        };
+
+        // Clamp to valid range [1, n].
+        suggested_k.max(1).min(self.n)
+    }
+
     /// Estimate the computational complexity.
     ///
     /// Returns estimated number of operations.
@@ -356,5 +421,86 @@ mod tests {
 
         plan.set_threshold(0.001);
         assert_eq!(plan.threshold(), 0.001);
+    }
+
+    /// suggest_k with empty stages returns the current k unchanged.
+    #[test]
+    fn test_suggest_k_no_stages() {
+        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let stages: Vec<BucketArray<f64>> = Vec::new();
+        assert_eq!(plan.suggest_k(&stages), 8);
+    }
+
+    /// suggest_k should increase k when more than 50 % of buckets are occupied.
+    #[test]
+    fn test_suggest_k_crowded_buckets() {
+        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let threshold = plan.threshold();
+        let num_buckets = 16;
+        let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
+
+        // Fill 14 out of 16 buckets (87.5 % > 50 % threshold).
+        for i in 0..14 {
+            if let Some(b) = stage.get_mut(i) {
+                // Ensure energy well above threshold².
+                b.value = Complex::new(threshold * 100.0, 0.0);
+            }
+        }
+        let stages = vec![stage];
+
+        let suggested = plan.suggest_k(&stages);
+        assert!(
+            suggested > 8,
+            "Crowded buckets should increase k beyond {}: got {}",
+            8,
+            suggested
+        );
+    }
+
+    /// suggest_k should decrease k when fewer than 5 % of buckets are occupied.
+    #[test]
+    fn test_suggest_k_sparse_buckets() {
+        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let threshold = plan.threshold();
+        let num_buckets = 32;
+        let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
+
+        // Fill exactly 1 out of 32 buckets (3.1 % < 5 % threshold).
+        if let Some(b) = stage.get_mut(0) {
+            b.value = Complex::new(threshold * 100.0, 0.0);
+        }
+        let stages = vec![stage];
+
+        let suggested = plan.suggest_k(&stages);
+        assert!(
+            suggested < 8,
+            "Sparse buckets should decrease k below {}: got {}",
+            8,
+            suggested
+        );
+    }
+
+    /// suggest_k should leave k unchanged when occupancy is in the 5-50 % range.
+    #[test]
+    fn test_suggest_k_normal_occupancy() {
+        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let threshold = plan.threshold();
+        let num_buckets = 20;
+        let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
+
+        // Fill 4 out of 20 buckets (20 % — well within [5%, 50%]).
+        for i in 0..4 {
+            if let Some(b) = stage.get_mut(i) {
+                b.value = Complex::new(threshold * 100.0, 0.0);
+            }
+        }
+        let stages = vec![stage];
+
+        let suggested = plan.suggest_k(&stages);
+        assert_eq!(
+            suggested, 8,
+            "Normal occupancy should leave k unchanged at {}: got {}",
+            8, suggested
+        );
     }
 }

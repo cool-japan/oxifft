@@ -14,6 +14,7 @@ use crate::rdft::solvers::{
 
 /// DST type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DstType {
     /// DST-I (RODFT00)
     I,

@@ -15,16 +15,6 @@ use crate::dft::problem::Sign;
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
 
-/// Strategy for accessing non-contiguous data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // IndexArray is planned for future use
-pub enum IndirectStrategy {
-    /// Use explicit stride for regular patterns.
-    Stride,
-    /// Use index array for irregular patterns (not yet implemented).
-    IndexArray,
-}
-
 /// Indirect solver for non-contiguous memory layouts.
 ///
 /// Wraps a contiguous FFT solver and handles gather/scatter for strided data.
@@ -36,8 +26,6 @@ pub struct IndirectSolver<T: Float> {
     input_stride: isize,
     /// Output stride (elements between consecutive output values).
     output_stride: isize,
-    /// Access strategy.
-    strategy: IndirectStrategy,
     _marker: core::marker::PhantomData<T>,
 }
 
@@ -55,7 +43,6 @@ impl<T: Float> IndirectSolver<T> {
             n,
             input_stride: 1,
             output_stride: 1,
-            strategy: IndirectStrategy::Stride,
             _marker: core::marker::PhantomData,
         }
     }
@@ -67,7 +54,6 @@ impl<T: Float> IndirectSolver<T> {
             n,
             input_stride: stride,
             output_stride: stride,
-            strategy: IndirectStrategy::Stride,
             _marker: core::marker::PhantomData,
         }
     }
@@ -79,7 +65,6 @@ impl<T: Float> IndirectSolver<T> {
             n,
             input_stride,
             output_stride,
-            strategy: IndirectStrategy::Stride,
             _marker: core::marker::PhantomData,
         }
     }
@@ -206,32 +191,17 @@ impl<T: Float> IndirectSolver<T> {
 
     /// Gather elements from strided source into contiguous destination.
     fn gather(&self, src: &[Complex<T>], src_base: usize, dst: &mut [Complex<T>]) {
-        match self.strategy {
-            IndirectStrategy::Stride => {
-                for i in 0..self.n {
-                    let src_idx = (src_base as isize + i as isize * self.input_stride) as usize;
-                    dst[i] = src[src_idx];
-                }
-            }
-            IndirectStrategy::IndexArray => {
-                // Future: use explicit index array for irregular patterns
-                unimplemented!("Index array strategy not yet implemented")
-            }
+        for i in 0..self.n {
+            let src_idx = (src_base as isize + i as isize * self.input_stride) as usize;
+            dst[i] = src[src_idx];
         }
     }
 
     /// Scatter elements from contiguous source to strided destination.
     fn scatter(&self, src: &[Complex<T>], dst: &mut [Complex<T>], dst_base: usize) {
-        match self.strategy {
-            IndirectStrategy::Stride => {
-                for i in 0..self.n {
-                    let dst_idx = (dst_base as isize + i as isize * self.output_stride) as usize;
-                    dst[dst_idx] = src[i];
-                }
-            }
-            IndirectStrategy::IndexArray => {
-                unimplemented!("Index array strategy not yet implemented")
-            }
+        for i in 0..self.n {
+            let dst_idx = (dst_base as isize + i as isize * self.output_stride) as usize;
+            dst[dst_idx] = src[i];
         }
     }
 

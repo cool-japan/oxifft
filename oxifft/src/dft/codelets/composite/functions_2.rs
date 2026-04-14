@@ -3,6 +3,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 #![allow(clippy::approx_constant)] // Precomputed twiddle factors for FFT
+#![allow(clippy::unreadable_literal)] // Precomputed FFT twiddle factors
 
 use crate::dft::codelets::simd;
 use crate::kernel::{Complex, Float};

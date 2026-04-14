@@ -62,12 +62,40 @@ impl<T: Float> PeelingDecoder<T> {
     pub fn decode(&mut self, bucket_stages: &mut [BucketArray<T>]) -> SparseResult<T> {
         self.detected.clear();
 
+        // k=0: no frequencies to detect — return immediately.
+        if self.k == 0 {
+            return SparseResult::empty();
+        }
+
         if bucket_stages.is_empty() {
             return SparseResult::empty();
         }
 
+        // k=n (full density): sparse FFT is pointless; signal has energy in every
+        // frequency bin. Detect all n bins in the first stage rather than peeling.
+        if self.k >= self.n {
+            return self.decode_full_density(bucket_stages);
+        }
+
+        // Pure noise guard: measure total bucket energy across all stages.
+        // If the total energy is below the noise floor, nothing is decodable.
+        let total_energy: T = bucket_stages
+            .iter()
+            .flat_map(|stage| (0..stage.len()).filter_map(|i| stage.get(i)))
+            .fold(T::ZERO, |acc, b| acc + b.value.norm_sqr());
+
+        let noise_floor = self.threshold * self.threshold;
+        if total_energy < noise_floor {
+            return SparseResult::empty();
+        }
+
+        // Clamp max_iterations to the signal length as a hard ceiling to
+        // prevent spin on pathological inputs (e.g. all multitons that never
+        // peel). The loop also breaks early once singletons stop appearing.
+        let iteration_limit = self.max_iterations.min(self.n);
+
         // Iterative peeling algorithm
-        for _iter in 0..self.max_iterations {
+        for _iter in 0..iteration_limit {
             if self.detected.len() >= self.k {
                 break;
             }
@@ -274,6 +302,27 @@ impl<T: Float> PeelingDecoder<T> {
         }
     }
 
+    /// Handle full-density case (k >= n) by reading all significant buckets
+    /// directly from the first bucket stage.
+    fn decode_full_density(&mut self, bucket_stages: &[BucketArray<T>]) -> SparseResult<T> {
+        self.detected.clear();
+        let threshold_sq = self.threshold * self.threshold;
+
+        if let Some(stage) = bucket_stages.first() {
+            for bucket_idx in 0..stage.len() {
+                if let Some(bucket) = stage.get(bucket_idx) {
+                    if bucket.value.norm_sqr() >= threshold_sq && bucket_idx < self.n {
+                        self.detected.push((bucket_idx, bucket.value));
+                    }
+                }
+            }
+        }
+
+        let indices: Vec<usize> = self.detected.iter().map(|(i, _)| *i).collect();
+        let values: Vec<Complex<T>> = self.detected.iter().map(|(_, v)| *v).collect();
+        SparseResult::new(indices, values, self.n)
+    }
+
     /// Get the number of detected frequencies.
     pub fn num_detected(&self) -> usize {
         self.detected.len()
@@ -354,5 +403,84 @@ mod tests {
 
         let result = decoder.decode(&mut stages);
         assert!(result.is_empty());
+    }
+
+    /// k=0 early return: the decoder must immediately return empty without
+    /// iterating, even when non-empty bucket stages are present.
+    #[test]
+    fn test_decoder_k_zero_early_return() {
+        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 0, 0.001);
+
+        // Build a non-empty stage so we verify the k=0 guard fires.
+        let mut stage: BucketArray<f64> = BucketArray::new(16, 4, 64);
+        // Populate bucket 3 with a strong signal.
+        if let Some(b) = stage.get_mut(3) {
+            b.value = Complex::new(10.0, 0.0);
+            b.count = 1;
+            b.detected_freq = Some(3);
+        }
+        let mut stages = vec![stage];
+
+        let result = decoder.decode(&mut stages);
+        assert!(
+            result.is_empty(),
+            "k=0 should yield empty result regardless of input"
+        );
+    }
+
+    /// k >= n (full-density) path: the decoder should use decode_full_density
+    /// instead of the peeling loop.  We verify it returns buckets directly
+    /// from the first stage rather than attempting peeling.
+    #[test]
+    fn test_decoder_full_density_path() {
+        let n = 16;
+        // k equal to n triggers the full-density branch.
+        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(n, n, 0.001);
+
+        let mut stage: BucketArray<f64> = BucketArray::new(n, 1, n);
+        // Mark every other bucket as occupied.
+        for i in (0..n).step_by(2) {
+            if let Some(b) = stage.get_mut(i) {
+                b.value = Complex::new(1.0, 0.0);
+                b.count = 1;
+                b.detected_freq = Some(i);
+            }
+        }
+        let mut stages = vec![stage];
+
+        let result = decoder.decode(&mut stages);
+        // Full-density path should have captured the occupied buckets.
+        assert!(
+            !result.is_empty(),
+            "Full-density path should detect occupied buckets"
+        );
+        // All returned indices must be valid.
+        for &idx in &result.indices {
+            assert!(idx < n, "Index {idx} out of range [0, {n})");
+        }
+    }
+
+    /// Pure-noise guard: when all bucket energies are below the threshold
+    /// the decoder should return empty rather than producing garbage.
+    #[test]
+    fn test_decoder_pure_noise_guard() {
+        let threshold = 1.0_f64; // High threshold so tiny values appear as noise.
+        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 5, threshold);
+
+        let mut stage: BucketArray<f64> = BucketArray::new(16, 4, 64);
+        // Fill with sub-threshold values.
+        for i in 0..16 {
+            if let Some(b) = stage.get_mut(i) {
+                b.value = Complex::new(0.0001, 0.0001); // well below threshold
+                b.count = 0;
+            }
+        }
+        let mut stages = vec![stage];
+
+        let result = decoder.decode(&mut stages);
+        assert!(
+            result.is_empty(),
+            "Pure-noise input should yield an empty result"
+        );
     }
 }

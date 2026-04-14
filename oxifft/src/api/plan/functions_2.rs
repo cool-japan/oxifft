@@ -11,7 +11,8 @@ use crate::prelude::*;
 #[allow(clippy::uninlined_format_args)]
 mod tests {
     use super::super::functions::*;
-    use super::super::types::{Plan, Plan2D, Plan3D, PlanND, R2rPlan, RealPlan, RealPlanKind};
+    use super::super::types::{Plan, Plan2D, Plan3D, PlanND, RealPlan, RealPlanKind};
+    use super::super::types_r2r::R2rPlan;
     use crate::api::{Direction, Flags};
     use crate::kernel::Complex;
     use crate::rdft::solvers::R2rKind;

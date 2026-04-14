@@ -49,9 +49,8 @@ pub struct MpiPlan2D<T: Float, C: Communicator> {
 unsafe impl<T: Float, C: Communicator + Send> Send for MpiPlan2D<T, C> {}
 unsafe impl<T: Float, C: Communicator + Sync> Sync for MpiPlan2D<T, C> {}
 
-impl<T: Float, C: Communicator> MpiPlan2D<T, C>
+impl<T: Float + MpiFloat, C: Communicator> MpiPlan2D<T, C>
 where
-    T: MpiFloat,
     Complex<T>: Equivalence,
 {
     /// Create a new 2D distributed FFT plan.
@@ -192,7 +191,6 @@ where
         if !self.flags.transposed_out {
             // Transpose back: from column-distributed to row-distributed
             // This is the reverse transpose: n1 x n0 -> n0 x n1
-            let _output_size = self.local_n0 * self.n1;
             let temp = self.scratch.clone();
             distributed_transpose(
                 pool,

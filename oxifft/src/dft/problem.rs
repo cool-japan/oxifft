@@ -6,6 +6,7 @@ use crate::kernel::{Complex, Float, Problem, ProblemKind, Tensor};
 
 /// Transform sign/direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Sign {
     /// Forward transform (exponent = -1)
     Forward = -1,

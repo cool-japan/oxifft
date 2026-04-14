@@ -53,6 +53,7 @@
 //!     SimdLevel::Neon => println!("Using NEON (128-bit vectors)"),
 //!     SimdLevel::Sve => println!("Using ARM SVE (scalable vectors)"),
 //!     SimdLevel::Scalar => println!("No SIMD, using scalar fallback"),
+//!     _ => println!("Unknown SIMD level"),
 //! }
 //! ```
 //!

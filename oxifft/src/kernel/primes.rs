@@ -167,7 +167,7 @@ pub fn next_power_of_two(n: usize) -> usize {
 #[allow(dead_code)]
 #[must_use]
 pub const fn is_power_of_two(n: usize) -> bool {
-    n > 0 && (n & (n - 1)) == 0
+    n.is_power_of_two()
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ pub type GpuResult<T> = Result<T, GpuError>;
 
 /// GPU error types.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum GpuError {
     /// No GPU backend is available.
     NoBackendAvailable,

@@ -37,7 +37,7 @@ impl ThreadPool for RayonPool {
     where
         F: Fn(usize) + Send + Sync,
     {
-        (0..count).into_par_iter().for_each(|i| f(i));
+        (0..count).into_par_iter().for_each(f);
     }
 
     fn num_threads(&self) -> usize {

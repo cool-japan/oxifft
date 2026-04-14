@@ -15,3 +15,6 @@ Cargo.lock
 
 # Rustc ICE dumps
 rustc-ice-*.txt
+
+# Proptest failure persistence files (auto-generated during test runs)
+**/*.proptest-regressions

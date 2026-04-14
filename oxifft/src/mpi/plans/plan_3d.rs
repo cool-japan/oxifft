@@ -49,9 +49,8 @@ pub struct MpiPlan3D<T: Float, C: Communicator> {
 unsafe impl<T: Float, C: Communicator + Send> Send for MpiPlan3D<T, C> {}
 unsafe impl<T: Float, C: Communicator + Sync> Sync for MpiPlan3D<T, C> {}
 
-impl<T: Float, C: Communicator> MpiPlan3D<T, C>
+impl<T: Float + MpiFloat, C: Communicator> MpiPlan3D<T, C>
 where
-    T: MpiFloat,
     Complex<T>: Equivalence,
 {
     /// Create a new 3D distributed FFT plan.

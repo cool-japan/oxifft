@@ -7,6 +7,7 @@ use core::hash::Hash;
 
 /// Problem kind identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ProblemKind {
     /// Complex DFT (Discrete Fourier Transform)
     Dft,

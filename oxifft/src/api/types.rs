@@ -4,6 +4,7 @@ use core::ops::BitOr;
 
 /// Transform direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Direction {
     /// Forward transform (analysis): time domain → frequency domain
     Forward,
@@ -83,6 +84,7 @@ impl BitOr for Flags {
 
 /// Real-to-real transform kind (DCT/DST variants).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum R2rKind {
     /// DCT-I (REDFT00)
     DctI,

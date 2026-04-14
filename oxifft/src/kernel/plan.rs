@@ -4,6 +4,7 @@ use super::Problem;
 
 /// Wake mode for plan initialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WakeMode {
     /// Full initialization (compute twiddle factors, etc.)
     Full,
@@ -13,6 +14,7 @@ pub enum WakeMode {
 
 /// Wake state of a plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum WakeState {
     /// Plan is sleeping (not initialized).
     #[default]

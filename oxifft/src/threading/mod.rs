@@ -216,16 +216,10 @@ pub fn pool_with_threads(_num_threads: usize) -> SerialPool {
 }
 
 /// Configuration for creating thread pools.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PoolConfig {
     /// Number of threads to use. 0 means use system default.
     pub num_threads: usize,
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        Self { num_threads: 0 }
-    }
 }
 
 impl PoolConfig {

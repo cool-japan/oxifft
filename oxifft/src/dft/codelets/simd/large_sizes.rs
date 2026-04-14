@@ -30,7 +30,6 @@ pub fn notw_64_simd_f64(x: &mut [Complex<f64>], sign: i32) {
 fn dit_64_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLock;
     #[cfg(not(feature = "std"))]
-    #[cfg(not(feature = "std"))]
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
 
@@ -127,7 +126,6 @@ pub fn notw_128_simd_f64(x: &mut [Complex<f64>], sign: i32) {
 #[cfg(target_arch = "aarch64")]
 fn dit_128_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLock;
-    #[cfg(not(feature = "std"))]
     #[cfg(not(feature = "std"))]
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
@@ -317,7 +315,6 @@ impl TwiddlesF64_256 {
 #[cfg(target_arch = "aarch64")]
 fn dit_256_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLock;
-    #[cfg(not(feature = "std"))]
     #[cfg(not(feature = "std"))]
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
@@ -514,7 +511,6 @@ pub fn notw_512_simd_f64(x: &mut [Complex<f64>], sign: i32) {
 #[cfg(target_arch = "aarch64")]
 fn dit_512_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLock;
-    #[cfg(not(feature = "std"))]
     #[cfg(not(feature = "std"))]
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
@@ -714,7 +710,6 @@ impl TwiddlesF64_1024 {
 #[cfg(target_arch = "aarch64")]
 fn dit_1024_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLock;
-    #[cfg(not(feature = "std"))]
     #[cfg(not(feature = "std"))]
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
@@ -1155,7 +1150,6 @@ impl TwiddlesF64_4096 {
 #[cfg(target_arch = "aarch64")]
 fn dit_4096_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLock;
-    #[cfg(not(feature = "std"))]
     #[cfg(not(feature = "std"))]
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;

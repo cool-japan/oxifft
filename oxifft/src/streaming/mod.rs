@@ -36,7 +36,8 @@ mod window;
 
 pub use mel::{build_mel_filterbank, mel_spectrogram, mfcc, MelConfig};
 pub use stft::{
-    istft, magnitude_spectrogram, phase_spectrogram, power_spectrogram, stft, StreamingFft,
+    istft, istft_overlap_save, magnitude_spectrogram, phase_spectrogram, power_spectrogram, stft,
+    stft_overlap_save, StreamingFft,
 };
 pub use window::{
     blackman, cola_normalization, hamming, hann, kaiser, rectangular, WindowFunction,

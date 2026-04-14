@@ -14,6 +14,7 @@ use crate::rdft::solvers::{
 
 /// DCT type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DctType {
     /// DCT-I (REDFT00)
     I,

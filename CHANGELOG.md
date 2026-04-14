@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.2.0] - 2026-04-14
+
+### Breaking Changes
+
+- `Plan::dft_2d()` now returns `Option<Plan2D<T>>` instead of `Option<Plan<T>>`.
+  Previously panicked at runtime; this is a compile-time breaking change that prevents a runtime crash.
+- `Plan::dft_3d()` now returns `Option<Plan3D<T>>` instead of `Option<Plan<T>>`.
+  Previously panicked at runtime; this is a compile-time breaking change that prevents a runtime crash.
+- `Plan::r2c_1d()` now returns `Option<RealPlan<T>>` instead of `Option<Plan<T>>`.
+  Previously panicked at runtime; this is a compile-time breaking change that prevents a runtime crash.
+- `Plan::c2r_1d()` now returns `Option<RealPlan<T>>` instead of `Option<Plan<T>>`.
+  Previously panicked at runtime; this is a compile-time breaking change that prevents a runtime crash.
+- `IndirectStrategy` enum and its `IndexArray` variant removed (was dead code, never constructed).
+- All public enums are now `#[non_exhaustive]`. Downstream `match` expressions on public enums
+  need a wildcard `_ => ...` arm.
+
+### New Features
+
+- **FFTW Compatibility API** (`fftw-compat` feature): `oxifft::compat` module with FFTW-style
+  function names (`fftw_plan_dft_1d`, `fftw_plan_dft_2d`, `fftw_execute`, etc.).
+- `Debug` impl on all public plan types.
+- `#[must_use]` on all plan creation methods returning `Option<Plan...>`.
+
+### Improvements
+
+- Reduced crate-level `#[allow(clippy::...)]` from 60 to under 30 by fixing underlying lint sites.
+- Hardened FFAST sparse FFT peeling decoder for edge cases (k=0, k=n, pure noise).
+- Added property-based tests for sparse FFT and all DCT/DST variants.
+
+### Fixes
+
+- Eliminated 6 runtime panics reachable from public API (4 `todo!()` + 2 `unimplemented!()`).
+- Removed dead `#[allow(dead_code)]` attributes in production code.
+
 ## [0.1.4] - 2026-04-11
 
 ### Added
@@ -305,7 +339,7 @@ _No unreleased changes._
   - Clippy and rustfmt checks
   - Documentation build verification
   - Benchmark workflow
-- Dual licensing (MIT OR Apache-2.0)
+- Apache-2.0 licensing
 - Pure Rust implementation (100% Rust for default features)
 - `no_std` support (with `std` feature flag)
 
@@ -369,7 +403,8 @@ _No unreleased changes._
 - wasm-bindgen 0.2 (WebAssembly bindings)
 - js-sys 0.3 (JavaScript interop)
 
-[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cool-japan/oxifft/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/cool-japan/oxifft/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cool-japan/oxifft/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/cool-japan/oxifft/compare/v0.1.1...v0.1.2

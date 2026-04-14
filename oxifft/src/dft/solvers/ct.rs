@@ -19,6 +19,7 @@ use super::simd_butterfly::dit_butterflies_f64;
 
 /// Cooley-Tukey variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CtVariant {
     /// Decimation-in-Time: input is bit-reversed, output is in order
     Dit,
@@ -80,19 +81,19 @@ impl<T: Float> CooleyTukeySolver<T> {
     /// Check if size is a power of 8 (suitable for radix-8).
     #[must_use]
     pub fn is_power_of_8(n: usize) -> bool {
-        n > 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(3)
+        n.is_power_of_two() && n.trailing_zeros().is_multiple_of(3)
     }
 
     /// Check if size is a power of 4 (suitable for radix-4).
     #[must_use]
     pub fn is_power_of_4(n: usize) -> bool {
-        n > 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(2)
+        n.is_power_of_two() && n.trailing_zeros().is_multiple_of(2)
     }
 
     /// Check if size is a power of 2.
     #[must_use]
     pub fn applicable(n: usize) -> bool {
-        n > 0 && (n & (n - 1)) == 0
+        n.is_power_of_two()
     }
 
     /// Execute the Cooley-Tukey FFT.
@@ -411,10 +412,8 @@ impl<T: Float> CooleyTukeySolver<T> {
         let log_n = n.trailing_zeros() as usize;
         let sign_val = T::from_isize(sign.value() as isize);
 
-        let mut s = 0; // Current stage (in terms of radix-2 stages)
-
         // If log_n is odd, do one radix-2 stage first
-        if log_n % 2 == 1 {
+        let mut s = if log_n % 2 == 1 {
             let m = 2;
             // Radix-2 butterflies for size 2
             for k in (0..n).step_by(m) {
@@ -423,8 +422,10 @@ impl<T: Float> CooleyTukeySolver<T> {
                 data[k] = u + v;
                 data[k + 1] = u - v;
             }
-            s = 1;
-        }
+            1
+        } else {
+            0
+        };
 
         // Radix-4 stages: each combines stages s, s+1 (which would be m=2^s and m=2^(s+1))
         // After the combined stage, s += 2

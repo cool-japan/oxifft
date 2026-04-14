@@ -13,22 +13,19 @@ use crate::kernel::{Complex, Float};
 /// GPU memory buffer.
 ///
 /// Manages memory allocation and data transfer between CPU and GPU.
+/// All actual GPU I/O is handled inside `plan::execute()` via RAII types;
+/// this struct serves only as a CPU staging buffer.
 #[derive(Debug)]
 pub struct GpuBuffer<T: Float> {
     /// Size of the buffer in elements.
     size: usize,
     /// Backend type.
     backend: GpuBackend,
-    /// CPU-side data (for fallback/staging).
+    /// CPU-side staging data; populated/consumed by plan::execute().
     cpu_data: Vec<Complex<T>>,
-    /// GPU device pointer (opaque, backend-specific).
-    #[cfg(feature = "cuda")]
-    cuda_ptr: Option<*mut core::ffi::c_void>,
-    #[cfg(feature = "metal")]
-    metal_buffer: Option<super::metal::MetalBufferHandle>,
 }
 
-// Safety: GPU pointers are managed by the backend and are thread-safe
+// Safety: GpuBuffer only contains a Vec (which is Send+Sync) and plain data.
 unsafe impl<T: Float> Send for GpuBuffer<T> {}
 unsafe impl<T: Float> Sync for GpuBuffer<T> {}
 
@@ -45,10 +42,6 @@ impl<T: Float> GpuBuffer<T> {
             size,
             backend,
             cpu_data,
-            #[cfg(feature = "cuda")]
-            cuda_ptr: None,
-            #[cfg(feature = "metal")]
-            metal_buffer: None,
         })
     }
 
@@ -76,6 +69,9 @@ impl<T: Float> GpuBuffer<T> {
     }
 
     /// Upload data from CPU to GPU.
+    ///
+    /// Copies `data` into the CPU staging buffer.  The actual GPU transfer
+    /// happens inside `plan::execute()`.
     pub fn upload(&mut self, data: &[Complex<T>]) -> GpuResult<()> {
         if data.len() != self.size {
             return Err(GpuError::SizeMismatch {
@@ -83,53 +79,15 @@ impl<T: Float> GpuBuffer<T> {
                 got: data.len(),
             });
         }
-
-        // Copy to CPU staging buffer
+        // Copy to CPU staging buffer; GPU transfer happens inside plan::execute().
         self.cpu_data.copy_from_slice(data);
-
-        // Upload to GPU based on backend
-        match self.backend {
-            GpuBackend::Cuda => {
-                #[cfg(feature = "cuda")]
-                {
-                    self.upload_cuda()?;
-                    Ok(())
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    return Err(GpuError::NoBackendAvailable);
-                }
-            }
-            GpuBackend::Metal => {
-                #[cfg(feature = "metal")]
-                {
-                    self.upload_metal()?;
-                    Ok(())
-                }
-                #[cfg(not(feature = "metal"))]
-                {
-                    return Err(GpuError::NoBackendAvailable);
-                }
-            }
-            GpuBackend::Auto => {
-                // Use first available backend
-                #[cfg(feature = "cuda")]
-                if super::cuda::is_available() {
-                    self.upload_cuda()?;
-                    return Ok(());
-                }
-                #[cfg(feature = "metal")]
-                if super::metal::is_available() {
-                    self.upload_metal()?;
-                    return Ok(());
-                }
-                Err(GpuError::NoBackendAvailable)
-            }
-            _ => Err(GpuError::Unsupported("Backend not implemented".into())),
-        }
+        Ok(())
     }
 
     /// Download data from GPU to CPU.
+    ///
+    /// Copies from the CPU staging buffer (populated by `plan::execute()`) into
+    /// `data`.
     pub fn download(&mut self, data: &mut [Complex<T>]) -> GpuResult<()> {
         if data.len() != self.size {
             return Err(GpuError::SizeMismatch {
@@ -137,50 +95,9 @@ impl<T: Float> GpuBuffer<T> {
                 got: data.len(),
             });
         }
-
-        // Download from GPU based on backend
-        match self.backend {
-            GpuBackend::Cuda => {
-                #[cfg(feature = "cuda")]
-                {
-                    self.download_cuda()?;
-                    data.copy_from_slice(&self.cpu_data);
-                    Ok(())
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    return Err(GpuError::NoBackendAvailable);
-                }
-            }
-            GpuBackend::Metal => {
-                #[cfg(feature = "metal")]
-                {
-                    self.download_metal()?;
-                    data.copy_from_slice(&self.cpu_data);
-                    Ok(())
-                }
-                #[cfg(not(feature = "metal"))]
-                {
-                    return Err(GpuError::NoBackendAvailable);
-                }
-            }
-            GpuBackend::Auto => {
-                #[cfg(feature = "cuda")]
-                if super::cuda::is_available() {
-                    self.download_cuda()?;
-                    data.copy_from_slice(&self.cpu_data);
-                    return Ok(());
-                }
-                #[cfg(feature = "metal")]
-                if super::metal::is_available() {
-                    self.download_metal()?;
-                    data.copy_from_slice(&self.cpu_data);
-                    return Ok(());
-                }
-                Err(GpuError::NoBackendAvailable)
-            }
-            _ => Err(GpuError::Unsupported("Backend not implemented".into())),
-        }
+        // CPU staging buffer is populated by plan::execute(); copy out.
+        data.copy_from_slice(&self.cpu_data);
+        Ok(())
     }
 
     /// Get a reference to the CPU staging data.
@@ -193,44 +110,11 @@ impl<T: Float> GpuBuffer<T> {
     pub fn cpu_data_mut(&mut self) -> &mut [Complex<T>] {
         &mut self.cpu_data
     }
-
-    #[cfg(feature = "cuda")]
-    fn upload_cuda(&mut self) -> GpuResult<()> {
-        // CUDA upload implementation
-        super::cuda::upload_buffer(self)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn download_cuda(&mut self) -> GpuResult<()> {
-        // CUDA download implementation
-        super::cuda::download_buffer(self)
-    }
-
-    #[cfg(feature = "metal")]
-    fn upload_metal(&mut self) -> GpuResult<()> {
-        // Metal upload implementation
-        super::metal::upload_buffer(self)
-    }
-
-    #[cfg(feature = "metal")]
-    fn download_metal(&mut self) -> GpuResult<()> {
-        // Metal download implementation
-        super::metal::download_buffer(self)
-    }
 }
 
 impl<T: Float> Drop for GpuBuffer<T> {
     fn drop(&mut self) {
-        // Free GPU memory based on backend
-        #[cfg(feature = "cuda")]
-        if let Some(ptr) = self.cuda_ptr.take() {
-            let _ = super::cuda::free_buffer(ptr);
-        }
-
-        #[cfg(feature = "metal")]
-        if let Some(handle) = self.metal_buffer.take() {
-            let _ = super::metal::free_buffer(handle);
-        }
+        // GPU memory is managed inside plan::execute() via RAII types.
     }
 }
 

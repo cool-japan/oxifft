@@ -1,20 +1,16 @@
 //! Data distribution types for distributed FFT.
 
 /// How data is distributed across processes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Distribution {
     /// Slab decomposition (1D distribution along first dimension).
     /// Each process owns a contiguous block of rows.
+    #[default]
     Slab,
     /// Pencil decomposition (2D distribution).
     /// Used for 3D transforms with more parallelism.
     Pencil,
-}
-
-impl Default for Distribution {
-    fn default() -> Self {
-        Self::Slab
-    }
 }
 
 /// Describes the local partition of data owned by a process.

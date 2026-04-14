@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 /// Pruning mode specification.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PruningMode {
     /// Only specified inputs are non-zero.
     InputPruned {

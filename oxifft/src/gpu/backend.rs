@@ -8,6 +8,7 @@ use alloc::string::String;
 
 /// GPU backend type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum GpuBackend {
     /// Automatically select best available backend.
     Auto,

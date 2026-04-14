@@ -11,6 +11,10 @@ documentation = "https://docs.rs/oxifft"
 readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
+exclude = [
+    "tests/*.proptest-regressions",
+    "benches/*.proptest-regressions",
+]
 
 [dependencies]
 num-complex.workspace = true
@@ -26,7 +30,10 @@ mpi = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-oxifft-codegen = { version = "0.1.4", path = "../oxifft-codegen" }
+oxifft-codegen = { version = "0.2.0", path = "../oxifft-codegen" }
+oxicuda-driver = { workspace = true, optional = true }
+oxicuda-fft = { workspace = true, optional = true }
+oxicuda-metal = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
@@ -62,13 +69,15 @@ streaming = []
 # Compile-time FFT with const generics
 const-fft = []
 # GPU support (CUDA backend for NVIDIA GPUs)
-cuda = []
+cuda = ["dep:oxicuda-driver", "dep:oxicuda-fft"]
 # GPU support (Metal backend for Apple GPUs)
-metal = []
+metal = ["dep:oxicuda-metal"]
 # GPU support (enables both CUDA and Metal when available)
-gpu = []
+gpu = ["cuda", "metal"]
 # Signal processing: Hilbert transform, PSD (Welch's method), cepstral analysis
 signal = ["std"]
+# FFTW-compatible API surface (thin wrappers with FFTW-style names)
+fftw-compat = []
 
 [lints]
 workspace = true

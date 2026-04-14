@@ -40,8 +40,15 @@ use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
 
+pub mod nufft2d;
+pub mod nufft3d;
+
+pub use nufft2d::{nufft2d_type1, nufft2d_type2};
+pub use nufft3d::nufft3d_type1;
+
 /// NUFFT type specifying the direction of transformation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NufftType {
     /// Type 1: Non-uniform to uniform (adjoint NUFFT).
     /// Given values at non-uniform points, compute uniform Fourier coefficients.
@@ -80,6 +87,7 @@ impl Default for NufftOptions {
 
 /// NUFFT error types.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum NufftError {
     /// Invalid input size.
     InvalidSize(usize),
@@ -420,14 +428,14 @@ impl<T: Float> Nufft<T> {
 }
 
 /// Compute kernel width based on desired tolerance.
-fn compute_kernel_width(tolerance: f64, default: usize) -> usize {
+pub(crate) fn compute_kernel_width(tolerance: f64, default: usize) -> usize {
     // Empirical formula: width ≈ -log10(tolerance) + 2
     let width = (-tolerance.log10() + 2.0).ceil() as usize;
     width.max(4).min(default.max(12))
 }
 
 /// Find next "smooth" number (product of small primes) for efficient FFT.
-fn next_smooth_number(n: usize) -> usize {
+pub(crate) fn next_smooth_number(n: usize) -> usize {
     // Find next number that's a product of 2, 3, 5
     let mut candidate = n;
     loop {
@@ -449,7 +457,7 @@ fn next_smooth_number(n: usize) -> usize {
 }
 
 /// Precompute spreading coefficients using Gaussian kernel.
-fn precompute_spreading_coeffs<T: Float>(
+pub(crate) fn precompute_spreading_coeffs<T: Float>(
     points: &[f64],
     n_grid: usize,
     kernel_width: usize,
@@ -497,7 +505,7 @@ fn precompute_spreading_coeffs<T: Float>(
 }
 
 /// Precompute deconvolution factors.
-fn precompute_deconv_factors<T: Float>(
+pub(crate) fn precompute_deconv_factors<T: Float>(
     n_uniform: usize,
     n_oversampled: usize,
     kernel_width: usize,

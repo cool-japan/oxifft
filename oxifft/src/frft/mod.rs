@@ -50,6 +50,7 @@ use crate::kernel::{Complex, Float};
 
 /// Fractional Fourier Transform error types.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum FrftError {
     /// Invalid input size.
     InvalidSize(usize),

@@ -40,51 +40,51 @@ impl<T: Float> SubSolver<T> {
     /// Create a sub-solver for the given size.
     fn new(n: usize) -> Self {
         match n {
-            0 | 1 => SubSolver::Identity,
-            3 | 5 | 7 => SubSolver::Codelet(n),
-            n if n > 0 && (n & (n - 1)) == 0 => SubSolver::CooleyTukey,
+            0 | 1 => Self::Identity,
+            3 | 5 | 7 => Self::Codelet(n),
+            n if n.is_power_of_two() => Self::CooleyTukey,
             n if GenericSolver::<T>::applicable(n) => {
-                SubSolver::Generic(Box::new(GenericSolver::new(n)))
+                Self::Generic(Box::new(GenericSolver::new(n)))
             }
-            n if n <= 13 => SubSolver::Direct,
-            n => SubSolver::Bluestein(Box::new(BluesteinSolver::new(n))),
+            n if n <= 13 => Self::Direct,
+            n => Self::Bluestein(Box::new(BluesteinSolver::new(n))),
         }
     }
 
     /// Execute DFT using the cached solver.
     fn execute(&self, input: &[Complex<T>], output: &mut [Complex<T>], sign: Sign) {
         match self {
-            SubSolver::Identity => {
+            Self::Identity => {
                 if !input.is_empty() {
                     output[0] = input[0];
                 }
             }
-            SubSolver::Codelet(3) => {
+            Self::Codelet(3) => {
                 output[..3].copy_from_slice(&input[..3]);
                 let sign_int = if sign == Sign::Forward { -1 } else { 1 };
                 notw_3(output, sign_int);
             }
-            SubSolver::Codelet(5) => {
+            Self::Codelet(5) => {
                 output[..5].copy_from_slice(&input[..5]);
                 let sign_int = if sign == Sign::Forward { -1 } else { 1 };
                 notw_5(output, sign_int);
             }
-            SubSolver::Codelet(7) => {
+            Self::Codelet(7) => {
                 output[..7].copy_from_slice(&input[..7]);
                 let sign_int = if sign == Sign::Forward { -1 } else { 1 };
                 notw_7(output, sign_int);
             }
-            SubSolver::Codelet(_) => unreachable!(),
-            SubSolver::CooleyTukey => {
+            Self::Codelet(_) => unreachable!(),
+            Self::CooleyTukey => {
                 CooleyTukeySolver::default().execute(input, output, sign);
             }
-            SubSolver::Generic(solver) => {
+            Self::Generic(solver) => {
                 solver.execute(input, output, sign);
             }
-            SubSolver::Bluestein(solver) => {
+            Self::Bluestein(solver) => {
                 solver.execute(input, output, sign);
             }
-            SubSolver::Direct => {
+            Self::Direct => {
                 DirectSolver::new().execute(input, output, sign);
             }
         }

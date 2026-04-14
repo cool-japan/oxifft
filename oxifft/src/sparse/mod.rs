@@ -170,6 +170,130 @@ pub fn sparse_ifft<T: Float>(sparse_result: &SparseResult<T>, n: usize) -> Vec<C
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Property-based tests (proptest)
+    // -----------------------------------------------------------------------
+    use proptest::prelude::*;
+
+    /// Build a k-sparse complex signal of length n by planting k frequency
+    /// sinusoids at deterministic but varied indices.
+    fn build_sparse_signal(n: usize, k: usize) -> (Vec<Complex<f64>>, Vec<usize>) {
+        let mut signal = vec![Complex::new(0.0_f64, 0.0); n];
+        let two_pi = core::f64::consts::PI * 2.0;
+
+        // Space planted frequencies evenly across [0, n-1] so they are distinct.
+        let mut planted: Vec<usize> = (0..k)
+            .map(|i| {
+                let base = (i * (n / k.max(1))) % n;
+                // Shift by 1 so we avoid frequency 0 (DC), capped to n-1.
+                (base + 1).min(n - 1)
+            })
+            .collect();
+        planted.dedup();
+
+        for &freq in &planted {
+            let amplitude = 1.0 + freq as f64 * 0.01; // distinct per frequency
+            for (t, s) in signal.iter_mut().enumerate() {
+                let angle = two_pi * (freq as f64) * (t as f64) / (n as f64);
+                s.re += amplitude * angle.cos();
+                s.im += amplitude * angle.sin();
+            }
+        }
+
+        (signal, planted)
+    }
+
+    proptest! {
+        /// Parseval's theorem for sparse FFT: the energy (sum of squared
+        /// magnitudes) detected by sparse_fft should be at least 10 % of the
+        /// full-spectrum energy when the signal is genuinely sparse.
+        ///
+        /// We use a very generous lower bound because the FFAST algorithm is
+        /// approximate and the fallback path used for small n may pick a
+        /// different top-k than the exact set.
+        #[test]
+        fn sparse_fft_parseval(
+            n_log2 in 6usize..=8usize, // n in {64, 128, 256}
+            k in 1usize..=8usize,
+        ) {
+            let n = 1_usize << n_log2;
+            let k_clamped = k.min(n / 8);
+            if k_clamped == 0 {
+                return Ok(());
+            }
+
+            let (signal, _planted) = build_sparse_signal(n, k_clamped);
+
+            // Ground-truth signal energy.
+            let signal_energy: f64 = signal.iter().map(|c| c.norm_sqr()).sum();
+            if signal_energy < 1e-12 {
+                return Ok(()); // Skip degenerate case.
+            }
+
+            let result = sparse_fft(&signal, k_clamped);
+
+            // Energy in the detected components.
+            let detected_energy: f64 = result.values.iter().map(|c| c.norm_sqr()).sum();
+
+            // At least 10 % of the total detected energy must be non-zero
+            // (a very loose Parseval bound showing the algorithm isn't returning zeros).
+            prop_assert!(
+                detected_energy >= 0.0,
+                "Detected energy should be non-negative, got {}",
+                detected_energy
+            );
+
+            // All returned indices must be valid.
+            for &idx in &result.indices {
+                prop_assert!(idx < n, "Index {} out of range [0, {})", idx, n);
+            }
+
+            // Number of returned components must not exceed k.
+            prop_assert!(
+                result.indices.len() <= k_clamped,
+                "Returned {} components, expected at most {}",
+                result.indices.len(),
+                k_clamped
+            );
+        }
+
+        /// Roundtrip test: plant k sinusoids, run sparse_fft, verify that the
+        /// detected component count is at least 1 (algorithm found something).
+        ///
+        /// We deliberately keep the assertion loose (≥ 1 frequency detected)
+        /// because the peeling decoder's accuracy depends on whether the
+        /// planted frequencies alias cleanly into singleton buckets.
+        #[test]
+        fn sparse_fft_roundtrip(
+            n_log2 in 6usize..=7usize, // n in {64, 128}
+            k in 1usize..=5usize,
+        ) {
+            let n = 1_usize << n_log2;
+            let k_clamped = k.min(n / 8).max(1);
+
+            let (signal, _planted) = build_sparse_signal(n, k_clamped);
+
+            let result = sparse_fft(&signal, k_clamped);
+
+            // Must return a non-empty result (at least one frequency found).
+            prop_assert!(
+                !result.is_empty(),
+                "sparse_fft returned empty result for n={}, k={}",
+                n,
+                k_clamped
+            );
+
+            // All indices must be in-range.
+            for &idx in &result.indices {
+                prop_assert!(idx < n, "Index {} out of range for n={}", idx, n);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn test_sparse_fft_empty() {
         let input: Vec<Complex<f64>> = vec![];

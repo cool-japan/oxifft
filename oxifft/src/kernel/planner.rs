@@ -35,6 +35,7 @@ pub struct WisdomEntry {
 
 /// Solver selection strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SolverChoice {
     /// No-op for size 0 or 1
     Nop,
@@ -341,7 +342,7 @@ impl<T: Float> Planner<T> {
             // PATIENT mode: also try specialized radix variants
             if patient_or_exhaustive {
                 // Radix-4 requires n to be a power of 4
-                if n >= 4 && (n & (n - 1)) == 0 && is_power_of_4(n) {
+                if n >= 4 && is_power_of_4(n) {
                     candidates.push(SolverChoice::CooleyTukeyRadix4);
                 }
                 // Radix-8 requires n to be a power of 8
@@ -754,36 +755,46 @@ impl<T: Float> Planner<T> {
 
     /// Import wisdom from string.
     ///
+    /// Accepts both the legacy `(oxifft-wisdom-1.0 …)` header (format version 0)
+    /// and the current `(oxifft-wisdom …)` header with an embedded
+    /// `(format_version N)` line (format version ≥ 1).
+    ///
     /// # Errors
-    /// Returns error if wisdom format is invalid.
+    /// Returns `Err` if the string does not start with a recognised
+    /// `oxifft-wisdom` header.
     pub fn wisdom_import(&mut self, s: &str) -> Result<usize, &'static str> {
-        // Simple parser for wisdom format
+        // Accept both "(oxifft-wisdom-1.0" (legacy) and "(oxifft-wisdom" (v1+).
         let s = s.trim();
-        if !s.starts_with("(oxifft-wisdom-1.0") {
+        if !s.starts_with("(oxifft-wisdom") {
             return Err("Invalid wisdom format: missing header");
         }
 
         let mut count = 0;
         for line in s.lines().skip(1) {
             let line = line.trim();
-            if line.starts_with('(') && line.ends_with(')') && !line.starts_with("(oxifft") {
-                // Parse: (hash "solver" cost)
-                let inner = &line[1..line.len() - 1];
-                let parts: Vec<&str> = inner.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    if let Ok(hash) = parts[0].parse::<u64>() {
-                        let solver_name = parts[1].trim_matches('"').to_string();
-                        if let Ok(cost) = parts[2].parse::<f64>() {
-                            self.wisdom.insert(
-                                hash,
-                                WisdomEntry {
-                                    problem_hash: hash,
-                                    solver_name,
-                                    cost,
-                                },
-                            );
-                            count += 1;
-                        }
+            // Skip header lines (including "(format_version N)") and closing ")".
+            if !line.starts_with('(') || !line.ends_with(')') {
+                continue;
+            }
+            if line.starts_with("(oxifft") || line.starts_with("(format_version ") {
+                continue;
+            }
+            // Parse: (hash "solver" cost)
+            let inner = &line[1..line.len() - 1];
+            let parts: Vec<&str> = inner.split_whitespace().collect();
+            if parts.len() >= 3 {
+                if let Ok(hash) = parts[0].parse::<u64>() {
+                    let solver_name = parts[1].trim_matches('"').to_string();
+                    if let Ok(cost) = parts[2].parse::<f64>() {
+                        self.wisdom.insert(
+                            hash,
+                            WisdomEntry {
+                                problem_hash: hash,
+                                solver_name,
+                                cost,
+                            },
+                        );
+                        count += 1;
                     }
                 }
             }
@@ -859,18 +870,19 @@ fn solver_from_name(name: &str) -> SolverChoice {
 /// Check if n is a power of 4.
 #[cfg(feature = "std")]
 fn is_power_of_4(n: usize) -> bool {
-    n != 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(2)
+    n.is_power_of_two() && n.trailing_zeros().is_multiple_of(2)
 }
 
 /// Check if n is a power of 8.
 #[cfg(feature = "std")]
 fn is_power_of_8(n: usize) -> bool {
-    n != 0 && (n & (n - 1)) == 0 && n.trailing_zeros().is_multiple_of(3)
+    n.is_power_of_two() && n.trailing_zeros().is_multiple_of(3)
 }
 
 /// Batch execution strategy.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BatchStrategy {
     /// Execute each batch independently with the optimal 1D solver
     Simple,

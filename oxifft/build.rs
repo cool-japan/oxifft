@@ -1,0 +1,33 @@
+//! `OxiFFT` build script.
+//!
+//! This build script emits compile-time warnings when features that introduce
+//! C or Fortran dependencies are enabled, so downstream users are aware that
+//! those features break the "Pure Rust" guarantee.
+
+fn main() {
+    // Detect features that pull in C/Fortran dependencies and warn the user.
+    let mpi_enabled = std::env::var("CARGO_FEATURE_MPI").is_ok();
+    let sve_enabled = std::env::var("CARGO_FEATURE_SVE").is_ok();
+
+    if mpi_enabled {
+        println!(
+            "cargo:warning=\
+oxifft: the `mpi` feature links against the system MPI library (C/Fortran), \
+which violates the Pure Rust policy for default builds. \
+This feature is provided for distributed computing and is explicitly \
+feature-gated. No pure-Rust MPI implementation currently exists. \
+See https://github.com/cool-japan/oxifft/blob/master/README.md#mpi for details."
+        );
+    }
+
+    if sve_enabled {
+        println!(
+            "cargo:warning=\
+oxifft: the `sve` feature uses the `libc` crate for ARM SVE HWCAP detection. \
+`libc` itself is pure Rust (it uses inline assembly / syscalls), but it \
+provides C-compatible types and is considered a C-boundary crate. \
+A future release will replace this with `std::arch` when SVE intrinsics \
+stabilise in the Rust standard library."
+        );
+    }
+}

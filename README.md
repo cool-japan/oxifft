@@ -39,9 +39,11 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 ## Project Status
 
 ✅ **Core FFT functionality is COMPLETE**
-✅ **688 tests passing** (all features, 4 stress tests skipped)
+✅ **858 tests passing** (all features, stress tests validated)
 ✅ **Zero clippy warnings** (all features)
 ✅ **Performance optimized** (9/15 composite sizes faster than RustFFT)
+✅ **688 public API items** documented and tested
+✅ **54K+ lines of code** across 3 crates (43,505 SLoC)
 
 See [PROJECT_STATUS.md](./PROJECT_STATUS.md) for comprehensive status, [oxifft.md](./oxifft.md) for architecture blueprint, and [TODO.md](./TODO.md) for detailed roadmap.
 
@@ -321,7 +323,7 @@ num-traits = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 seahash = "4.1"
-rayon = { version = "1.11", optional = true }
+rayon = { version = "1.12", optional = true }
 mpi = { version = "0.8", optional = true }
 libc = { version = "0.2", optional = true }
 
@@ -344,6 +346,7 @@ cuda = []
 metal = []
 gpu = []
 signal = ["std"]   # Signal processing (Hilbert, Welch PSD, cepstrum)
+fftw-compat = []   # FFTW-compatible API surface
 ```
 
 ## Documentation
@@ -368,8 +371,6 @@ signal = ["std"]   # Signal processing (Hilbert, Welch PSD, cepstrum)
 
 ### Benchmark Reports
 
-- **[BENCHMARK_INVESTIGATION_SUMMARY.md](BENCHMARK_INVESTIGATION_SUMMARY.md)** - Investigation of benchmark methodology bugs (2026-01-07)
-- **[benchmark_results_2026-01-07_CORRECTED.md](benchmark_results_2026-01-07_CORRECTED.md)** - Corrected benchmark results vs RustFFT
 - **[BENCHMARK_RESULTS_TEMPLATE.md](BENCHMARK_RESULTS_TEMPLATE.md)** - Template for documenting benchmark results
 
 ## References

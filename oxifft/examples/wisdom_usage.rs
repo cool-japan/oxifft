@@ -8,7 +8,7 @@
 
 use oxifft::api::{
     export_to_file, export_to_string, fft, forget, import_from_file, import_from_string,
-    store_wisdom, wisdom_count,
+    merge_from_string, store_wisdom, wisdom_count, WISDOM_FORMAT_VERSION,
 };
 use oxifft::kernel::WisdomEntry;
 use std::path::Path;
@@ -52,8 +52,11 @@ fn main() {
     forget();
     println!("\nAfter forget: {} entries", wisdom_count());
 
-    let count = import_from_string(&wisdom_str).expect("Failed to import wisdom");
-    println!("Imported {count} entries from string");
+    let result = import_from_string(&wisdom_str).expect("Failed to import wisdom");
+    println!(
+        "Imported {} entries from string (format v{})",
+        result.imported, result.format_version
+    );
     println!("Current wisdom count: {}", wisdom_count());
 
     // ========================
@@ -73,8 +76,8 @@ fn main() {
     println!("After forget: {} entries", wisdom_count());
 
     match import_from_file(wisdom_path) {
-        Ok(count) => {
-            println!("Imported {count} entries from file");
+        Ok(result) => {
+            println!("Imported {} entries from file", result.imported);
             println!("Current wisdom count: {}", wisdom_count());
         }
         Err(e) => {
@@ -133,18 +136,48 @@ fn main() {
 
     forget();
 
-    // Try to import wisdom with wrong version
-    let old_wisdom = "(oxifft-wisdom-0.9\n  (12345 \"ct-dit\" 100.0)\n)";
-    match import_from_string(old_wisdom) {
-        Ok(_) => println!("Imported old wisdom (unexpected)"),
-        Err(e) => println!("Rejected old wisdom format: {e}"),
+    // Legacy format (oxifft-wisdom-1.0 header) is accepted as format version 0.
+    let legacy_wisdom = "(oxifft-wisdom-1.0\n  (12345 \"ct-dit\" 100.0)\n)";
+    match import_from_string(legacy_wisdom) {
+        Ok(r) => println!(
+            "Imported {} entries from legacy format (format v{})",
+            r.imported, r.format_version
+        ),
+        Err(e) => println!("Error importing legacy wisdom: {e}"),
     }
 
-    // Correct format
-    let good_wisdom = "(oxifft-wisdom-1.0\n  (12345 \"ct-dit\" 100.0)\n)";
-    match import_from_string(good_wisdom) {
-        Ok(count) => println!("Imported {count} entries from correct format"),
-        Err(e) => println!("Error: {e}"),
+    // Future format (format_version higher than current) is rejected.
+    let future_version = WISDOM_FORMAT_VERSION + 1;
+    let future_wisdom = format!(
+        "(oxifft-wisdom\n  (format_version {future_version})\n  (12345 \"ct-dit\" 100.0)\n)"
+    );
+    match import_from_string(&future_wisdom) {
+        Ok(_) => println!("Accepted future wisdom (unexpected)"),
+        Err(e) => println!("Correctly rejected future format: {e}"),
+    }
+
+    // ========================
+    // Merge demonstration
+    // ========================
+    println!("\n--- Merge Demonstration ---\n");
+
+    forget();
+    store_wisdom(oxifft::kernel::WisdomEntry {
+        problem_hash: 12345,
+        solver_name: "ct-dit".to_string(),
+        cost: 200.0,
+    });
+
+    // Merge with data that contains a better entry for hash 12345.
+    let better_wisdom = format!(
+        "(oxifft-wisdom\n  (format_version {WISDOM_FORMAT_VERSION})\n  (12345 \"stockham\" 50.0)\n  (99999 \"rader\" 30.0)\n)"
+    );
+    match merge_from_string(&better_wisdom) {
+        Ok(m) => println!(
+            "Merge result: added={}, replaced={}, kept_existing={}",
+            m.added, m.replaced, m.kept_existing
+        ),
+        Err(e) => println!("Merge error: {e}"),
     }
 
     println!("\nFinal wisdom count: {}", wisdom_count());

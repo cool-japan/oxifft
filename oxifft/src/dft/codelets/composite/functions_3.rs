@@ -2,6 +2,8 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+#![allow(clippy::unreadable_literal)] // Precomputed FFT twiddle factors
+
 use crate::kernel::{Complex, Float};
 
 use super::functions::{dft25, dft5, dft9};

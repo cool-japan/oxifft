@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 /// Window function for spectral analysis.
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SpectralWindow {
     /// Rectangular (no windowing)
     Rectangular,

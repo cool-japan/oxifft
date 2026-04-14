@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 /// Filter type for sparse FFT subsampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FilterType {
     /// Flat (box) filter - simple but has spectral leakage.
     Flat,

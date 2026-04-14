@@ -3,6 +3,8 @@
 //! Codelets are highly optimized kernels for specific transform sizes,
 //! generated at compile time via procedural macros.
 
+#[cfg(test)]
+mod codegen_tests;
 mod composite;
 mod notw;
 pub mod simd;

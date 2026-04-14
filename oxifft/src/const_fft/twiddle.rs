@@ -3,6 +3,8 @@
 //! Uses Taylor series approximations for sin and cos that can be computed
 //! at compile time (in const context).
 
+#![allow(clippy::unreadable_literal)] // Taylor series constants for const FFT computation
+
 use core::f64::consts::PI;
 
 /// Compute cosine using Taylor series.

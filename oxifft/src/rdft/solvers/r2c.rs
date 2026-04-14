@@ -11,6 +11,7 @@
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
+use crate::rdft::codelets::{r2hc_4, r2hc_8};
 
 /// Real-to-Complex FFT solver.
 ///
@@ -95,6 +96,16 @@ impl<T: Float> R2cSolver<T> {
         if n == 2 {
             output[0] = Complex::new(input[0] + input[1], T::ZERO);
             output[1] = Complex::new(input[0] - input[1], T::ZERO);
+            return;
+        }
+
+        if n == 4 {
+            r2hc_4(input, output);
+            return;
+        }
+
+        if n == 8 {
+            r2hc_8(input, output);
             return;
         }
 
@@ -241,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_r2c_size_8() {
-        let input: Vec<f64> = (0..8).map(|i| f64::from(i)).collect();
+        let input: Vec<f64> = (0..8).map(f64::from).collect();
         let mut output = vec![Complex::zero(); 5];
 
         R2cSolver::new(8).execute(&input, &mut output);

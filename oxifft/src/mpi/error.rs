@@ -4,6 +4,7 @@ use core::fmt;
 
 /// Error type for MPI FFT operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MpiError {
     /// Invalid dimension specification.
     InvalidDimension {

@@ -78,8 +78,8 @@ pub fn hilbert<T: Float>(signal: &[T]) -> Vec<Complex<T>> {
         }
         // DC (0) and Nyquist (half) are left unchanged.
     } else {
-        let pos_end = (n + 1) / 2; // exclusive upper bound for positive freqs
-                                   // Positive frequencies (excluding DC): double.
+        let pos_end = n.div_ceil(2); // exclusive upper bound for positive freqs
+                                     // Positive frequencies (excluding DC): double.
         for s in spectrum.iter_mut().take(pos_end).skip(1) {
             *s = Complex::new(s.re * two, s.im * two);
         }

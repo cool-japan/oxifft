@@ -23,6 +23,7 @@ use crate::kernel::Float;
 
 /// Window function type.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum WindowFunction {
     /// Rectangular (no windowing).
     Rectangular,

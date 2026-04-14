@@ -116,7 +116,7 @@ impl F16 {
     #[inline]
     #[must_use]
     pub const fn is_zero(self) -> bool {
-        (self.0 & 0x7FFF) == 0
+        self.0.trailing_zeros() >= 15
     }
 
     /// Check if this value is negative (including -0).
@@ -803,7 +803,7 @@ impl num_traits::Zero for F16 {
 
     #[inline]
     fn is_zero(&self) -> bool {
-        F16::is_zero(*self)
+        Self::is_zero(*self)
     }
 }
 
@@ -830,19 +830,19 @@ impl num_traits::NumCast for F16 {
 
 impl num_traits::ToPrimitive for F16 {
     fn to_i64(&self) -> Option<i64> {
-        Some(F16::to_f32(*self) as i64)
+        Some(Self::to_f32(*self) as i64)
     }
 
     fn to_u64(&self) -> Option<u64> {
-        Some(F16::to_f32(*self) as u64)
+        Some(Self::to_f32(*self) as u64)
     }
 
     fn to_f32(&self) -> Option<f32> {
-        Some(F16::to_f32(*self))
+        Some(Self::to_f32(*self))
     }
 
     fn to_f64(&self) -> Option<f64> {
-        Some(F16::to_f64(*self))
+        Some(Self::to_f64(*self))
     }
 }
 
@@ -870,158 +870,158 @@ impl num_traits::Float for F16 {
     }
 
     fn is_nan(self) -> bool {
-        F16::is_nan(self)
+        Self::is_nan(self)
     }
     fn is_infinite(self) -> bool {
-        F16::is_infinite(self)
+        Self::is_infinite(self)
     }
     fn is_finite(self) -> bool {
-        F16::is_finite(self)
+        Self::is_finite(self)
     }
     fn is_normal(self) -> bool {
-        F16::is_normal(self)
+        Self::is_normal(self)
     }
     fn classify(self) -> core::num::FpCategory {
-        F16::classify(self)
+        Self::classify(self)
     }
 
     fn floor(self) -> Self {
-        F16::floor(self)
+        Self::floor(self)
     }
     fn ceil(self) -> Self {
-        F16::ceil(self)
+        Self::ceil(self)
     }
     fn round(self) -> Self {
-        F16::round(self)
+        Self::round(self)
     }
     fn trunc(self) -> Self {
-        F16::trunc(self)
+        Self::trunc(self)
     }
     fn fract(self) -> Self {
-        F16::fract(self)
+        Self::fract(self)
     }
     fn abs(self) -> Self {
-        F16::abs(self)
+        Self::abs(self)
     }
     fn signum(self) -> Self {
-        F16::signum(self)
+        Self::signum(self)
     }
     fn is_sign_positive(self) -> bool {
-        F16::is_sign_positive(self)
+        Self::is_sign_positive(self)
     }
     fn is_sign_negative(self) -> bool {
-        F16::is_sign_negative(self)
+        Self::is_sign_negative(self)
     }
     fn mul_add(self, a: Self, b: Self) -> Self {
-        F16::mul_add(self, a, b)
+        Self::mul_add(self, a, b)
     }
     fn recip(self) -> Self {
-        F16::recip(self)
+        Self::recip(self)
     }
     fn powi(self, n: i32) -> Self {
-        F16::powi(self, n)
+        Self::powi(self, n)
     }
     fn powf(self, n: Self) -> Self {
-        F16::powf(self, n)
+        Self::powf(self, n)
     }
     fn sqrt(self) -> Self {
-        F16::sqrt(self)
+        Self::sqrt(self)
     }
     fn exp(self) -> Self {
-        F16::exp(self)
+        Self::exp(self)
     }
     fn exp2(self) -> Self {
-        F16::exp2(self)
+        Self::exp2(self)
     }
     fn ln(self) -> Self {
-        F16::ln(self)
+        Self::ln(self)
     }
     fn log(self, base: Self) -> Self {
-        F16::log(self, base)
+        Self::log(self, base)
     }
     fn log2(self) -> Self {
-        F16::log2(self)
+        Self::log2(self)
     }
     fn log10(self) -> Self {
-        F16::log10(self)
+        Self::log10(self)
     }
     fn max(self, other: Self) -> Self {
-        F16::max(self, other)
+        Self::max(self, other)
     }
     fn min(self, other: Self) -> Self {
-        F16::min(self, other)
+        Self::min(self, other)
     }
     fn abs_sub(self, other: Self) -> Self {
-        F16::abs_sub(self, other)
+        Self::abs_sub(self, other)
     }
     fn cbrt(self) -> Self {
-        F16::cbrt(self)
+        Self::cbrt(self)
     }
     fn hypot(self, other: Self) -> Self {
-        F16::hypot(self, other)
+        Self::hypot(self, other)
     }
     fn sin(self) -> Self {
-        F16::sin(self)
+        Self::sin(self)
     }
     fn cos(self) -> Self {
-        F16::cos(self)
+        Self::cos(self)
     }
     fn tan(self) -> Self {
-        F16::tan(self)
+        Self::tan(self)
     }
     fn asin(self) -> Self {
-        F16::asin(self)
+        Self::asin(self)
     }
     fn acos(self) -> Self {
-        F16::acos(self)
+        Self::acos(self)
     }
     fn atan(self) -> Self {
-        F16::atan(self)
+        Self::atan(self)
     }
     fn atan2(self, other: Self) -> Self {
-        F16::atan2(self, other)
+        Self::atan2(self, other)
     }
     fn sin_cos(self) -> (Self, Self) {
-        F16::sin_cos(self)
+        Self::sin_cos(self)
     }
     fn exp_m1(self) -> Self {
-        F16::exp_m1(self)
+        Self::exp_m1(self)
     }
     fn ln_1p(self) -> Self {
-        F16::ln_1p(self)
+        Self::ln_1p(self)
     }
     fn sinh(self) -> Self {
-        F16::sinh(self)
+        Self::sinh(self)
     }
     fn cosh(self) -> Self {
-        F16::cosh(self)
+        Self::cosh(self)
     }
     fn tanh(self) -> Self {
-        F16::tanh(self)
+        Self::tanh(self)
     }
     fn asinh(self) -> Self {
-        F16::asinh(self)
+        Self::asinh(self)
     }
     fn acosh(self) -> Self {
-        F16::acosh(self)
+        Self::acosh(self)
     }
     fn atanh(self) -> Self {
-        F16::atanh(self)
+        Self::atanh(self)
     }
     fn integer_decode(self) -> (u64, i16, i8) {
-        F16::to_f32(self).integer_decode()
+        Self::to_f32(self).integer_decode()
     }
     fn epsilon() -> Self {
         Self::EPSILON
     }
     fn to_degrees(self) -> Self {
-        F16::to_degrees(self)
+        Self::to_degrees(self)
     }
     fn to_radians(self) -> Self {
-        F16::to_radians(self)
+        Self::to_radians(self)
     }
     fn copysign(self, sign: Self) -> Self {
-        F16::copysign(self, sign)
+        Self::copysign(self, sign)
     }
 }
 
@@ -1039,7 +1039,7 @@ impl num_traits::FloatConst for F16 {
         Self::TWO / Self::PI
     }
     fn FRAC_2_SQRT_PI() -> Self {
-        Self::TWO / F16::sqrt(Self::PI)
+        Self::TWO / Self::sqrt(Self::PI)
     }
     fn FRAC_PI_2() -> Self {
         Self::FRAC_PI_2
@@ -1089,27 +1089,27 @@ impl super::Float for F16 {
 
     #[inline]
     fn sin(self) -> Self {
-        F16::sin(self)
+        Self::sin(self)
     }
 
     #[inline]
     fn cos(self) -> Self {
-        F16::cos(self)
+        Self::cos(self)
     }
 
     #[inline]
     fn sin_cos(self) -> (Self, Self) {
-        F16::sin_cos(self)
+        Self::sin_cos(self)
     }
 
     #[inline]
     fn sqrt(self) -> Self {
-        F16::sqrt(self)
+        Self::sqrt(self)
     }
 
     #[inline]
     fn abs(self) -> Self {
-        F16::abs(self)
+        Self::abs(self)
     }
 
     #[inline]

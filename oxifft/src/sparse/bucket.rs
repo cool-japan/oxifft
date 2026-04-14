@@ -131,7 +131,7 @@ impl<T: Float> BucketArray<T> {
     /// which buckets contain single frequencies vs collisions.
     pub fn analyze_singletons(
         &mut self,
-        other_stage: &BucketArray<T>,
+        other_stage: &Self,
         threshold: T,
     ) -> Vec<(usize, Complex<T>)> {
         let mut singletons = Vec::new();
@@ -232,11 +232,9 @@ fn estimate_frequency_from_phase<T: Float>(
 
     // Phase of complex number using atan2
     let phase1_f64 = im1.atan2(re1);
-    let phase2_f64 = im2.atan2(re2);
+    let _phase2_f64 = im2.atan2(re2);
 
     // Phase difference corresponds to frequency shift due to subsampling
-    let _phase_diff = phase2_f64 - phase1_f64;
-
     // Use CRT to recover original frequency
     let gcd = gcd_usize(factor1, factor2);
     let lcm = (factor1 * factor2) / gcd;

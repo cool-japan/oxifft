@@ -54,7 +54,7 @@ impl<T: Float> StockhamSolver<T> {
     /// Check if size is a power of 2.
     #[must_use]
     pub fn applicable(n: usize) -> bool {
-        n > 0 && (n & (n - 1)) == 0
+        n.is_power_of_two()
     }
 
     /// Execute Stockham FFT (out-of-place).

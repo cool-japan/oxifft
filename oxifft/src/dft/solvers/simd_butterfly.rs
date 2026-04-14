@@ -143,6 +143,7 @@ pub fn get_twiddles_neon() -> &'static PrecomputedTwiddlesNeon {
 /// NEON is always available on aarch64, no runtime detection needed.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+#[allow(clippy::useless_let_if_seq)]
 unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
     unsafe {
         use core::arch::aarch64::*;
@@ -161,6 +162,7 @@ unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
         // Get precomputed twiddles
         let twiddles = get_twiddles_neon();
 
+        #[allow(clippy::useless_let_if_seq)]
         let mut stage = 0;
         let mut m = 2;
 

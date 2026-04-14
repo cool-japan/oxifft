@@ -13,7 +13,6 @@ use crate::dft::solvers::{
 };
 use crate::kernel::{Complex, Float, Tensor};
 use crate::prelude::*;
-use crate::rdft::solvers::R2rKind;
 
 /// A plan for N-dimensional real-to-complex and complex-to-real transforms.
 pub struct RealPlanND<T: Float> {
@@ -208,6 +207,16 @@ impl<T: Float> RealPlanND<T> {
             }
         }
     }
+    /// Get dims (crate-internal).
+    #[must_use]
+    pub(crate) fn dims(&self) -> &[usize] {
+        &self.dims
+    }
+    /// Get kind (crate-internal).
+    #[must_use]
+    pub(crate) fn plan_kind(&self) -> RealPlanKind {
+        self.kind
+    }
 }
 /// A plan for executing 3D FFT transforms.
 ///
@@ -265,6 +274,21 @@ impl<T: Float> Plan3D<T> {
     #[must_use]
     pub fn direction(&self) -> Direction {
         self.direction
+    }
+    /// Get first dimension (crate-internal use for Debug impl).
+    #[must_use]
+    pub(crate) fn dim0(&self) -> usize {
+        self.n0
+    }
+    /// Get second dimension (crate-internal use for Debug impl).
+    #[must_use]
+    pub(crate) fn dim1(&self) -> usize {
+        self.n1
+    }
+    /// Get third dimension (crate-internal use for Debug impl).
+    #[must_use]
+    pub(crate) fn dim2(&self) -> usize {
+        self.n2
     }
     /// Execute the 3D FFT on the given input/output buffers.
     ///
@@ -336,6 +360,7 @@ impl<T: Float> Plan3D<T> {
 }
 /// Transform kind for real FFT plans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RealPlanKind {
     /// Real to Complex (forward)
     R2C,
@@ -421,6 +446,16 @@ impl<T: Float> SplitPlanND<T> {
         self.execute(real, imag, &mut out_real, &mut out_imag);
         real.copy_from_slice(&out_real);
         imag.copy_from_slice(&out_imag);
+    }
+    /// Get dims (crate-internal).
+    #[must_use]
+    pub(crate) fn dims(&self) -> &[usize] {
+        &self.dims
+    }
+    /// Get direction (crate-internal).
+    #[must_use]
+    pub(crate) fn direction(&self) -> Direction {
+        self.direction
     }
 }
 /// A plan for executing real FFT transforms.
@@ -812,6 +847,21 @@ impl<T: Float> RealPlan2D<T> {
             );
         }
     }
+    /// Get row count (crate-internal).
+    #[must_use]
+    pub(crate) fn rows(&self) -> usize {
+        self.n0
+    }
+    /// Get column count (crate-internal).
+    #[must_use]
+    pub(crate) fn cols(&self) -> usize {
+        self.n1
+    }
+    /// Get kind (crate-internal).
+    #[must_use]
+    pub(crate) fn plan_kind(&self) -> RealPlanKind {
+        self.kind
+    }
 }
 /// A plan for 3D real-to-complex and complex-to-real transforms.
 pub struct RealPlan3D<T: Float> {
@@ -924,6 +974,26 @@ impl<T: Float> RealPlan3D<T> {
             );
         }
     }
+    /// Get first dimension (crate-internal).
+    #[must_use]
+    pub(crate) fn dim0(&self) -> usize {
+        self.n0
+    }
+    /// Get second dimension (crate-internal).
+    #[must_use]
+    pub(crate) fn dim1(&self) -> usize {
+        self.n1
+    }
+    /// Get third dimension (crate-internal).
+    #[must_use]
+    pub(crate) fn dim2(&self) -> usize {
+        self.n2
+    }
+    /// Get kind (crate-internal).
+    #[must_use]
+    pub(crate) fn plan_kind(&self) -> RealPlanKind {
+        self.kind
+    }
 }
 /// Algorithm selection for the plan.
 #[allow(dead_code)]
@@ -1001,6 +1071,7 @@ impl<T: Float> GuruPlan<T> {
     /// - `dims` specifies the transform dimensions (innermost dimensions transform)
     /// - `howmany` specifies the batch dimensions (outermost dimensions iterate)
     /// - Strides can be different for input and output (for in-place: use same strides)
+    #[must_use]
     pub fn dft(
         dims: &Tensor,
         howmany: &Tensor,
@@ -1223,9 +1294,10 @@ impl<T: Float> GuruPlan<T> {
     ///
     /// For in-place execution, input and output strides must be identical.
     pub fn execute_inplace(&self, data: &mut [Complex<T>]) {
-        if !self.dims.is_inplace_compatible() {
-            panic!("In-place execution requires identical input and output strides");
-        }
+        assert!(
+            self.dims.is_inplace_compatible(),
+            "In-place execution requires identical input and output strides"
+        );
         let batch_count = self.batch_count();
         if batch_count == 1 {
             self.execute_inplace_single(data, 0);
@@ -1456,6 +1528,26 @@ impl<T: Float> SplitPlan3D<T> {
         real.copy_from_slice(&out_real);
         imag.copy_from_slice(&out_imag);
     }
+    /// Get direction (crate-internal).
+    #[must_use]
+    pub(crate) fn direction(&self) -> Direction {
+        self.direction
+    }
+    /// Get first dimension (crate-internal).
+    #[must_use]
+    pub(crate) fn dim0(&self) -> usize {
+        self.n0
+    }
+    /// Get second dimension (crate-internal).
+    #[must_use]
+    pub(crate) fn dim1(&self) -> usize {
+        self.n1
+    }
+    /// Get third dimension (crate-internal).
+    #[must_use]
+    pub(crate) fn dim2(&self) -> usize {
+        self.n2
+    }
 }
 /// A plan for executing FFT transforms.
 ///
@@ -1489,26 +1581,30 @@ impl<T: Float> Plan<T> {
         })
     }
     /// Create a 2D complex-to-complex DFT plan.
-    pub fn dft_2d(_n0: usize, _n1: usize, _direction: Direction, _flags: Flags) -> Option<Self> {
-        todo!("Implement dft_2d planning")
+    #[must_use]
+    pub fn dft_2d(n0: usize, n1: usize, direction: Direction, flags: Flags) -> Option<Plan2D<T>> {
+        Plan2D::new(n0, n1, direction, flags)
     }
     /// Create a 3D complex-to-complex DFT plan.
+    #[must_use]
     pub fn dft_3d(
-        _n0: usize,
-        _n1: usize,
-        _n2: usize,
-        _direction: Direction,
-        _flags: Flags,
-    ) -> Option<Self> {
-        todo!("Implement dft_3d planning")
+        n0: usize,
+        n1: usize,
+        n2: usize,
+        direction: Direction,
+        flags: Flags,
+    ) -> Option<Plan3D<T>> {
+        Plan3D::new(n0, n1, n2, direction, flags)
     }
     /// Create a 1D real-to-complex FFT plan.
-    pub fn r2c_1d(_n: usize, _flags: Flags) -> Option<Self> {
-        todo!("Implement r2c_1d planning")
+    #[must_use]
+    pub fn r2c_1d(n: usize, flags: Flags) -> Option<RealPlan<T>> {
+        RealPlan::r2c_1d(n, flags)
     }
     /// Create a 1D complex-to-real FFT plan.
-    pub fn c2r_1d(_n: usize, _flags: Flags) -> Option<Self> {
-        todo!("Implement c2r_1d planning")
+    #[must_use]
+    pub fn c2r_1d(n: usize, flags: Flags) -> Option<RealPlan<T>> {
+        RealPlan::c2r_1d(n, flags)
     }
     /// Select the best algorithm for the given size.
     fn select_algorithm(n: usize, _flags: Flags) -> Algorithm<T> {
@@ -1541,6 +1637,25 @@ impl<T: Float> Plan<T> {
     #[must_use]
     pub fn direction(&self) -> Direction {
         self.direction
+    }
+    /// Return a human-readable name for the selected algorithm.
+    #[must_use]
+    pub(crate) fn algorithm_name(&self) -> &'static str {
+        match &self.algorithm {
+            Algorithm::Nop => "Nop",
+            Algorithm::Direct => "Direct",
+            Algorithm::CooleyTukey(v) => match v {
+                CtVariant::Dit => "CooleyTukey(Dit)",
+                CtVariant::Dif => "CooleyTukey(Dif)",
+                CtVariant::DitRadix4 => "CooleyTukey(DitRadix4)",
+                CtVariant::DitRadix8 => "CooleyTukey(DitRadix8)",
+                CtVariant::SplitRadix => "CooleyTukey(SplitRadix)",
+            },
+            Algorithm::Stockham => "Stockham",
+            Algorithm::Composite(_) => "Composite",
+            Algorithm::Generic(_) => "Generic",
+            Algorithm::Bluestein(_) => "Bluestein",
+        }
     }
     /// Execute the plan on the given input/output buffers.
     ///
@@ -1852,117 +1967,5 @@ impl<T: Float> Plan2D<T> {
                 data[i * self.n1 + j] = col[i];
             }
         }
-    }
-}
-/// A plan for executing real-to-real transforms (DCT/DST/DHT).
-///
-/// Real-to-real transforms map real input to real output, and include:
-/// - DCT (Discrete Cosine Transform) types I-IV
-/// - DST (Discrete Sine Transform) types I-IV
-/// - DHT (Discrete Hartley Transform)
-pub struct R2rPlan<T: Float> {
-    /// Transform size
-    n: usize,
-    /// Transform kind
-    kind: R2rKind,
-    _marker: core::marker::PhantomData<T>,
-}
-impl<T: Float> R2rPlan<T> {
-    /// Create a 1D real-to-real transform plan.
-    ///
-    /// # Arguments
-    /// * `n` - Transform size
-    /// * `kind` - Type of transform (DCT, DST, or DHT variant)
-    /// * `flags` - Planning flags
-    ///
-    /// # Returns
-    /// A plan that transforms n real values to n real values.
-    #[must_use]
-    pub fn r2r_1d(n: usize, kind: R2rKind, _flags: Flags) -> Option<Self> {
-        if n == 0 {
-            return None;
-        }
-        Some(Self {
-            n,
-            kind,
-            _marker: core::marker::PhantomData,
-        })
-    }
-    /// Create a DCT-I (REDFT00) plan.
-    #[must_use]
-    pub fn dct1(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Redft00, flags)
-    }
-    /// Create a DCT-II (REDFT10) plan - the "standard" DCT.
-    #[must_use]
-    pub fn dct2(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Redft10, flags)
-    }
-    /// Create a DCT-III (REDFT01) plan - the inverse of DCT-II.
-    #[must_use]
-    pub fn dct3(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Redft01, flags)
-    }
-    /// Create a DCT-IV (REDFT11) plan.
-    #[must_use]
-    pub fn dct4(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Redft11, flags)
-    }
-    /// Create a DST-I (RODFT00) plan.
-    #[must_use]
-    pub fn dst1(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Rodft00, flags)
-    }
-    /// Create a DST-II (RODFT10) plan.
-    #[must_use]
-    pub fn dst2(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Rodft10, flags)
-    }
-    /// Create a DST-III (RODFT01) plan - the inverse of DST-II.
-    #[must_use]
-    pub fn dst3(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Rodft01, flags)
-    }
-    /// Create a DST-IV (RODFT11) plan.
-    #[must_use]
-    pub fn dst4(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Rodft11, flags)
-    }
-    /// Create a DHT (Discrete Hartley Transform) plan.
-    #[must_use]
-    pub fn dht(n: usize, flags: Flags) -> Option<Self> {
-        Self::r2r_1d(n, R2rKind::Dht, flags)
-    }
-    /// Get the transform size.
-    #[must_use]
-    pub fn size(&self) -> usize {
-        self.n
-    }
-    /// Get the transform kind.
-    #[must_use]
-    pub fn kind(&self) -> R2rKind {
-        self.kind
-    }
-    /// Execute the plan.
-    ///
-    /// # Panics
-    /// Panics if buffer sizes don't match the plan size.
-    pub fn execute(&self, input: &[T], output: &mut [T]) {
-        use crate::rdft::solvers::R2rSolver;
-        assert_eq!(input.len(), self.n, "Input size must match plan size");
-        assert_eq!(output.len(), self.n, "Output size must match plan size");
-        let solver = R2rSolver::new(self.kind);
-        solver.execute(input, output);
-    }
-    /// Execute the plan in-place.
-    ///
-    /// # Panics
-    /// Panics if buffer size doesn't match the plan size.
-    pub fn execute_inplace(&self, data: &mut [T]) {
-        use crate::rdft::solvers::R2rSolver;
-        assert_eq!(data.len(), self.n, "Data size must match plan size");
-        let input = data.to_vec();
-        let solver = R2rSolver::new(self.kind);
-        solver.execute(&input, data);
     }
 }

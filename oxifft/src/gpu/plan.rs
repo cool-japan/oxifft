@@ -14,6 +14,7 @@ use crate::kernel::{Complex, Float};
 
 /// FFT direction for GPU transforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GpuDirection {
     /// Forward FFT (time to frequency domain).
     Forward,

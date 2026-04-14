@@ -234,7 +234,7 @@ pub fn minimum_phase<T: Float>(signal: &[T]) -> Vec<T> {
         // indices half+1..n remain zero
     } else {
         // Odd length
-        let upper = (n + 1) / 2;
+        let upper = n.div_ceil(2);
         for k in 1..upper {
             liftered[k] = Complex::new(rcep[k] * two, T::ZERO);
         }

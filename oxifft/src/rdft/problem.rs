@@ -6,6 +6,7 @@ use crate::kernel::{Complex, Float, Problem, ProblemKind, Tensor};
 
 /// Kind of real DFT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RdftKind {
     /// Real to Complex (forward real FFT)
     R2C,

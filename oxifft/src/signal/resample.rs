@@ -132,7 +132,7 @@ pub fn resample<T: Float>(signal: &[T], new_len: usize) -> Vec<T> {
             new_spectrum[new_len - half] = half_nyq;
         } else {
             // Odd n: no Nyquist bin. pos_count = (n+1)/2 includes DC and all positive freqs.
-            let pos_count = (n + 1) / 2;
+            let pos_count = n.div_ceil(2);
             let neg_count = n - pos_count; // = (n-1)/2
 
             // Copy DC + positive frequencies: indices [0..pos_count].
@@ -172,7 +172,7 @@ pub fn resample<T: Float>(signal: &[T], new_len: usize) -> Vec<T> {
                 new_spectrum[new_len - neg_count..].copy_from_slice(&spectrum[n - neg_count..]);
             }
         } else {
-            let pos_count = (new_len + 1) / 2; // DC + positives, no Nyquist
+            let pos_count = new_len.div_ceil(2); // DC + positives, no Nyquist
             let neg_count = new_len - pos_count;
 
             // DC + positive frequencies.

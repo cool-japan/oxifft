@@ -667,7 +667,7 @@ impl num_traits::Zero for F128 {
 
     #[inline]
     fn is_zero(&self) -> bool {
-        F128::is_zero(*self)
+        Self::is_zero(*self)
     }
 }
 
@@ -695,15 +695,15 @@ impl num_traits::NumCast for F128 {
 
 impl num_traits::ToPrimitive for F128 {
     fn to_i64(&self) -> Option<i64> {
-        Some(F128::to_f64(*self) as i64)
+        Some(Self::to_f64(*self) as i64)
     }
 
     fn to_u64(&self) -> Option<u64> {
-        Some(F128::to_f64(*self) as u64)
+        Some(Self::to_f64(*self) as u64)
     }
 
     fn to_f64(&self) -> Option<f64> {
-        Some(F128::to_f64(*self))
+        Some(Self::to_f64(*self))
     }
 }
 
@@ -734,23 +734,23 @@ impl num_traits::Float for F128 {
     }
 
     fn is_nan(self) -> bool {
-        F128::is_nan(self)
+        Self::is_nan(self)
     }
     fn is_infinite(self) -> bool {
-        F128::is_infinite(self)
+        Self::is_infinite(self)
     }
     fn is_finite(self) -> bool {
-        F128::is_finite(self)
+        Self::is_finite(self)
     }
     fn is_normal(self) -> bool {
-        F128::is_finite(self) && !F128::is_zero(self)
+        Self::is_finite(self) && !Self::is_zero(self)
     }
     fn classify(self) -> core::num::FpCategory {
-        if F128::is_nan(self) {
+        if Self::is_nan(self) {
             core::num::FpCategory::Nan
-        } else if F128::is_infinite(self) {
+        } else if Self::is_infinite(self) {
             core::num::FpCategory::Infinite
-        } else if F128::is_zero(self) {
+        } else if Self::is_zero(self) {
             core::num::FpCategory::Zero
         } else {
             core::num::FpCategory::Normal
@@ -758,130 +758,130 @@ impl num_traits::Float for F128 {
     }
 
     fn floor(self) -> Self {
-        F128::floor(self)
+        Self::floor(self)
     }
     fn ceil(self) -> Self {
-        F128::ceil(self)
+        Self::ceil(self)
     }
     fn round(self) -> Self {
-        F128::round(self)
+        Self::round(self)
     }
     fn trunc(self) -> Self {
-        F128::trunc(self)
+        Self::trunc(self)
     }
     fn fract(self) -> Self {
-        F128::fract(self)
+        Self::fract(self)
     }
     fn abs(self) -> Self {
-        F128::abs(self)
+        Self::abs(self)
     }
     fn signum(self) -> Self {
-        F128::signum(self)
+        Self::signum(self)
     }
     fn is_sign_positive(self) -> bool {
-        !F128::is_sign_negative(self)
+        !Self::is_sign_negative(self)
     }
     fn is_sign_negative(self) -> bool {
-        F128::is_sign_negative(self)
+        Self::is_sign_negative(self)
     }
     fn mul_add(self, a: Self, b: Self) -> Self {
         self * a + b
     }
     fn recip(self) -> Self {
-        F128::recip(self)
+        Self::recip(self)
     }
     fn powi(self, n: i32) -> Self {
-        F128::powi(self, n)
+        Self::powi(self, n)
     }
     fn powf(self, n: Self) -> Self {
-        F128::powf(self, n)
+        Self::powf(self, n)
     }
     fn sqrt(self) -> Self {
-        F128::sqrt(self)
+        Self::sqrt(self)
     }
     fn exp(self) -> Self {
-        F128::exp(self)
+        Self::exp(self)
     }
     fn exp2(self) -> Self {
-        Self::from_f64(F128::to_f64(self).exp2())
+        Self::from_f64(Self::to_f64(self).exp2())
     }
     fn ln(self) -> Self {
-        F128::ln(self)
+        Self::ln(self)
     }
     fn log(self, base: Self) -> Self {
-        Self::from_f64(F128::to_f64(self).log(F128::to_f64(base)))
+        Self::from_f64(Self::to_f64(self).log(Self::to_f64(base)))
     }
     fn log2(self) -> Self {
-        Self::from_f64(F128::to_f64(self).log2())
+        Self::from_f64(Self::to_f64(self).log2())
     }
     fn log10(self) -> Self {
-        Self::from_f64(F128::to_f64(self).log10())
+        Self::from_f64(Self::to_f64(self).log10())
     }
     fn max(self, other: Self) -> Self {
-        F128::max(self, other)
+        Self::max(self, other)
     }
     fn min(self, other: Self) -> Self {
-        F128::min(self, other)
+        Self::min(self, other)
     }
     fn abs_sub(self, other: Self) -> Self {
-        F128::abs(self - other)
+        Self::abs(self - other)
     }
     fn cbrt(self) -> Self {
-        Self::from_f64(F128::to_f64(self).cbrt())
+        Self::from_f64(Self::to_f64(self).cbrt())
     }
     fn hypot(self, other: Self) -> Self {
-        F128::sqrt(self * self + other * other)
+        Self::sqrt(self * self + other * other)
     }
     fn sin(self) -> Self {
-        F128::sin(self)
+        Self::sin(self)
     }
     fn cos(self) -> Self {
-        F128::cos(self)
+        Self::cos(self)
     }
     fn tan(self) -> Self {
-        Self::from_f64(F128::to_f64(self).tan())
+        Self::from_f64(Self::to_f64(self).tan())
     }
     fn asin(self) -> Self {
-        Self::from_f64(F128::to_f64(self).asin())
+        Self::from_f64(Self::to_f64(self).asin())
     }
     fn acos(self) -> Self {
-        Self::from_f64(F128::to_f64(self).acos())
+        Self::from_f64(Self::to_f64(self).acos())
     }
     fn atan(self) -> Self {
-        Self::from_f64(F128::to_f64(self).atan())
+        Self::from_f64(Self::to_f64(self).atan())
     }
     fn atan2(self, other: Self) -> Self {
-        Self::from_f64(F128::to_f64(self).atan2(F128::to_f64(other)))
+        Self::from_f64(Self::to_f64(self).atan2(Self::to_f64(other)))
     }
     fn sin_cos(self) -> (Self, Self) {
-        F128::sin_cos(self)
+        Self::sin_cos(self)
     }
     fn exp_m1(self) -> Self {
-        Self::from_f64(F128::to_f64(self).exp_m1())
+        Self::from_f64(Self::to_f64(self).exp_m1())
     }
     fn ln_1p(self) -> Self {
-        Self::from_f64(F128::to_f64(self).ln_1p())
+        Self::from_f64(Self::to_f64(self).ln_1p())
     }
     fn sinh(self) -> Self {
-        Self::from_f64(F128::to_f64(self).sinh())
+        Self::from_f64(Self::to_f64(self).sinh())
     }
     fn cosh(self) -> Self {
-        Self::from_f64(F128::to_f64(self).cosh())
+        Self::from_f64(Self::to_f64(self).cosh())
     }
     fn tanh(self) -> Self {
-        Self::from_f64(F128::to_f64(self).tanh())
+        Self::from_f64(Self::to_f64(self).tanh())
     }
     fn asinh(self) -> Self {
-        Self::from_f64(F128::to_f64(self).asinh())
+        Self::from_f64(Self::to_f64(self).asinh())
     }
     fn acosh(self) -> Self {
-        Self::from_f64(F128::to_f64(self).acosh())
+        Self::from_f64(Self::to_f64(self).acosh())
     }
     fn atanh(self) -> Self {
-        Self::from_f64(F128::to_f64(self).atanh())
+        Self::from_f64(Self::to_f64(self).atanh())
     }
     fn integer_decode(self) -> (u64, i16, i8) {
-        F128::to_f64(self).integer_decode()
+        Self::to_f64(self).integer_decode()
     }
     fn epsilon() -> Self {
         Self::from_f64(f64::EPSILON)
@@ -893,7 +893,7 @@ impl num_traits::Float for F128 {
         self * Self::PI / Self::from_f64(180.0)
     }
     fn copysign(self, sign: Self) -> Self {
-        F128::copysign(self, sign)
+        Self::copysign(self, sign)
     }
 }
 
@@ -911,7 +911,7 @@ impl num_traits::FloatConst for F128 {
         Self::TWO / Self::PI
     }
     fn FRAC_2_SQRT_PI() -> Self {
-        Self::TWO / F128::sqrt(Self::PI)
+        Self::TWO / Self::sqrt(Self::PI)
     }
     fn FRAC_PI_2() -> Self {
         Self::FRAC_PI_2

@@ -4,6 +4,7 @@
 
 #![allow(clippy::approx_constant)] // Precomputed twiddle factors for FFT
 #![allow(clippy::items_after_statements)] // Function-local constants
+#![allow(clippy::unreadable_literal)] // Precomputed FFT twiddle factors
 
 use crate::dft::codelets::simd;
 use crate::kernel::{Complex, Float};
