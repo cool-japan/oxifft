@@ -2,26 +2,38 @@
 //!
 //! Generates codelets that apply twiddle factors during multi-radix FFT computation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, LitInt};
+use syn::LitInt;
 
 /// Generate a twiddle codelet for the given radix.
-pub fn generate(input: TokenStream) -> TokenStream {
-    let radix = parse_macro_input!(input as LitInt);
-    let r: usize = radix.base10_parse().expect("Invalid radix literal");
+///
+/// # Errors
+/// Returns a `syn::Error` when the input does not parse as a valid radix literal,
+/// or when the radix is not in the supported set {2, 4, 8, 16}.
+pub fn generate(input: TokenStream) -> Result<TokenStream, syn::Error> {
+    let radix: LitInt = syn::parse2(input)?;
+    let r: usize = radix.base10_parse().map_err(|_| {
+        syn::Error::new(
+            radix.span(),
+            "gen_twiddle_codelet: expected an integer radix literal",
+        )
+    })?;
 
     match r {
-        2 => gen_twiddle_2(),
-        4 => gen_twiddle_4(),
-        8 => gen_twiddle_8(),
-        16 => gen_twiddle_16(),
-        _ => panic!("Unsupported twiddle radix: {r}"),
+        2 => Ok(gen_twiddle_2()),
+        4 => Ok(gen_twiddle_4()),
+        8 => Ok(gen_twiddle_8()),
+        16 => Ok(gen_twiddle_16()),
+        _ => Err(syn::Error::new(
+            radix.span(),
+            format!("gen_twiddle_codelet: unsupported radix {r} (expected one of 2, 4, 8, 16)"),
+        )),
     }
 }
 
 fn gen_twiddle_2() -> TokenStream {
-    let expanded = quote! {
+    quote! {
         /// Radix-2 twiddle codelet.
         ///
         /// Applies a single twiddle factor and computes a 2-point butterfly.
@@ -36,12 +48,11 @@ fn gen_twiddle_2() -> TokenStream {
             x[0] = a + b;
             x[1] = a - b;
         }
-    };
-    TokenStream::from(expanded)
+    }
 }
 
 fn gen_twiddle_4() -> TokenStream {
-    let expanded = quote! {
+    quote! {
         /// Radix-4 twiddle codelet.
         ///
         /// Applies twiddle factors w1, w2, w3 to inputs x[1], x[2], x[3]
@@ -77,13 +88,12 @@ fn gen_twiddle_4() -> TokenStream {
             x[2] = t0 - t2;
             x[3] = t1 - t3_rot;
         }
-    };
-    TokenStream::from(expanded)
+    }
 }
 
 #[allow(clippy::too_many_lines)]
 fn gen_twiddle_16() -> TokenStream {
-    let expanded = quote! {
+    quote! {
         /// Radix-16 twiddle codelet.
         ///
         /// Applies 15 twiddle factors to inputs x[1]..x[15] and computes a 16-point FFT
@@ -299,13 +309,12 @@ fn gen_twiddle_16() -> TokenStream {
                 x[i] = a[i];
             }
         }
-    };
-    TokenStream::from(expanded)
+    }
 }
 
 #[allow(clippy::too_many_lines)]
 fn gen_twiddle_8() -> TokenStream {
-    let expanded = quote! {
+    quote! {
         /// Radix-8 twiddle codelet.
         ///
         /// Applies 7 external twiddle factors to inputs x[1]..x[7], then computes
@@ -458,6 +467,392 @@ fn gen_twiddle_8() -> TokenStream {
             let twiddles = [tw1, tw2, tw3, tw4, tw5, tw6, tw7];
             codelet_twiddle_8(x, &twiddles, sign);
         }
+    }
+}
+
+/// Generate a split-radix twiddle codelet for the given size.
+///
+/// If no size is specified (empty input), generates the generic runtime-parameterized
+/// split-radix twiddle codelet. If a size is given (8 or 16), generates a specialized
+/// unrolled version for that size.
+///
+/// # Errors
+/// Returns a `syn::Error` when the input does not parse as a valid size literal,
+/// or when the size is not in the supported set {8, 16} (or empty for the generic variant).
+pub fn generate_split_radix(input: TokenStream) -> Result<TokenStream, syn::Error> {
+    if input.is_empty() {
+        return Ok(gen_split_radix_twiddle());
+    }
+    let size: LitInt = syn::parse2(input)?;
+    let n: usize = size.base10_parse().map_err(|_| {
+        syn::Error::new(
+            size.span(),
+            "gen_split_radix_twiddle_codelet: expected an integer size literal",
+        )
+    })?;
+    match n {
+        8 => Ok(gen_split_radix_twiddle_8()),
+        16 => Ok(gen_split_radix_twiddle_16()),
+        _ => Err(syn::Error::new(
+            size.span(),
+            format!("gen_split_radix_twiddle_codelet: unsupported size {n} (use 8 or 16, or empty for generic)"),
+        )),
+    }
+}
+
+/// Generate the generic split-radix twiddle codelet (L-shaped butterfly).
+///
+/// The split-radix FFT decomposes an N-point DFT into:
+/// - One N/2-point DFT of even-indexed elements
+/// - Two N/4-point DFTs of odd-indexed elements (with twiddle factors `W_N^k` and `W_N^{3k`})
+///
+/// This codelet performs the combining step (L-shaped butterfly):
+///   For k = 0..N/4-1:
+///     t1 = `W_N^k` * O1[k],  t2 = `W_N^{3k`} * O3[k]
+///     p = t1 + t2,  m = t1 - t2
+///     X[k]       = E[k]     + p
+///     X[k+N/4]   = E[k+N/4] - j*(t1-t2)  (forward)
+///     X[k+N/2]   = E[k]     - p
+///     X[k+3N/4]  = E[k+N/4] + j*(t1-t2)  (forward)
+fn gen_split_radix_twiddle() -> TokenStream {
+    let expanded = quote! {
+        /// Split-radix twiddle codelet (L-shaped butterfly).
+        ///
+        /// Combines the results of an N/2-point even DFT with two N/4-point odd DFTs
+        /// using split-radix decomposition. This reduces the total number of real
+        /// multiplications compared to standard radix-2: approximately 4N log2(N) - 6N + 8
+        /// vs. 5N log2(N) for radix-2.
+        ///
+        /// # Data Layout
+        ///
+        /// On input, `data[0..n]` is organized as:
+        /// - `data[0..n/2]`: N/2-point DFT of even-indexed elements (E)
+        /// - `data[n/2..3n/4]`: N/4-point DFT of odd-1 elements (O1, indices 1,5,9,...)
+        /// - `data[3n/4..n]`: N/4-point DFT of odd-3 elements (O3, indices 3,7,11,...)
+        ///
+        /// On output, `data[0..n]` contains the combined N-point DFT result.
+        ///
+        /// # Arguments
+        /// * `data`     - Input/output slice of at least `n` complex values
+        /// * `n`        - Transform size (must be divisible by 4 and >= 4)
+        /// * `twiddles` - Twiddle factors W_N^k for k = 0..n/4-1
+        /// * `twiddles3`- Twiddle factors W_N^{3k} for k = 0..n/4-1
+        /// * `sign`     - Transform direction: -1 for forward, +1 for inverse
+        #[inline]
+        pub fn codelet_split_radix_twiddle<T: crate::kernel::Float>(
+            data: &mut [crate::kernel::Complex<T>],
+            n: usize,
+            twiddles: &[crate::kernel::Complex<T>],
+            twiddles3: &[crate::kernel::Complex<T>],
+            sign: i32,
+        ) {
+            debug_assert!(n >= 4 && n % 4 == 0, "n must be >= 4 and divisible by 4");
+            debug_assert!(data.len() >= n, "data slice too short for split-radix");
+
+            let n2 = n >> 1;   // N/2
+            let n4 = n >> 2;   // N/4
+
+            debug_assert!(twiddles.len() >= n4, "twiddles slice too short");
+            debug_assert!(twiddles3.len() >= n4, "twiddles3 slice too short");
+
+            for k in 0..n4 {
+                // Read the three sub-DFT results
+                let e_k    = data[k];          // E[k] from even DFT
+                let e_k_q  = data[k + n4];     // E[k + N/4] from even DFT
+                let o1_k   = data[n2 + k];     // O1[k] from first odd DFT
+                let o3_k   = data[n2 + n4 + k]; // O3[k] from second odd DFT
+
+                // Apply twiddle factors to odd sub-DFT results
+                let t1 = o1_k * twiddles[k];    // W_N^k * O1[k]
+                let t2 = o3_k * twiddles3[k];   // W_N^{3k} * O3[k]
+
+                // Split-radix butterfly computation
+                let p = t1 + t2;    // Sum of twiddled odd results
+                let m = t1 - t2;    // Difference of twiddled odd results
+
+                // Rotate difference by -j (forward) or +j (inverse)
+                // -j * (a + bi) = (b, -a);   +j * (a + bi) = (-b, a)
+                let m_rot = if sign < 0 {
+                    crate::kernel::Complex::new(m.im, -m.re)
+                } else {
+                    crate::kernel::Complex::new(-m.im, m.re)
+                };
+
+                // Write combined results to all four quarters
+                data[k]          = e_k   + p;       // X[k]
+                data[k + n4]     = e_k_q + m_rot;   // X[k + N/4]
+                data[k + n2]     = e_k   - p;       // X[k + N/2]
+                data[k + n2 + n4] = e_k_q - m_rot;  // X[k + 3N/4]
+            }
+        }
+
+        /// Split-radix twiddle codelet with inline twiddle computation.
+        ///
+        /// Computes W_N^k and W_N^{3k} twiddle factors on the fly from the
+        /// base angle step, useful when twiddle tables are not precomputed.
+        ///
+        /// # Arguments
+        /// * `data` - Input/output slice of at least `n` complex values
+        /// * `n`    - Transform size (must be divisible by 4 and >= 4)
+        /// * `sign` - Transform direction: -1 for forward, +1 for inverse
+        #[inline]
+        pub fn codelet_split_radix_twiddle_inline<T: crate::kernel::Float>(
+            data: &mut [crate::kernel::Complex<T>],
+            n: usize,
+            sign: i32,
+        ) {
+            debug_assert!(n >= 4 && n % 4 == 0, "n must be >= 4 and divisible by 4");
+            debug_assert!(data.len() >= n, "data slice too short for split-radix");
+
+            let n2 = n >> 1;
+            let n4 = n >> 2;
+
+            // Base angle: -2π/N (forward) or +2π/N (inverse)
+            let base_angle = if sign < 0 {
+                -2.0_f64 * core::f64::consts::PI / (n as f64)
+            } else {
+                2.0_f64 * core::f64::consts::PI / (n as f64)
+            };
+
+            for k in 0..n4 {
+                let angle_k = base_angle * (k as f64);
+                let angle_3k = base_angle * (3 * k) as f64;
+
+                let tw = crate::kernel::Complex::new(
+                    T::from_f64(angle_k.cos()),
+                    T::from_f64(angle_k.sin()),
+                );
+                let tw3 = crate::kernel::Complex::new(
+                    T::from_f64(angle_3k.cos()),
+                    T::from_f64(angle_3k.sin()),
+                );
+
+                let e_k    = data[k];
+                let e_k_q  = data[k + n4];
+                let o1_k   = data[n2 + k];
+                let o3_k   = data[n2 + n4 + k];
+
+                let t1 = o1_k * tw;
+                let t2 = o3_k * tw3;
+
+                let p = t1 + t2;
+                let m = t1 - t2;
+
+                let m_rot = if sign < 0 {
+                    crate::kernel::Complex::new(m.im, -m.re)
+                } else {
+                    crate::kernel::Complex::new(-m.im, m.re)
+                };
+
+                data[k]          = e_k   + p;
+                data[k + n4]     = e_k_q + m_rot;
+                data[k + n2]     = e_k   - p;
+                data[k + n2 + n4] = e_k_q - m_rot;
+            }
+        }
     };
-    TokenStream::from(expanded)
+    expanded
+}
+
+/// Generate a specialized 8-point split-radix twiddle codelet (fully unrolled).
+///
+/// N=8: N/2=4 even, N/4=2 odd-1, N/4=2 odd-3.
+/// Unrolls the L-shaped butterfly for k=0,1.
+fn gen_split_radix_twiddle_8() -> TokenStream {
+    let expanded = quote! {
+        /// Split-radix twiddle codelet for N=8 (fully unrolled).
+        ///
+        /// Combines a 4-point even DFT with two 2-point odd DFTs using
+        /// the L-shaped butterfly. All 2 iterations fully unrolled.
+        ///
+        /// # Data Layout
+        /// - `data[0..4]`: 4-point even DFT result (E)
+        /// - `data[4..6]`: 2-point odd-1 DFT result (O1)
+        /// - `data[6..8]`: 2-point odd-3 DFT result (O3)
+        ///
+        /// # Arguments
+        /// * `data`     - Input/output slice of at least 8 complex values
+        /// * `twiddles` - `[W_8^0, W_8^1]` twiddle factors
+        /// * `twiddles3`- `[W_8^0, W_8^3]` twiddle factors
+        /// * `sign`     - Transform direction: -1 for forward, +1 for inverse
+        #[inline(always)]
+        pub fn codelet_split_radix_twiddle_8<T: crate::kernel::Float>(
+            data: &mut [crate::kernel::Complex<T>],
+            twiddles: &[crate::kernel::Complex<T>; 2],
+            twiddles3: &[crate::kernel::Complex<T>; 2],
+            sign: i32,
+        ) {
+            debug_assert!(data.len() >= 8);
+
+            // k=0: E[0], E[2], O1[0], O3[0]
+            let e0   = data[0];
+            let e0_q = data[2];   // E[0 + N/4] = E[2]
+            let o1_0 = data[4];
+            let o3_0 = data[6];
+
+            let t1_0 = o1_0 * twiddles[0];    // W_8^0 * O1[0]
+            let t2_0 = o3_0 * twiddles3[0];   // W_8^0 * O3[0]
+
+            let p0 = t1_0 + t2_0;
+            let m0 = t1_0 - t2_0;
+            let m0_rot = if sign < 0 {
+                crate::kernel::Complex::new(m0.im, -m0.re)
+            } else {
+                crate::kernel::Complex::new(-m0.im, m0.re)
+            };
+
+            // k=1: E[1], E[3], O1[1], O3[1]
+            let e1   = data[1];
+            let e1_q = data[3];   // E[1 + N/4] = E[3]
+            let o1_1 = data[5];
+            let o3_1 = data[7];
+
+            let t1_1 = o1_1 * twiddles[1];    // W_8^1 * O1[1]
+            let t2_1 = o3_1 * twiddles3[1];   // W_8^3 * O3[1]
+
+            let p1 = t1_1 + t2_1;
+            let m1 = t1_1 - t2_1;
+            let m1_rot = if sign < 0 {
+                crate::kernel::Complex::new(m1.im, -m1.re)
+            } else {
+                crate::kernel::Complex::new(-m1.im, m1.re)
+            };
+
+            // Write all 8 outputs (4 pairs from 2 butterfly iterations)
+            data[0] = e0   + p0;       // X[0]
+            data[2] = e0_q + m0_rot;   // X[0 + N/4] = X[2]
+            data[4] = e0   - p0;       // X[0 + N/2] = X[4]
+            data[6] = e0_q - m0_rot;   // X[0 + 3N/4] = X[6]
+
+            data[1] = e1   + p1;       // X[1]
+            data[3] = e1_q + m1_rot;   // X[1 + N/4] = X[3]
+            data[5] = e1   - p1;       // X[1 + N/2] = X[5]
+            data[7] = e1_q - m1_rot;   // X[1 + 3N/4] = X[7]
+        }
+    };
+    expanded
+}
+
+/// Generate a specialized 16-point split-radix twiddle codelet (fully unrolled).
+///
+/// N=16: N/2=8 even, N/4=4 odd-1, N/4=4 odd-3.
+/// Unrolls the L-shaped butterfly for k=0,1,2,3.
+#[allow(clippy::too_many_lines)]
+fn gen_split_radix_twiddle_16() -> TokenStream {
+    let expanded = quote! {
+        /// Split-radix twiddle codelet for N=16 (fully unrolled).
+        ///
+        /// Combines an 8-point even DFT with two 4-point odd DFTs using
+        /// the L-shaped butterfly. All 4 iterations fully unrolled.
+        ///
+        /// # Data Layout
+        /// - `data[0..8]`:   8-point even DFT result (E)
+        /// - `data[8..12]`:  4-point odd-1 DFT result (O1)
+        /// - `data[12..16]`: 4-point odd-3 DFT result (O3)
+        ///
+        /// # Arguments
+        /// * `data`     - Input/output slice of at least 16 complex values
+        /// * `twiddles` - `[W_16^0, W_16^1, W_16^2, W_16^3]` twiddle factors
+        /// * `twiddles3`- `[W_16^0, W_16^3, W_16^6, W_16^9]` twiddle factors
+        /// * `sign`     - Transform direction: -1 for forward, +1 for inverse
+        #[inline(always)]
+        pub fn codelet_split_radix_twiddle_16<T: crate::kernel::Float>(
+            data: &mut [crate::kernel::Complex<T>],
+            twiddles: &[crate::kernel::Complex<T>; 4],
+            twiddles3: &[crate::kernel::Complex<T>; 4],
+            sign: i32,
+        ) {
+            debug_assert!(data.len() >= 16);
+
+            // k=0: E[0], E[4], O1[0], O3[0]
+            let e0   = data[0];
+            let e0_q = data[4];
+            let o1_0 = data[8];
+            let o3_0 = data[12];
+
+            let t1_0 = o1_0 * twiddles[0];
+            let t2_0 = o3_0 * twiddles3[0];
+            let p0 = t1_0 + t2_0;
+            let m0 = t1_0 - t2_0;
+            let m0_rot = if sign < 0 {
+                crate::kernel::Complex::new(m0.im, -m0.re)
+            } else {
+                crate::kernel::Complex::new(-m0.im, m0.re)
+            };
+
+            // k=1: E[1], E[5], O1[1], O3[1]
+            let e1   = data[1];
+            let e1_q = data[5];
+            let o1_1 = data[9];
+            let o3_1 = data[13];
+
+            let t1_1 = o1_1 * twiddles[1];
+            let t2_1 = o3_1 * twiddles3[1];
+            let p1 = t1_1 + t2_1;
+            let m1 = t1_1 - t2_1;
+            let m1_rot = if sign < 0 {
+                crate::kernel::Complex::new(m1.im, -m1.re)
+            } else {
+                crate::kernel::Complex::new(-m1.im, m1.re)
+            };
+
+            // k=2: E[2], E[6], O1[2], O3[2]
+            let e2   = data[2];
+            let e2_q = data[6];
+            let o1_2 = data[10];
+            let o3_2 = data[14];
+
+            let t1_2 = o1_2 * twiddles[2];
+            let t2_2 = o3_2 * twiddles3[2];
+            let p2 = t1_2 + t2_2;
+            let m2 = t1_2 - t2_2;
+            let m2_rot = if sign < 0 {
+                crate::kernel::Complex::new(m2.im, -m2.re)
+            } else {
+                crate::kernel::Complex::new(-m2.im, m2.re)
+            };
+
+            // k=3: E[3], E[7], O1[3], O3[3]
+            let e3   = data[3];
+            let e3_q = data[7];
+            let o1_3 = data[11];
+            let o3_3 = data[15];
+
+            let t1_3 = o1_3 * twiddles[3];
+            let t2_3 = o3_3 * twiddles3[3];
+            let p3 = t1_3 + t2_3;
+            let m3 = t1_3 - t2_3;
+            let m3_rot = if sign < 0 {
+                crate::kernel::Complex::new(m3.im, -m3.re)
+            } else {
+                crate::kernel::Complex::new(-m3.im, m3.re)
+            };
+
+            // Write all 16 outputs
+            // Quarter 0: X[k]
+            data[0]  = e0 + p0;
+            data[1]  = e1 + p1;
+            data[2]  = e2 + p2;
+            data[3]  = e3 + p3;
+
+            // Quarter 1: X[k + N/4]
+            data[4]  = e0_q + m0_rot;
+            data[5]  = e1_q + m1_rot;
+            data[6]  = e2_q + m2_rot;
+            data[7]  = e3_q + m3_rot;
+
+            // Quarter 2: X[k + N/2]
+            data[8]  = e0 - p0;
+            data[9]  = e1 - p1;
+            data[10] = e2 - p2;
+            data[11] = e3 - p3;
+
+            // Quarter 3: X[k + 3N/4]
+            data[12] = e0_q - m0_rot;
+            data[13] = e1_q - m1_rot;
+            data[14] = e2_q - m2_rot;
+            data[15] = e3_q - m3_rot;
+        }
+    };
+    expanded
 }

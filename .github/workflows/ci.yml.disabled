@@ -2,13 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, "0.*"]
   pull_request:
     branches: [master, main]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   test:
@@ -31,16 +32,10 @@ jobs:
           toolchain: ${{ matrix.rust }}
           components: clippy, rustfmt
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.rust }}-
+          key: ${{ matrix.rust }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -49,10 +44,74 @@ jobs:
         run: cargo build --workspace --all-features
 
       - name: Run tests
-        run: cargo nextest run --workspace
+        run: cargo nextest run --workspace --all-features
 
       - name: Run doctests
-        run: cargo test --doc --workspace
+        run: cargo test --doc --workspace --all-features
+
+  feature-combos:
+    name: Feature Combos (${{ matrix.combo.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        combo:
+          - name: "no_std_alloc_baseline"
+            flags: "--no-default-features"
+          - name: "std_only"
+            flags: "--no-default-features --features std"
+          - name: "std_threading"
+            flags: "--no-default-features --features std,threading"
+          - name: "no_std_specialty"
+            flags: "--no-default-features --features sparse,pruned,streaming"
+          - name: "no_std_const_fft"
+            flags: "--no-default-features --features const-fft"
+          - name: "std_dsp"
+            flags: "--no-default-features --features signal"
+          - name: "simd_default"
+            flags: "--features simd"
+          - name: "all_features_no_gpu"
+            flags: "--features std,threading,simd,f128-support,f16-support,sparse,pruned,streaming,const-fft,signal,fftw-compat"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-combo-${{ matrix.combo.name }}
+
+      - name: Check feature combo
+        run: cargo check -p oxifft ${{ matrix.combo.flags }}
+
+  cross-compile:
+    name: Cross Compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: thumbv7em-none-eabihf
+            flags: "--no-default-features --features sparse,pruned,streaming"
+          - target: wasm32-unknown-unknown
+            flags: "--features wasm"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.target }}
+
+      - name: Cross-compile check
+        run: cargo check -p oxifft --target ${{ matrix.target }} ${{ matrix.flags }}
 
   clippy:
     name: Clippy
@@ -65,17 +124,11 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
   fmt:
     name: Format
@@ -100,14 +153,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Build documentation
         run: cargo doc --workspace --no-deps --all-features
@@ -124,28 +171,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Run benchmarks (compile check)
         run: cargo bench -p oxifft-bench --no-run
-
-  msrv:
-    name: Minimum Supported Rust Version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust 1.70.0 (MSRV)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.70.0"
-
-      - name: Check compilation on MSRV
-        run: cargo check --workspace

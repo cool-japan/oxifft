@@ -77,7 +77,7 @@ pub fn transpose<T: Float>(src: &[Complex<T>], dst: &mut [Complex<T>], rows: usi
 ///
 /// Uses cache-blocked algorithm for better locality on large matrices.
 /// Input is rows×cols, output is cols×rows.
-#[allow(clippy::suspicious_operation_groupings)]
+#[allow(clippy::suspicious_operation_groupings)] // reason: matrix index arithmetic 'i * cols + j' and 'j * rows + i' are standard and correct, not suspicious
 pub fn transpose_blocked<T: Float>(
     src: &[Complex<T>],
     dst: &mut [Complex<T>],

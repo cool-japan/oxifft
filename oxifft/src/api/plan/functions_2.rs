@@ -3,16 +3,19 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 #[allow(unused_imports)]
+// reason: prelude glob re-exports are selectively used per feature gate (std vs no_std)
 use crate::prelude::*;
 
 #[cfg(test)]
-#[allow(clippy::cast_lossless)]
-#[allow(clippy::redundant_clone)]
-#[allow(clippy::uninlined_format_args)]
+#[allow(clippy::cast_lossless)] // reason: usize/u32 as f64 cast in test helpers is intentional and correct for test data
+#[allow(clippy::redundant_clone)] // reason: clones in test data setup are explicit for readability
+#[allow(clippy::uninlined_format_args)] // reason: generated test code uses explicit format args for clarity
 mod tests {
     use super::super::functions::*;
-    use super::super::types::{Plan, Plan2D, Plan3D, PlanND, RealPlan, RealPlanKind};
+    use super::super::types::{Plan, Plan2D, Plan3D, RealPlanKind};
+    use super::super::types_nd::PlanND;
     use super::super::types_r2r::R2rPlan;
+    use super::super::types_real::RealPlan;
     use crate::api::{Direction, Flags};
     use crate::kernel::Complex;
     use crate::rdft::solvers::R2rKind;

@@ -13,7 +13,6 @@ use super::traits::{SimdComplex, SimdVector};
 use core::arch::x86_64::*;
 
 /// Check if AVX2 and FMA are available at runtime.
-#[allow(dead_code)]
 #[inline]
 pub fn has_avx2_fma() -> bool {
     is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
@@ -44,21 +43,33 @@ impl SimdVector for Avx2F64 {
         unsafe { Self(_mm256_set1_pd(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f64) -> Self {
         unsafe { Self(_mm256_load_pd(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f64) -> Self {
         unsafe { Self(_mm256_loadu_pd(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f64) {
         unsafe { _mm256_store_pd(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f64) {
         unsafe { _mm256_storeu_pd(ptr, self.0) }
@@ -85,7 +96,6 @@ impl SimdVector for Avx2F64 {
     }
 }
 
-#[allow(dead_code)]
 impl Avx2F64 {
     /// Create a vector from four f64 values: [a, b, c, d]
     #[inline]
@@ -251,21 +261,33 @@ impl SimdVector for Avx2F32 {
         unsafe { Self(_mm256_set1_ps(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f32) -> Self {
         unsafe { Self(_mm256_load_ps(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f32) -> Self {
         unsafe { Self(_mm256_loadu_ps(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f32) {
         unsafe { _mm256_store_ps(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f32) {
         unsafe { _mm256_storeu_ps(ptr, self.0) }
@@ -292,7 +314,6 @@ impl SimdVector for Avx2F32 {
     }
 }
 
-#[allow(dead_code)]
 impl Avx2F32 {
     /// Create a vector from eight f32 values.
     #[inline]

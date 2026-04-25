@@ -4,6 +4,7 @@
 
 mod bluestein;
 mod buffered;
+pub mod cache_oblivious;
 pub mod ct;
 pub mod direct;
 mod generic;
@@ -15,8 +16,9 @@ pub mod simd_butterfly;
 mod stockham;
 mod vrank_geq1;
 
-pub use bluestein::BluesteinSolver;
+pub use bluestein::{fft_bluestein, fft_bluestein_inplace, ifft_bluestein, BluesteinSolver};
 pub use buffered::BufferedSolver;
+pub use cache_oblivious::CacheObliviousSolver;
 pub use ct::{CooleyTukeySolver, CtVariant};
 pub use direct::DirectSolver;
 pub use generic::GenericSolver;
@@ -24,5 +26,5 @@ pub use indirect::IndirectSolver;
 pub use nop::NopSolver;
 pub use rader::RaderSolver;
 pub use rank_geq2::RankGeq2Solver;
-pub use stockham::{stockham_f64, StockhamSolver};
+pub use stockham::{stockham_f64, stockham_radix4_scalar, stockham_scalar, StockhamSolver};
 pub use vrank_geq1::VrankGeq1Solver;

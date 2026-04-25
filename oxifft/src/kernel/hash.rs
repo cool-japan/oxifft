@@ -45,7 +45,7 @@ impl Hasher for ProblemHash {
 }
 
 /// Hash a problem for wisdom lookup.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: wisdom lookup utility; not called when wisdom is disabled via feature flags
 #[must_use]
 pub fn hash_problem<T: Hash>(problem: &T) -> u64 {
     let mut hasher = ProblemHash::new();

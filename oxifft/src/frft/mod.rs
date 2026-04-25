@@ -103,9 +103,25 @@ impl<T: Float> Frft<T> {
     /// * `n` - Transform size
     /// * `order` - Fractional order α (any real number, reduced mod 4)
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// FrFT plan or error.
+    /// Returns `FrftError::InvalidSize` if `n` is zero, or
+    /// `FrftError::PlanningFailed` if the internal FFT plan allocation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use oxifft::{Complex, Frft};
+    ///
+    /// // Order 0 is the identity transform
+    /// let frft = Frft::<f64>::new(8, 0.0).expect("FrFT plan creation failed");
+    /// let input: Vec<Complex<f64>> = (0..8).map(|i| Complex::new(i as f64, 0.0)).collect();
+    /// let output = frft.execute(&input).expect("FrFT execution failed");
+    /// assert_eq!(output.len(), 8);
+    /// // Order 0: identity — output should equal input
+    /// assert!((output[0].re - input[0].re).abs() < 1e-9);
+    /// assert!((output[3].re - input[3].re).abs() < 1e-9);
+    /// ```
     pub fn new(n: usize, order: f64) -> FrftResult<Self> {
         if n == 0 {
             return Err(FrftError::InvalidSize(0));
@@ -204,9 +220,10 @@ impl<T: Float> Frft<T> {
     ///
     /// * `input` - Input signal
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// Transformed signal.
+    /// Returns `FrftError::InvalidSize` if `input.len()` does not equal `n`,
+    /// or propagates FFT execution errors from the inner plan.
     pub fn execute(&self, input: &[Complex<T>]) -> FrftResult<Vec<Complex<T>>> {
         if input.len() != self.n {
             return Err(FrftError::InvalidSize(input.len()));
@@ -363,9 +380,10 @@ fn reduce_order(order: f64) -> f64 {
 /// * `input` - Input signal
 /// * `order` - Fractional order α (α=1 gives standard DFT)
 ///
-/// # Returns
+/// # Errors
 ///
-/// Transformed signal or an error if the input is empty or FFT planning fails.
+/// Returns `FrftError::InvalidSize` if `input` is empty, or
+/// `FrftError::PlanningFailed` if FFT planning fails.
 pub fn frft<T: Float>(input: &[Complex<T>], order: f64) -> FrftResult<Vec<Complex<T>>> {
     frft_checked(input, order)
 }
@@ -379,20 +397,31 @@ pub fn frft<T: Float>(input: &[Complex<T>], order: f64) -> FrftResult<Vec<Comple
 /// * `input` - Input signal (result of frft)
 /// * `order` - Original order used in forward transform
 ///
-/// # Returns
+/// # Errors
 ///
-/// Recovered signal or an error if FFT planning fails.
+/// Returns `FrftError::InvalidSize` if `input` is empty, or
+/// `FrftError::PlanningFailed` if FFT planning fails.
 pub fn ifrft<T: Float>(input: &[Complex<T>], order: f64) -> FrftResult<Vec<Complex<T>>> {
     frft_checked(input, -order)
 }
 
 /// Compute FrFT with error handling.
+///
+/// # Errors
+///
+/// Returns `FrftError::InvalidSize` if `input` is empty, or
+/// `FrftError::PlanningFailed` if FFT planning fails.
 pub fn frft_checked<T: Float>(input: &[Complex<T>], order: f64) -> FrftResult<Vec<Complex<T>>> {
     let plan = Frft::new(input.len(), order)?;
     plan.execute(input)
 }
 
 /// Compute inverse FrFT with error handling.
+///
+/// # Errors
+///
+/// Returns `FrftError::InvalidSize` if `input` is empty, or
+/// `FrftError::PlanningFailed` if FFT planning fails.
 pub fn ifrft_checked<T: Float>(input: &[Complex<T>], order: f64) -> FrftResult<Vec<Complex<T>>> {
     frft_checked(input, -order)
 }

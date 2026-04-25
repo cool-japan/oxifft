@@ -3,15 +3,17 @@
 //! Implements the classic Cooley-Tukey algorithm with DIT/DIF variants.
 //! This is the workhorse algorithm for power-of-2 and composite sizes.
 
-// Static lookup table after statements is intentional for readability
-#![allow(clippy::items_after_statements)]
+#![allow(clippy::items_after_statements)] // reason: static dispatch table defined after use statements is intentional for readability
 
 use crate::dft::codelets::{
     notw_1024_dispatch, notw_128_dispatch, notw_16_dispatch, notw_256_dispatch, notw_2_dispatch,
     notw_32_dispatch, notw_4096_dispatch, notw_4_dispatch, notw_512_dispatch, notw_64_dispatch,
     notw_8_dispatch,
 };
-use crate::kernel::{Complex, Float};
+use crate::kernel::{
+    get_twiddle_table_soa_f32, get_twiddle_table_soa_f64, twiddle_mul_soa_simd_f32,
+    twiddle_mul_soa_simd_f64, Complex, Float, TwiddleDirection,
+};
 use crate::prelude::*;
 
 use super::super::problem::Sign;
@@ -275,9 +277,24 @@ impl<T: Float> CooleyTukeySolver<T> {
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f64>() {
             // Safety: We've verified T is f64, so this pointer cast is safe
             let data_f64: &mut [Complex<f64>] =
-                unsafe { &mut *(std::ptr::from_mut::<[Complex<T>]>(data) as *mut [Complex<f64>]) };
-            dit_butterflies_f64(data_f64, sign);
+                unsafe { &mut *(core::ptr::from_mut::<[Complex<T>]>(data) as *mut [Complex<f64>]) };
+            // For large transforms, use the SoA-twiddle butterfly path.
+            if data_f64.len() >= 4096 {
+                dit_butterflies_soa_f64(data_f64, sign);
+            } else {
+                dit_butterflies_f64(data_f64, sign);
+            }
             return;
+        }
+
+        // f32 SoA path for large transforms
+        if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f32>() {
+            let data_f32: &mut [Complex<f32>] =
+                unsafe { &mut *(core::ptr::from_mut::<[Complex<T>]>(data) as *mut [Complex<f32>]) };
+            if data_f32.len() >= 4096 {
+                dit_butterflies_soa_f32(data_f32, sign);
+                return;
+            }
         }
 
         // Scalar fallback for other types
@@ -931,6 +948,87 @@ fn bit_reverse_permute<T: Float>(data: &mut [Complex<T>]) {
         if i < j {
             data.swap(i, j);
         }
+    }
+}
+
+// ============================================================================
+// SoA-twiddle DIT butterfly stages
+// ============================================================================
+
+/// DIT butterfly stages for f64 using SoA precomputed twiddle tables.
+///
+/// For transforms of size >= 4096, the twiddle tables are large enough that
+/// the SoA layout (separate `re`/`im` arrays) improves cache utilisation and
+/// eliminates the AoS deinterleave shuffle in the SIMD multiplication.
+///
+/// For each butterfly stage of size `m` the table `W_m[0..half_m]` is fetched
+/// from the global SoA cache.  Each group of `m` elements shares the same
+/// twiddle slice.
+fn dit_butterflies_soa_f64(data: &mut [Complex<f64>], sign: Sign) {
+    let n = data.len();
+    let log_n = n.trailing_zeros() as usize;
+    let direction = if sign == Sign::Forward {
+        TwiddleDirection::Forward
+    } else {
+        TwiddleDirection::Inverse
+    };
+
+    let mut m = 2usize;
+    for _ in 0..log_n {
+        let half_m = m / 2;
+        // Fetch precomputed SoA twiddles for this stage's butterfly size.
+        // The table for size `m` provides W_m^0 .. W_m^{m-1}; we only use
+        // the first `half_m` entries.
+        let table = get_twiddle_table_soa_f64(m, direction);
+        let tw_re = &table.re[..half_m];
+        let tw_im = &table.im[..half_m];
+
+        for k in (0..n).step_by(m) {
+            // Apply twiddle to the upper half of this butterfly group.
+            let upper = &mut data[k + half_m..k + m];
+            twiddle_mul_soa_simd_f64(upper, tw_re, tw_im);
+
+            // Butterfly combine.
+            for j in 0..half_m {
+                let u = data[k + j];
+                let t = data[k + j + half_m];
+                data[k + j] = u + t;
+                data[k + j + half_m] = u - t;
+            }
+        }
+        m *= 2;
+    }
+}
+
+/// DIT butterfly stages for f32 using SoA precomputed twiddle tables.
+fn dit_butterflies_soa_f32(data: &mut [Complex<f32>], sign: Sign) {
+    let n = data.len();
+    let log_n = n.trailing_zeros() as usize;
+    let direction = if sign == Sign::Forward {
+        TwiddleDirection::Forward
+    } else {
+        TwiddleDirection::Inverse
+    };
+
+    let mut m = 2usize;
+    for _ in 0..log_n {
+        let half_m = m / 2;
+        let table = get_twiddle_table_soa_f32(m, direction);
+        let tw_re = &table.re[..half_m];
+        let tw_im = &table.im[..half_m];
+
+        for k in (0..n).step_by(m) {
+            let upper = &mut data[k + half_m..k + m];
+            twiddle_mul_soa_simd_f32(upper, tw_re, tw_im);
+
+            for j in 0..half_m {
+                let u = data[k + j];
+                let t = data[k + j + half_m];
+                data[k + j] = u + t;
+                data[k + j + half_m] = u - t;
+            }
+        }
+        m *= 2;
     }
 }
 

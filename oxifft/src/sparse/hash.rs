@@ -3,9 +3,6 @@
 //! Implements hash functions used to map frequencies to buckets
 //! in the FFAST algorithm.
 
-// Allow dead code - infrastructure for future algorithm enhancements
-#![allow(dead_code)]
-
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
@@ -127,7 +124,6 @@ impl FrequencyHash {
 ///
 /// Uses multiple coprime bucket counts to uniquely identify frequencies.
 /// Kept for future algorithm enhancements.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CrtHash {
     /// Individual hash functions with coprime bucket counts.
@@ -138,7 +134,6 @@ pub struct CrtHash {
     n: usize,
 }
 
-#[allow(dead_code)]
 impl CrtHash {
     /// Create a CRT-based multi-hash.
     ///
@@ -223,7 +218,6 @@ impl CrtHash {
 }
 
 /// Calculate GCD using Euclidean algorithm.
-#[allow(dead_code)]
 fn gcd(a: usize, b: usize) -> usize {
     if b == 0 {
         a
@@ -233,7 +227,6 @@ fn gcd(a: usize, b: usize) -> usize {
 }
 
 /// Calculate modular multiplicative inverse using extended Euclidean algorithm.
-#[allow(dead_code)]
 fn mod_inverse(a: usize, m: usize) -> Option<usize> {
     if m == 0 {
         return None;
@@ -253,7 +246,6 @@ fn mod_inverse(a: usize, m: usize) -> Option<usize> {
 /// Extended Euclidean algorithm.
 ///
 /// Returns (gcd, x, y) such that a*x + b*y = gcd.
-#[allow(dead_code)]
 fn extended_gcd(a: i64, b: i64) -> (i64, i64, i64) {
     if a == 0 {
         (b, 0, 1)
@@ -375,5 +367,51 @@ mod tests {
                 assert_eq!(gcd(factors[i], factors[j]), 1);
             }
         }
+    }
+
+    #[test]
+    fn test_frequency_hash_signal_length() {
+        let hash = FrequencyHash::new(16, 1024);
+        assert_eq!(hash.signal_length(), 1024);
+    }
+
+    #[test]
+    fn test_frequency_hash_with_permutation_hash_range() {
+        let hash = FrequencyHash::with_permutation(16, 1024, 42);
+        for freq in 0..50 {
+            let bucket = hash.hash(freq);
+            assert!(bucket < 16, "hash({freq}) = {bucket} out of range [0, 16)");
+        }
+    }
+
+    #[test]
+    fn test_crt_hash_from_factors() {
+        let crt = CrtHash::from_factors(&[3, 5, 7], 1024);
+        assert_eq!(crt.num_hashes(), 3);
+    }
+
+    #[test]
+    fn test_crt_hash_num_hashes_and_hashes() {
+        let crt = CrtHash::new(&[3, 5], 256);
+        assert_eq!(crt.num_hashes(), 2);
+        let hash_fns = crt.hashes();
+        assert_eq!(hash_fns.len(), 2);
+        assert_eq!(hash_fns[0].num_buckets(), 3);
+        assert_eq!(hash_fns[1].num_buckets(), 5);
+    }
+
+    #[test]
+    fn test_extended_gcd_basic() {
+        // Bezout identity: 3*x + 5*y = gcd(3,5)=1
+        let (g, x, y) = extended_gcd(3, 5);
+        assert_eq!(g, 1);
+        assert_eq!(3 * x + 5 * y, g);
+    }
+
+    #[test]
+    fn test_extended_gcd_non_coprime() {
+        let (g, x, y) = extended_gcd(12, 8);
+        assert_eq!(g, 4);
+        assert_eq!(12 * x + 8 * y, g);
     }
 }

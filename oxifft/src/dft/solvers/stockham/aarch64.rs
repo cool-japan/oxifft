@@ -11,6 +11,14 @@ use crate::prelude::*;
 ///
 /// Uses stage fusion to halve memory passes, achieving radix-4 equivalent performance.
 /// Fully vectorized using NEON intrinsics for maximum throughput.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `neon` feature.
+/// On aarch64, NEON is always available; this is enforced by the
+/// `#[target_feature(enable = "neon")]` attribute.
+/// Both `input` and `output` must have the same length, which must be a
+/// power of two.
 #[target_feature(enable = "neon")]
 pub unsafe fn stockham_radix4_neon(
     input: &[Complex<f64>],
@@ -279,6 +287,11 @@ pub unsafe fn stockham_radix4_neon(
 }
 
 /// NEON complex multiply helper: (a + bi) * (c + di)
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `neon` feature (always true on aarch64).
+/// The NEON register arguments must contain valid float64 data.
 #[inline(always)]
 unsafe fn neon_complex_mul(
     v: core::arch::aarch64::float64x2_t,
@@ -297,6 +310,11 @@ unsafe fn neon_complex_mul(
 }
 
 /// Specialized small-size Stockham for n <= 4 using NEON.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `neon` feature (always true on aarch64).
+/// `input` and `output` must have the same length, which must be 1, 2, or 4.
 #[target_feature(enable = "neon")]
 unsafe fn stockham_small_neon(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     unsafe {
@@ -349,183 +367,31 @@ unsafe fn stockham_small_neon(input: &[Complex<f64>], output: &mut [Complex<f64>
     }
 }
 
-/// Inline NEON butterfly for Stockham with optimized lane operations.
-///
-/// The Stockham FFT uses:
-/// - Read with fixed stride n/2
-/// - Write with pattern that progressively sorts data
-/// - Avoids modulo operations in inner loop
-/// - Uses twiddle recurrence to avoid sin/cos per element
-#[inline(always)]
-#[allow(dead_code)]
-unsafe fn stockham_butterfly_neon(
-    src: *const f64,
-    dst: *mut f64,
-    src_u: usize,
-    src_v: usize,
-    dst_u: usize,
-    dst_v: usize,
-    w: &Complex<f64>,
-    sign_pattern: core::arch::aarch64::float64x2_t,
-) {
-    unsafe {
-        use core::arch::aarch64::*;
-
-        let u = vld1q_f64(src.add(src_u * 2));
-        let v = vld1q_f64(src.add(src_v * 2));
-
-        // Load twiddle directly from Complex<f64> (repr(C) = [re, im])
-        let tw_ptr = core::ptr::from_ref(w) as *const f64;
-        let tw = vld1q_f64(tw_ptr);
-        let tw_flip = vextq_f64(tw, tw, 1);
-
-        // Use vdupq_laneq_f64 for efficient lane broadcast
-        let v_re = vdupq_laneq_f64::<0>(v);
-        let v_im = vdupq_laneq_f64::<1>(v);
-        let prod1 = vmulq_f64(v_re, tw);
-        let prod2 = vmulq_f64(v_im, tw_flip);
-        let t = vfmaq_f64(prod1, prod2, sign_pattern);
-
-        vst1q_f64(dst.add(dst_u * 2), vaddq_f64(u, t));
-        vst1q_f64(dst.add(dst_v * 2), vsubq_f64(u, t));
-    }
-}
-
 /// Software prefetch for aarch64 using stable inline assembly.
 /// Uses prfm (prefetch memory) with pldl1keep (prefetch for load, L1 cache, keep in cache).
+///
+/// # Safety
+///
+/// `addr` must be a valid address (does not need to point to readable memory —
+/// a prefetch to an unmapped address is architecturally defined to be a no-op
+/// on aarch64, but passing a completely arbitrary integer cast as a pointer may
+/// violate Rust's provenance rules). Prefer passing addresses derived from valid
+/// slice pointers.
 #[inline(always)]
 unsafe fn prefetch_read(addr: *const i8) {
-    use core::arch::asm;
-    unsafe {
-        asm!(
-            "prfm pldl1keep, [{0}]",
-            in(reg) addr,
-            options(readonly, nostack, preserves_flags)
-        );
-    }
-}
-
-/// NEON-optimized Stockham FFT for f64 (radix-2).
-#[target_feature(enable = "neon")]
-#[allow(dead_code)]
-unsafe fn stockham_neon(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
-    unsafe {
-        use core::arch::aarch64::*;
-
-        let n = input.len();
-        let log_n = n.trailing_zeros() as usize;
-        let sign_val = f64::from(sign.value());
-        let half_n = n / 2;
-
-        // Allocate scratch buffer
-        let mut scratch: Vec<Complex<f64>> = vec![Complex::zero(); n];
-
-        // Copy input to appropriate buffer
-        let (mut src_ptr, mut dst_ptr): (*mut Complex<f64>, *mut Complex<f64>) =
-            if log_n.is_multiple_of(2) {
-                output.copy_from_slice(input);
-                (output.as_mut_ptr(), scratch.as_mut_ptr())
-            } else {
-                scratch.copy_from_slice(input);
-                (scratch.as_mut_ptr(), output.as_mut_ptr())
-            };
-
-        // Sign pattern for complex multiply: [-1, 1]
-        let sign_arr = [-1.0_f64, 1.0];
-        let sign_pattern = vld1q_f64(sign_arr.as_ptr());
-
-        // Process stages
-        let mut m = 1;
-        for _ in 0..log_n {
-            let m2 = m * 2;
-            let num_groups = half_n / m;
-            let angle_step = sign_val * core::f64::consts::TAU / (m2 as f64);
-            let w_step = Complex::cis(angle_step);
-
-            let src = src_ptr as *const f64;
-            let dst = dst_ptr as *mut f64;
-
-            // Process each group
-            for g in 0..num_groups {
-                let src_base = g * m;
-                let dst_base = g * m2;
-
-                // Use twiddle recurrence within group
-                let mut w = Complex::new(1.0, 0.0);
-
-                // Process butterflies in this group
-                let mut j = 0;
-                while j + 3 < m {
-                    // 4x unrolled loop
-                    let w0 = w;
-                    let w1 = w * w_step;
-                    let w2 = w1 * w_step;
-                    let w3 = w2 * w_step;
-
-                    stockham_butterfly_neon(
-                        src,
-                        dst,
-                        src_base + j,
-                        src_base + j + half_n,
-                        dst_base + j,
-                        dst_base + j + m,
-                        &w0,
-                        sign_pattern,
-                    );
-                    stockham_butterfly_neon(
-                        src,
-                        dst,
-                        src_base + j + 1,
-                        src_base + j + 1 + half_n,
-                        dst_base + j + 1,
-                        dst_base + j + 1 + m,
-                        &w1,
-                        sign_pattern,
-                    );
-                    stockham_butterfly_neon(
-                        src,
-                        dst,
-                        src_base + j + 2,
-                        src_base + j + 2 + half_n,
-                        dst_base + j + 2,
-                        dst_base + j + 2 + m,
-                        &w2,
-                        sign_pattern,
-                    );
-                    stockham_butterfly_neon(
-                        src,
-                        dst,
-                        src_base + j + 3,
-                        src_base + j + 3 + half_n,
-                        dst_base + j + 3,
-                        dst_base + j + 3 + m,
-                        &w3,
-                        sign_pattern,
-                    );
-
-                    w = w3 * w_step;
-                    j += 4;
-                }
-
-                // Handle remaining butterflies
-                while j < m {
-                    stockham_butterfly_neon(
-                        src,
-                        dst,
-                        src_base + j,
-                        src_base + j + half_n,
-                        dst_base + j,
-                        dst_base + j + m,
-                        &w,
-                        sign_pattern,
-                    );
-                    w = w * w_step;
-                    j += 1;
-                }
-            }
-
-            core::mem::swap(&mut src_ptr, &mut dst_ptr);
-            m *= 2;
+    // MIRI does not support inline asm; prefetch is a hint with no functional
+    // effect, so skip it entirely under MIRI to allow correctness testing.
+    #[cfg(not(miri))]
+    {
+        use core::arch::asm;
+        unsafe {
+            asm!(
+                "prfm pldl1keep, [{0}]",
+                in(reg) addr,
+                options(readonly, nostack, preserves_flags)
+            );
         }
     }
+    #[cfg(miri)]
+    let _ = addr;
 }

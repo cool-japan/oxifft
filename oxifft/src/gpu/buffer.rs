@@ -31,6 +31,10 @@ unsafe impl<T: Float> Sync for GpuBuffer<T> {}
 
 impl<T: Float> GpuBuffer<T> {
     /// Create a new GPU buffer with the specified size.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::InvalidSize` if `size` is zero.
     pub fn new(size: usize, backend: GpuBackend) -> GpuResult<Self> {
         if size == 0 {
             return Err(GpuError::InvalidSize(size));
@@ -46,6 +50,11 @@ impl<T: Float> GpuBuffer<T> {
     }
 
     /// Create a GPU buffer from existing data.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::InvalidSize` if `data` is empty, or propagates any
+    /// error from `upload`.
     pub fn from_slice(data: &[Complex<T>], backend: GpuBackend) -> GpuResult<Self> {
         if data.is_empty() {
             return Err(GpuError::InvalidSize(0));
@@ -72,6 +81,11 @@ impl<T: Float> GpuBuffer<T> {
     ///
     /// Copies `data` into the CPU staging buffer.  The actual GPU transfer
     /// happens inside `plan::execute()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::SizeMismatch` if `data.len()` does not equal the
+    /// buffer size.
     pub fn upload(&mut self, data: &[Complex<T>]) -> GpuResult<()> {
         if data.len() != self.size {
             return Err(GpuError::SizeMismatch {
@@ -88,6 +102,11 @@ impl<T: Float> GpuBuffer<T> {
     ///
     /// Copies from the CPU staging buffer (populated by `plan::execute()`) into
     /// `data`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::SizeMismatch` if `data.len()` does not equal the
+    /// buffer size.
     pub fn download(&mut self, data: &mut [Complex<T>]) -> GpuResult<()> {
         if data.len() != self.size {
             return Err(GpuError::SizeMismatch {

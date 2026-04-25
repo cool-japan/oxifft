@@ -9,11 +9,26 @@ repository.workspace = true
 homepage = "https://github.com/cool-japan/oxifft"
 documentation = "https://docs.rs/oxifft"
 readme = "README.md"
+rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
 exclude = [
-    "tests/*.proptest-regressions",
-    "benches/*.proptest-regressions",
+    "benches/",
+    "tests/",
+    "fuzz/",
+    "proptest-regressions/",
+    ".github/",
+    "docs/",
+    "scripts/",
+    "BENCHMARK_RESULTS_TEMPLATE.md",
+    "BENCHMARKING.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "PERFORMANCE_ANALYSIS.md",
+    "PROJECT_STATUS.md",
+    "TESTING.md",
+    "TODO.md",
+    "oxifft.md",
 ]
 
 [dependencies]
@@ -27,10 +42,9 @@ spin.workspace = true
 libm.workspace = true
 rayon = { workspace = true, optional = true }
 mpi = { workspace = true, optional = true }
-libc = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-oxifft-codegen = { version = "0.2.0", path = "../oxifft-codegen" }
+oxifft-codegen = { version = "0.3.0", path = "../oxifft-codegen" }
 oxicuda-driver = { workspace = true, optional = true }
 oxicuda-fft = { workspace = true, optional = true }
 oxicuda-metal = { workspace = true, optional = true }
@@ -48,8 +62,6 @@ std = ["dep:serde_json", "num-complex/std", "num-traits/std", "serde/std"]
 # Threading support (requires std)
 threading = ["std", "dep:rayon"]
 simd = []
-# Requires nightly Rust with #![feature(portable_simd)]
-portable_simd = []
 # Quad-precision (128-bit) floating-point support (pure Rust)
 f128-support = []
 # Half-precision (16-bit) floating-point support (pure Rust)
@@ -61,7 +73,7 @@ sparse = []
 # Pruned FFT support (partial input/output computation)
 pruned = []
 # ARM SVE (Scalable Vector Extension) support
-sve = ["dep:libc"]
+sve = []
 # WebAssembly support
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 # Streaming FFT support (STFT, window functions, overlap-add)
@@ -91,9 +103,31 @@ name = "dft_1d"
 harness = false
 
 [[bench]]
+name = "cooley_tukey_scaling"
+harness = false
+
+[[bench]]
+name = "multidim_parallel"
+harness = false
+required-features = ["threading"]
+
+[[bench]]
 name = "beyond_fftw"
 harness = false
 required-features = ["sparse", "pruned", "streaming", "const-fft"]
+
+[[bench]]
+name = "prime_sizes"
+harness = false
+
+[[bench]]
+name = "gpu_vs_cpu"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "dct_benchmarks"
+harness = false
 
 [[example]]
 name = "sparse_fft"

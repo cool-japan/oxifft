@@ -31,10 +31,12 @@
 //! ```
 
 mod mel;
+pub mod sdft;
 mod stft;
 mod window;
 
 pub use mel::{build_mel_filterbank, mel_spectrogram, mfcc, MelConfig};
+pub use sdft::{single_bin_tracker, sliding_dft, ModulatedSdft, SingleBinTracker, SlidingDft};
 pub use stft::{
     istft, istft_overlap_save, magnitude_spectrogram, phase_spectrogram, power_spectrogram, stft,
     stft_overlap_save, StreamingFft,
@@ -43,13 +45,8 @@ pub use window::{
     blackman, cola_normalization, hamming, hann, kaiser, rectangular, WindowFunction,
 };
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use crate::kernel::Float;
+use crate::prelude::*;
 
 /// Ring buffer for efficient streaming data handling.
 ///

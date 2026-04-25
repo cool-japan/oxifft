@@ -16,21 +16,33 @@ impl<T: Float> SimdVector for Scalar<T> {
         Self(value)
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const T) -> Self {
         unsafe { Self(*ptr) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const T) -> Self {
         unsafe { Self(*ptr) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut T) {
         unsafe { *ptr = self.0 }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut T) {
         unsafe { *ptr = self.0 }

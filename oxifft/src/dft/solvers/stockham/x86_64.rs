@@ -13,6 +13,14 @@ use alloc::vec::Vec;
 ///
 /// Uses stage fusion to halve memory passes, achieving radix-4 equivalent performance.
 /// Uses precomputed twiddle tables for cache efficiency.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `avx2` and `fma` features.
+/// Calling this function on a CPU that lacks these features causes undefined
+/// behavior (illegal instruction trap at runtime).
+/// Both `input` and `output` must have the same length, which must be a
+/// power of two.
 #[target_feature(enable = "avx2", enable = "fma")]
 pub unsafe fn stockham_radix4_avx2(
     input: &[Complex<f64>],
@@ -407,6 +415,14 @@ pub unsafe fn stockham_radix4_avx2(
 ///
 /// Uses 512-bit registers to process 4 complex f64 values at once.
 /// Stage fusion halves memory passes for maximum throughput.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `avx512f` and `avx512dq`
+/// features. Calling this function on a CPU that lacks these features causes
+/// undefined behavior (illegal instruction trap at runtime).
+/// Both `input` and `output` must have the same length, which must be a
+/// power of two.
 #[target_feature(enable = "avx512f", enable = "avx512dq")]
 pub unsafe fn stockham_radix4_avx512(
     input: &[Complex<f64>],
@@ -637,6 +653,12 @@ pub unsafe fn stockham_radix4_avx512(
 }
 
 /// AVX-512 complex multiply for single complex value (128-bit).
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `avx512f` feature
+/// (the `_mm_permute_pd` and `_mm_addsub_pd` intrinsics used internally
+/// require at least SSE3/AVX, which is implied by `avx512f`).
 #[inline(always)]
 unsafe fn avx512_cmul_128(
     v: core::arch::x86_64::__m128d,
@@ -659,6 +681,13 @@ unsafe fn avx512_cmul_128(
 }
 
 /// Specialized small-size Stockham for n <= 4 using AVX-512.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `avx512f` and `avx512dq` features.
+/// Calling this function on a CPU that lacks these features causes undefined
+/// behavior (illegal instruction trap at runtime).
+/// `input` and `output` must have the same length, which must be 1, 2, or 4.
 #[target_feature(enable = "avx512f", enable = "avx512dq")]
 unsafe fn stockham_small_avx512(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     unsafe {
@@ -716,8 +745,15 @@ unsafe fn stockham_small_avx512(input: &[Complex<f64>], output: &mut [Complex<f6
 }
 
 /// AVX2-optimized Stockham FFT for f64 (radix-2, for reference).
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `avx2` and `fma` features.
+/// Calling this function on a CPU that lacks these features causes undefined
+/// behavior (illegal instruction trap at runtime).
+/// Both `input` and `output` must have the same length, which must be a
+/// power of two.
 #[target_feature(enable = "avx2", enable = "fma")]
-#[allow(dead_code)]
 unsafe fn stockham_avx2(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     unsafe {
         use core::arch::x86_64::*;

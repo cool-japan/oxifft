@@ -38,7 +38,9 @@ use super::{
 fn gaussian_weights_1d<T: Float>(x: f64, n_grid: usize, kernel_width: usize) -> Vec<(usize, T)> {
     let grid_spacing = 2.0 * core::f64::consts::PI / (n_grid as f64);
     let half_width = kernel_width / 2;
-    let beta = 2.3 * (kernel_width as f64);
+    // β scales with W = half_width, not kernel_width, so that exp(-β) ≈ 0.10
+    // at the kernel edges (j = ±W), giving adequate taper with low sub-grid error.
+    let beta = 2.3 * (half_width as f64);
 
     let grid_pos = x / grid_spacing;
     let center = grid_pos.round() as isize;
@@ -149,7 +151,11 @@ pub fn nufft2d_type1<T: Float>(
     }
 
     // --- Kernel parameters --------------------------------------------------
-    let kernel_width = compute_kernel_width(options.tolerance, options.kernel_width);
+    let kernel_width = compute_kernel_width(
+        options.tolerance,
+        options.oversampling,
+        options.kernel_width,
+    );
     let n_over1 = next_smooth_number(((n1 as f64) * options.oversampling).ceil() as usize);
     let n_over2 = next_smooth_number(((n2 as f64) * options.oversampling).ceil() as usize);
 
@@ -309,7 +315,11 @@ pub fn nufft2d_type2<T: Float>(
     }
 
     // --- Kernel parameters --------------------------------------------------
-    let kernel_width = compute_kernel_width(options.tolerance, options.kernel_width);
+    let kernel_width = compute_kernel_width(
+        options.tolerance,
+        options.oversampling,
+        options.kernel_width,
+    );
     let n_over1 = next_smooth_number(((n1 as f64) * options.oversampling).ceil() as usize);
     let n_over2 = next_smooth_number(((n2 as f64) * options.oversampling).ceil() as usize);
 

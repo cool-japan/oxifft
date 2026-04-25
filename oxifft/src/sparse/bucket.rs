@@ -3,16 +3,8 @@
 //! Implements the bucketing step of FFAST algorithm where frequencies
 //! are hashed into buckets using subsampling and aliasing.
 
-// Allow dead code - infrastructure for future algorithm enhancements
-#![allow(dead_code)]
-
 use crate::kernel::{Complex, Float};
-
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use crate::prelude::*;
 
 /// Bucket containing frequency information.
 #[derive(Debug, Clone)]
@@ -231,8 +223,8 @@ fn estimate_frequency_from_phase<T: Float>(
     let im2 = val2.im.to_f64().unwrap_or(0.0);
 
     // Phase of complex number using atan2
-    let phase1_f64 = im1.atan2(re1);
-    let _phase2_f64 = im2.atan2(re2);
+    let phase1_f64 = libm::atan2(im1, re1);
+    let _phase2_f64 = libm::atan2(im2, re2);
 
     // Phase difference corresponds to frequency shift due to subsampling
     // Use CRT to recover original frequency
@@ -249,8 +241,8 @@ fn estimate_frequency_from_phase<T: Float>(
 
     // Simple frequency estimation from phase
     let two_pi = core::f64::consts::PI * 2.0;
-    let phase1_abs = phase1_f64.abs();
-    let freq_estimate = (phase1_abs * (n as f64) / two_pi).round() as usize;
+    let phase1_abs = libm::fabs(phase1_f64);
+    let freq_estimate = libm::round(phase1_abs * (n as f64) / two_pi) as usize;
 
     if freq_estimate < n && freq_estimate % lcm < lcm {
         Some(freq_estimate % n)

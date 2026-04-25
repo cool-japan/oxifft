@@ -3,7 +3,19 @@
 //! These hardcoded butterfly networks provide optimal performance for sizes 2, 4, and 8.
 //! All codelets are unnormalized (HC2R produces N × original values; caller divides by N).
 
+#[cfg(test)]
+mod codegen_tests;
+mod generated;
+pub mod real_twiddle;
+
 use crate::kernel::{Complex, Float};
+
+pub(crate) use generated::{hc2r_4_gen, hc2r_8_gen, r2hc_4_gen, r2hc_8_gen};
+
+pub use real_twiddle::{
+    real_twiddle_post, real_twiddle_post_16, real_twiddle_post_4, real_twiddle_post_8,
+    real_twiddle_pre, real_twiddle_pre_16, real_twiddle_pre_4, real_twiddle_pre_8,
+};
 
 // ─── R2HC Codelets ───────────────────────────────────────────────────────────
 

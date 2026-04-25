@@ -20,7 +20,6 @@ use crate::mpi::MpiFlags;
 /// 2. Distributed transpose to distribute n1
 /// 3. Local 1D FFTs along n0 dimension
 /// 4. Optional: Transpose back
-#[allow(dead_code)]
 pub struct MpiPlan3D<T: Float, C: Communicator> {
     /// Global dimensions.
     dims: [usize; 3],
@@ -62,6 +61,10 @@ where
     /// * `direction` - Transform direction
     /// * `flags` - Planning flags
     /// * `pool` - MPI pool
+    ///
+    /// # Errors
+    ///
+    /// Returns `MpiError::InvalidDimension` if any dimension is zero.
     pub fn new(
         n0: usize,
         n1: usize,
@@ -136,6 +139,11 @@ where
     /// Get global dimensions.
     pub fn dims(&self) -> [usize; 3] {
         self.dims
+    }
+
+    /// Get the transform direction.
+    pub fn direction(&self) -> Direction {
+        self.direction
     }
 
     /// Get local dimensions.

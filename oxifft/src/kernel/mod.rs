@@ -8,6 +8,7 @@
 //! - The `Planner` that orchestrates algorithm selection
 
 mod complex;
+pub(crate) mod complex_mul;
 #[cfg(feature = "f128-support")]
 pub mod f128_type;
 #[cfg(feature = "f16-support")]
@@ -42,4 +43,10 @@ pub use problem::{Problem, ProblemKind};
 pub use solver::Solver;
 pub use tensor::{IoDim, Tensor};
 pub use trig::TrigTable;
-pub use twiddle::TwiddleCache;
+pub use twiddle::{
+    clear_twiddle_cache, get_twiddle_table_f32, get_twiddle_table_f64, get_twiddle_table_soa_f32,
+    get_twiddle_table_soa_f64, twiddle_mul_scalar_f32, twiddle_mul_scalar_f64,
+    twiddle_mul_simd_f32, twiddle_mul_simd_f64, twiddle_mul_soa_scalar_f32,
+    twiddle_mul_soa_scalar_f64, twiddle_mul_soa_simd_f32, twiddle_mul_soa_simd_f64, TwiddleCache,
+    TwiddleDirection, TwiddleKey, TwiddleTable, TwiddleTableSoA,
+};

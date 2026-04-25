@@ -34,22 +34,35 @@ impl SimdVector for NeonF64 {
         unsafe { Self(vdupq_n_f64(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
+    /// NEON does not distinguish between aligned and unaligned loads.
     #[inline]
     unsafe fn load_aligned(ptr: *const f64) -> Self {
         // NEON doesn't distinguish aligned/unaligned loads
         unsafe { Self(vld1q_f64(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f64) -> Self {
         unsafe { Self(vld1q_f64(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f64) {
         unsafe { vst1q_f64(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f64) {
         unsafe { vst1q_f64(ptr, self.0) }
@@ -76,7 +89,6 @@ impl SimdVector for NeonF64 {
     }
 }
 
-#[allow(dead_code)]
 impl NeonF64 {
     /// Create a vector from two f64 values: [a, b]
     #[inline]
@@ -203,21 +215,33 @@ impl SimdVector for NeonF32 {
         unsafe { Self(vdupq_n_f32(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f32) -> Self {
         unsafe { Self(vld1q_f32(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f32) -> Self {
         unsafe { Self(vld1q_f32(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f32) {
         unsafe { vst1q_f32(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f32) {
         unsafe { vst1q_f32(ptr, self.0) }
@@ -244,7 +268,6 @@ impl SimdVector for NeonF32 {
     }
 }
 
-#[allow(dead_code)]
 impl NeonF32 {
     /// Create a vector from four f32 values.
     #[inline]

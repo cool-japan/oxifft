@@ -22,7 +22,17 @@ pub fn notw_2_simd_f64(x: &mut [Complex<f64>]) {
         }
     }
 
+    // NEON is always available on aarch64
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: NEON is baseline on aarch64
+        unsafe {
+            super::backends::neon_f64::notw_2_neon(x);
+        }
+    }
+
     // Fallback to scalar
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     super::super::notw_2(x);
 }
 
@@ -48,7 +58,16 @@ pub fn notw_4_simd_f64(x: &mut [Complex<f64>], sign: i32) {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: NEON is baseline on aarch64
+        unsafe {
+            super::backends::neon_f64::notw_4_neon(x, sign);
+        }
+    }
+
     // Fallback to scalar
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     super::super::notw_4(x, sign);
 }
 
@@ -70,7 +89,16 @@ pub fn notw_8_simd_f64(x: &mut [Complex<f64>], sign: i32) {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: NEON is baseline on aarch64
+        unsafe {
+            super::backends::neon_f64::notw_8_neon(x, sign);
+        }
+    }
+
     // Fallback to scalar
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     super::super::notw_8(x, sign);
 }
 

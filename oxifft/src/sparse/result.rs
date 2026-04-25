@@ -1,6 +1,7 @@
 //! Sparse FFT result type.
 
 use crate::kernel::{Complex, Float};
+use crate::prelude::*;
 
 /// Result of sparse FFT computation.
 ///

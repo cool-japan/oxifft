@@ -81,15 +81,31 @@ where
 
         // Send count: elements from our rows destined for process p's columns
         let send_count = local_n0 * partition_p.local_n;
-        send_counts.push(send_count as i32);
-        send_displs.push(send_offset as i32);
+        let send_count_i32 = i32::try_from(send_count).map_err(|_| MpiError::CountOverflow {
+            count: send_count,
+            rank: p,
+        })?;
+        let send_displ_i32 = i32::try_from(send_offset).map_err(|_| MpiError::CountOverflow {
+            count: send_offset,
+            rank: p,
+        })?;
+        send_counts.push(send_count_i32);
+        send_displs.push(send_displ_i32);
         send_offset += send_count;
 
         // Receive count: elements from process p's rows for our columns
         let source_partition = LocalPartition::new(n0, num_procs, p);
         let recv_count = source_partition.local_n * local_n1;
-        recv_counts.push(recv_count as i32);
-        recv_displs.push(recv_offset as i32);
+        let recv_count_i32 = i32::try_from(recv_count).map_err(|_| MpiError::CountOverflow {
+            count: recv_count,
+            rank: p,
+        })?;
+        let recv_displ_i32 = i32::try_from(recv_offset).map_err(|_| MpiError::CountOverflow {
+            count: recv_offset,
+            rank: p,
+        })?;
+        recv_counts.push(recv_count_i32);
+        recv_displs.push(recv_displ_i32);
         recv_offset += recv_count;
     }
 
@@ -151,7 +167,11 @@ where
 /// Perform in-place distributed transpose.
 ///
 /// The buffer must be large enough to hold max(input_size, output_size).
-#[allow(dead_code)]
+///
+/// # Errors
+///
+/// Propagates any `MpiError` returned by the underlying `distributed_transpose`
+/// call (e.g. communication failure or rank/size inconsistencies).
 pub fn distributed_transpose_inplace<T, C>(
     pool: &MpiPool<C>,
     data: &mut [Complex<T>],
@@ -185,6 +205,22 @@ mod tests {
     use super::*;
 
     // Note: Full transpose tests require MPI, so we test helper functions here
+
+    /// Demonstrates the truncation hazard: usize counts exceeding i32::MAX cannot
+    /// be safely passed to MPI APIs that expect i32 element counts.
+    #[test]
+    fn test_count_overflow_error() {
+        let count = (i32::MAX as usize) + 1;
+        let result = i32::try_from(count);
+        assert!(result.is_err(), "count {count} must not fit in i32");
+        // Also verify that the MpiError::CountOverflow variant formats correctly
+        let err = MpiError::CountOverflow { count, rank: 0 };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("overflow"),
+            "error message should mention overflow: {msg}"
+        );
+    }
 
     #[test]
     fn test_partition_calculation() {

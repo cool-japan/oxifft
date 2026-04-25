@@ -1127,6 +1127,9 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
+    // File I/O requires `-Zmiri-disable-isolation`; excluded from default MIRI runs.
+    // The underlying `export_to_file`/`import_from_file` logic is tested in native mode.
+    #[cfg_attr(miri, ignore)]
     fn test_import_export_file_roundtrip() {
         let _guard = GLOBAL_WISDOM_TEST_LOCK
             .lock()
@@ -1159,6 +1162,9 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
+    // File I/O requires `-Zmiri-disable-isolation`; excluded from default MIRI runs.
+    // The underlying `merge_from_file` logic is tested in native mode.
+    #[cfg_attr(miri, ignore)]
     fn test_merge_from_file() {
         let _guard = GLOBAL_WISDOM_TEST_LOCK
             .lock()

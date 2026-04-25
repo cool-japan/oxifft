@@ -1,35 +1,37 @@
 # oxifft
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://crates.io/crates/oxifft)
-[![Tests](https://img.shields.io/badge/tests-858%20passing-brightgreen.svg)](#)
-[![API Items](https://img.shields.io/badge/API%20items-688-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://crates.io/crates/oxifft)
+[![Tests](https://img.shields.io/badge/tests-1360%20passing-brightgreen.svg)](#)
+[![API Items](https://img.shields.io/badge/API%20items-1544-blue.svg)](#)
 [![Features](https://img.shields.io/badge/features-18-orange.svg)](#features)
 
 Pure Rust implementation of FFTW - the Fastest Fourier Transform in the West.
 
 ## Overview
 
-OxiFFT v0.2.0 is a production-ready FFT library with **858 passing tests**, **688 public API items**, and **zero unimplemented features**. It provides:
+OxiFFT v0.3.0 is a production-ready FFT library with **1360 passing tests**, **1544 public API items**, and **zero unimplemented features**. It provides:
 
 - **Complex DFT** (Discrete Fourier Transform) - forward & inverse
 - **Real FFT** (R2C/C2R) - optimized real-valued transforms
 - **DCT/DST** (Discrete Cosine/Sine Transforms) - all 8 variants
 - **Multi-dimensional transforms** - 1D, 2D, 3D, and N-dimensional
 - **Batch processing** - vectorized multi-transform execution
-- **SIMD optimization** - SSE2, AVX, AVX-512, NEON, SVE
+- **SIMD optimization** - SSE2, AVX, AVX-512, NEON, SVE; WASM SIMD v128 intrinsics (real hardware acceleration in browsers/wasmtime)
 - **Threading support** - Rayon-based parallelism
 - **Wisdom system** - plan caching and serialization
-- **GPU acceleration** - CUDA and Metal backends
+- **GPU acceleration** - CUDA and Metal backends; GPU batch FFT with automatic chunking (Metal + CUDA)
+- **DCT/DST** - All 8 variants; DCT-II/III/IV Makhoul O(n log n) algorithm (~4× faster vs v0.2.0)
 - **Sparse FFT** - O(k log n) for k-sparse signals
 - **Streaming FFT** - STFT, spectrograms, MFCC
 - **Signal processing** - Welch's method, Hilbert transform, cepstral analysis
-- **Advanced transforms** - NUFFT, FrFT, convolution, autodiff
+- **Advanced transforms** - NUFFT (2D/3D), FrFT, convolution, autodiff
+- **SVE detection** via `std::arch` (no libc dependency)
 
 ## Module Structure
 
 ```
 src/
-├── lib.rs              # Public API exports (688 items)
+├── lib.rs              # Public API exports (1544 items)
 ├── prelude.rs          # Internal prelude for no_std
 │
 ├── api/                # User-facing API
@@ -195,12 +197,12 @@ OxiFFT provides 18 configurable feature flags:
 
 ```toml
 [dependencies]
-oxifft = { version = "0.2.0", features = ["sparse", "streaming", "signal"] }
+oxifft = { version = "0.3.0", features = ["sparse", "streaming", "signal"] }
 ```
 
 ## API Overview
 
-OxiFFT exports 688 public API items organized into these categories:
+OxiFFT exports 1544 public API items organized into these categories:
 
 ### High-Level Plans
 - `Plan`, `Plan2D`, `Plan3D`, `PlanND` - Complex FFT plans
@@ -277,7 +279,7 @@ See the `examples/` directory for complete examples:
 
 OxiFFT has comprehensive test coverage:
 
-- **858 tests passing** across unit, integration, and property-based tests
+- **1360 tests passing** across unit, integration, and property-based tests
 - **0 unimplemented items** - all features are fully implemented
 - Fuzz testing with `proptest` and `cargo-fuzz`
 - Comparison tests against `rustfft` and FFTW

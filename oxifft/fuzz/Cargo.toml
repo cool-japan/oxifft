@@ -1,0 +1,32 @@
+[package]
+name = "oxifft-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxifft = { path = "..", features = ["std"] }
+
+[[bin]]
+name = "plan_create"
+path = "fuzz_targets/plan_create.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "r2c_roundtrip"
+path = "fuzz_targets/r2c_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wisdom_parse"
+path = "fuzz_targets/wisdom_parse.rs"
+test = false
+doc = false

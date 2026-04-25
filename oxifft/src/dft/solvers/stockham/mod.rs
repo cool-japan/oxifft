@@ -9,6 +9,8 @@
 
 mod generic;
 
+pub use generic::{stockham_radix4_scalar, stockham_scalar};
+
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 
@@ -18,6 +20,7 @@ mod x86_64;
 use crate::dft::problem::Sign;
 use crate::kernel::{Complex, Float};
 #[allow(unused_imports)]
+// reason: prelude glob re-exports are selectively used per feature gate (std vs no_std)
 use crate::prelude::*;
 
 // Small size functions are used internally by the scalar fallback path
@@ -76,9 +79,9 @@ impl<T: Float> StockhamSolver<T> {
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f64>() {
             // Safety: We've verified T is f64
             let input_f64: &[Complex<f64>] =
-                unsafe { &*(std::ptr::from_ref::<[Complex<T>]>(input) as *const [Complex<f64>]) };
+                unsafe { &*(core::ptr::from_ref::<[Complex<T>]>(input) as *const [Complex<f64>]) };
             let output_f64: &mut [Complex<f64>] = unsafe {
-                &mut *(std::ptr::from_mut::<[Complex<T>]>(output) as *mut [Complex<f64>])
+                &mut *(core::ptr::from_mut::<[Complex<T>]>(output) as *mut [Complex<f64>])
             };
             stockham_f64(input_f64, output_f64, sign);
             return;
@@ -130,7 +133,7 @@ pub fn stockham_f64(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: S
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_lossless, clippy::cast_precision_loss)]
+#[allow(clippy::cast_lossless, clippy::cast_precision_loss)] // reason: test helpers use usize as f64 casts for FFT angle computation; precision loss is intentional for test data
 mod tests {
     use super::*;
 

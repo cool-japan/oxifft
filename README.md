@@ -12,7 +12,7 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 ## Features
 
 ### Core FFT Functionality
-- **Pure Rust**: No C dependencies, no FFI, no bindgen (Pure Rust Policy compliant)
+- **Pure Rust by default**: No C dependencies, no FFI, no bindgen with default features (Pure Rust Policy compliant). The optional `mpi` and `sve` features link against system libraries — see [MPI notes](#mpi).
 - **Full Algorithm Support**: Cooley-Tukey, Rader, Bluestein, Direct O(n²)
 - **Transform Types**: Complex DFT, Real FFT (R2C/C2R), DCT/DST variants, DHT
 - **Multi-Dimensional**: 1D, 2D, 3D, and N-D transforms
@@ -33,17 +33,17 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 - **Automatic Differentiation**: Forward and backward mode gradients for FFT operations
 - **Signal Processing**: Hilbert transform, analytic signal, Welch's PSD, cross-spectral density, coherence, cepstral analysis, FFT-based resampling (`signal` feature)
 - **GPU Acceleration**: CUDA (NVIDIA) and Metal (Apple) backends
-- **MPI Distributed Computing**: 2D/3D/N-D distributed FFTs with slab decomposition
+- **MPI Distributed Computing**: 2D/3D/N-D distributed FFTs with slab decomposition (`mpi` feature — links against system OpenMPI/MPICH; see [MPI notes](#mpi))
 - **WebAssembly**: Browser-compatible FFT with WASM SIMD support
 
 ## Project Status
 
 ✅ **Core FFT functionality is COMPLETE**
-✅ **858 tests passing** (all features, stress tests validated)
+✅ **1365 tests passing** (all features, stress tests validated)
 ✅ **Zero clippy warnings** (all features)
 ✅ **Performance optimized** (9/15 composite sizes faster than RustFFT)
-✅ **688 public API items** documented and tested
-✅ **54K+ lines of code** across 3 crates (43,505 SLoC)
+✅ **1544 public API items** documented and tested
+✅ **61K+ lines of code** across 3 crates (60,970 SLoC)
 
 See [PROJECT_STATUS.md](./PROJECT_STATUS.md) for comprehensive status, [oxifft.md](./oxifft.md) for architecture blueprint, and [TODO.md](./TODO.md) for detailed roadmap.
 
@@ -379,6 +379,29 @@ fftw-compat = []   # FFTW-compatible API surface
 - Cooley-Tukey: "An Algorithm for the Machine Calculation of Complex Fourier Series" (1965)
 - Rader's Algorithm: "Discrete Fourier transforms when the number of data samples is prime" (1968)
 - Bluestein: "A linear filtering approach to the computation of discrete Fourier transform" (1970)
+
+## MPI
+
+<a name="mpi"></a>
+
+The `mpi` feature enables distributed FFT across multiple compute nodes via MPI.
+
+**⚠ C/Fortran system dependency:** Unlike all other OxiFFT features, `mpi` links
+against the system MPI library (OpenMPI, MPICH, or equivalent — a C/Fortran runtime).
+This intentionally breaks the Pure Rust default build. A compile-time warning is emitted
+when this feature is enabled.
+
+No pure-Rust MPI implementation exists (as of 2026) that covers the API surface required
+for distributed FFT. If one becomes available, OxiFFT will adopt it and this note will
+be removed.
+
+To use MPI:
+```toml
+oxifft = { version = "0.3", features = ["mpi"] }
+```
+
+Ensure a system MPI library is installed (`brew install openmpi` on macOS,
+`apt-get install libopenmpi-dev` on Debian/Ubuntu).
 
 ## Sponsorship
 

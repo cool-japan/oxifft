@@ -3,9 +3,6 @@
 //! Implements the peeling-based decoding algorithm that iteratively
 //! extracts frequency components from bucketized observations.
 
-// Allow dead code - infrastructure for future algorithm enhancements
-#![allow(dead_code)]
-
 use crate::kernel::{Complex, Float};
 
 use super::bucket::{Bucket, BucketArray};
@@ -482,5 +479,68 @@ mod tests {
             result.is_empty(),
             "Pure-noise input should yield an empty result"
         );
+    }
+
+    /// `num_detected` returns 0 before decode and can be read without panicking.
+    #[test]
+    fn test_num_detected_initial() {
+        let decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 5, 0.001);
+        assert_eq!(decoder.num_detected(), 0);
+    }
+
+    /// `reset` clears all detected frequencies.
+    #[test]
+    fn test_reset_clears_detected() {
+        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 5, 0.001);
+        // Verify reset on a fresh decoder is safe.
+        decoder.reset();
+        assert_eq!(decoder.num_detected(), 0);
+
+        // Decode something, then reset and verify state is cleared.
+        let mut stage: BucketArray<f64> = BucketArray::new(16, 4, 64);
+        if let Some(b) = stage.get_mut(3) {
+            b.value = Complex::new(10.0, 0.0);
+            b.count = 1;
+            b.detected_freq = Some(3);
+        }
+        let mut stages = vec![stage];
+        let _ = decoder.decode(&mut stages);
+
+        decoder.reset();
+        assert_eq!(decoder.num_detected(), 0);
+    }
+
+    /// `detect_singleton` returns `Some` for above-threshold values.
+    #[test]
+    fn test_detect_singleton_above_threshold() {
+        let val = Complex::new(2.0_f64, 0.0);
+        let result = detect_singleton(val, 1.0);
+        assert!(result.is_some());
+        let detected = result.unwrap();
+        assert!((detected.re - 2.0).abs() < 1e-10);
+    }
+
+    /// `detect_singleton` returns `None` for below-threshold values.
+    #[test]
+    fn test_detect_singleton_below_threshold() {
+        let val = Complex::new(0.001_f64, 0.0);
+        assert!(detect_singleton(val, 1.0).is_none());
+    }
+
+    /// `is_collision` detects very different magnitudes as a collision.
+    #[test]
+    fn test_is_collision_different_magnitudes() {
+        let large = Complex::new(10.0_f64, 0.0);
+        let small = Complex::new(0.5_f64, 0.0);
+        // ratio = 4 / 400 = 0.01 < 0.3, so collision
+        assert!(is_collision(large, small, 0.1));
+    }
+
+    /// `is_collision` returns false for similar magnitudes.
+    #[test]
+    fn test_is_collision_similar_magnitudes() {
+        let a = Complex::new(1.0_f64, 0.0);
+        let b = Complex::new(0.9_f64, 0.1);
+        assert!(!is_collision(a, b, 0.1));
     }
 }

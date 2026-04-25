@@ -6,6 +6,7 @@ mod hc2hc;
 mod r2c;
 mod r2r;
 mod rank_geq2;
+mod types_r2r;
 mod vrank_geq1;
 
 pub use c2r::C2rSolver;

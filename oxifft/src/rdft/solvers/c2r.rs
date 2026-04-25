@@ -11,7 +11,7 @@
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
-use crate::rdft::codelets::{hc2r_4, hc2r_8};
+use crate::rdft::codelets::{hc2r_4_gen, hc2r_8_gen};
 
 /// Complex-to-Real FFT solver.
 ///
@@ -106,12 +106,12 @@ impl<T: Float> C2rSolver<T> {
         }
 
         if n == 4 {
-            hc2r_4(input, output);
+            hc2r_4_gen(input, output);
             return;
         }
 
         if n == 8 {
-            hc2r_8(input, output);
+            hc2r_8_gen(input, output);
             return;
         }
 

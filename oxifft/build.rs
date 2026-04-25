@@ -20,14 +20,6 @@ See https://github.com/cool-japan/oxifft/blob/master/README.md#mpi for details."
         );
     }
 
-    if sve_enabled {
-        println!(
-            "cargo:warning=\
-oxifft: the `sve` feature uses the `libc` crate for ARM SVE HWCAP detection. \
-`libc` itself is pure Rust (it uses inline assembly / syscalls), but it \
-provides C-compatible types and is considered a C-boundary crate. \
-A future release will replace this with `std::arch` when SVE intrinsics \
-stabilise in the Rust standard library."
-        );
-    }
+    // sve feature now uses std::arch::is_aarch64_feature_detected! — no C dep.
+    let _ = sve_enabled;
 }

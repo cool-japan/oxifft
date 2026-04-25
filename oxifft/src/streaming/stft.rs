@@ -3,14 +3,9 @@
 //! STFT analyzes how the frequency content of a signal changes over time
 //! by computing FFT on overlapping windowed segments.
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
+use crate::prelude::*;
 
 use super::window::WindowFunction;
 use super::RingBuffer;
@@ -48,12 +43,19 @@ impl<T: Float> StreamingFft<T> {
     /// * `hop_size` - Number of samples between frames
     /// * `window` - Window function to use
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```ignore
+    /// ```
     /// use oxifft::streaming::{StreamingFft, WindowFunction};
     ///
-    /// let mut processor = StreamingFft::new(256, 64, WindowFunction::Hann);
+    /// let mut processor = StreamingFft::<f64>::new(8, 4, WindowFunction::Rectangular);
+    /// // Feed exactly fft_size samples to produce one frame
+    /// let samples = vec![1.0_f64; 8];
+    /// let count = processor.feed(&samples);
+    /// assert!(count >= 1, "expected at least one complete frame");
+    /// let frame = processor.pop_frame().expect("expected a frame");
+    /// // Frame spectrum has fft_size bins
+    /// assert_eq!(frame.len(), 8);
     /// ```
     pub fn new(fft_size: usize, hop_size: usize, window: WindowFunction) -> Self {
         let window_coeffs = window.generate(fft_size);

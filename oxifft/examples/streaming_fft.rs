@@ -62,11 +62,11 @@ fn main() {
     println!("Peak frequencies over time:");
     let freq_resolution = sample_rate / fft_size as f64;
     for (frame_idx, frame) in mag_spec.iter().enumerate().step_by(10) {
-        let (peak_bin, _) = frame
+        let (peak_bin, _) = frame[..=fft_size / 2] // only positive frequencies
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .unwrap();
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("NaN in magnitude spectrum"))
+            .unwrap_or((0, &0.0));
         let peak_freq = peak_bin as f64 * freq_resolution;
         let time = frame_idx as f64 * hop_size as f64 / sample_rate;
         println!("  t = {time:.3} s: peak at {peak_freq:.1} Hz");
@@ -92,14 +92,14 @@ fn main() {
             if let Some(spec) = streaming_fft.pop_frame() {
                 total_frames += 1;
                 if total_frames % 5 == 0 {
-                    // Find peak in this frame
+                    // Find peak in this frame (positive frequencies only)
                     let magnitudes: Vec<f64> =
                         spec.iter().map(|c: &Complex<f64>| c.norm()).collect();
-                    let (peak_bin, peak_mag): (usize, &f64) = magnitudes
+                    let (peak_bin, peak_mag): (usize, &f64) = magnitudes[..=fft_size / 2]
                         .iter()
                         .enumerate()
-                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                        .unwrap();
+                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("NaN in magnitude"))
+                        .unwrap_or((0, &0.0));
                     let peak_freq = peak_bin as f64 * freq_resolution;
                     println!("  Frame {total_frames}: peak at {peak_freq:.1} Hz (magnitude: {peak_mag:.3})");
                 }

@@ -3,7 +3,7 @@
 //! Uses Taylor series approximations for sin and cos that can be computed
 //! at compile time (in const context).
 
-#![allow(clippy::unreadable_literal)] // Taylor series constants for const FFT computation
+#![allow(clippy::unreadable_literal)] // reason: Taylor series factorial denominators (87178291200, 6227020800) are unreadable by design
 
 use core::f64::consts::PI;
 
@@ -98,14 +98,14 @@ pub const fn twiddle_factor(k: usize, n: usize) -> (f64, f64) {
 ///
 /// Returns (cos, sin) tuple.
 #[inline]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: public API for inverse twiddle factors, used by const-FFT callers
 pub const fn twiddle_factor_inv(k: usize, n: usize) -> (f64, f64) {
     let angle = 2.0 * PI * (k as f64) / (n as f64);
     (const_cos(angle), const_sin(angle))
 }
 
 /// Precomputed twiddle factors for size N.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: public API type for const-FFT users; not all fields used internally
 pub struct TwiddleTable<const N: usize> {
     /// Cosine values: cos(-2πk/N) for k = 0..N/2
     pub cos: [f64; N],
@@ -113,7 +113,7 @@ pub struct TwiddleTable<const N: usize> {
     pub sin: [f64; N],
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: impl block for public TwiddleTable; methods unused internally but part of public API
 impl<const N: usize> TwiddleTable<N> {
     /// Create a new twiddle table at runtime.
     pub fn new() -> Self {
@@ -122,8 +122,8 @@ impl<const N: usize> TwiddleTable<N> {
 
         for k in 0..N {
             let angle = -2.0 * PI * (k as f64) / (N as f64);
-            cos[k] = angle.cos();
-            sin[k] = angle.sin();
+            cos[k] = libm::cos(angle);
+            sin[k] = libm::sin(angle);
         }
 
         Self { cos, sin }

@@ -21,15 +21,10 @@
 //! let coeffs = mfcc(&signal, &config, 13);            // Vec<Vec<f64>>
 //! ```
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use num_traits::Float as NumFloat;
 
 use crate::kernel::Float;
+use crate::prelude::*;
 
 use super::stft::{power_spectrogram, stft as compute_stft};
 use super::window::WindowFunction;

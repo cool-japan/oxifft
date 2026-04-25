@@ -21,7 +21,7 @@ fn make_input(n: usize) -> Vec<f64> {
 
 #[test]
 fn test_dct2_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Redft10);
+    let solver = R2rSolver::<f64>::new(R2rKind::Redft10, 0);
     for &n in &[16usize, 32, 64, 128, 256, 512, 1024] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -43,7 +43,7 @@ fn test_dct2_fast_matches_direct() {
 
 #[test]
 fn test_dct3_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Redft01);
+    let solver = R2rSolver::<f64>::new(R2rKind::Redft01, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -65,7 +65,7 @@ fn test_dct3_fast_matches_direct() {
 
 #[test]
 fn test_dct4_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Redft11);
+    let solver = R2rSolver::<f64>::new(R2rKind::Redft11, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -87,7 +87,7 @@ fn test_dct4_fast_matches_direct() {
 
 #[test]
 fn test_dct1_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Redft00);
+    let solver = R2rSolver::<f64>::new(R2rKind::Redft00, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -109,7 +109,7 @@ fn test_dct1_fast_matches_direct() {
 
 #[test]
 fn test_dht_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Dht);
+    let solver = R2rSolver::<f64>::new(R2rKind::Dht, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -131,7 +131,7 @@ fn test_dht_fast_matches_direct() {
 
 #[test]
 fn test_dst1_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Rodft00);
+    let solver = R2rSolver::<f64>::new(R2rKind::Rodft00, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -153,7 +153,7 @@ fn test_dst1_fast_matches_direct() {
 
 #[test]
 fn test_dst2_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Rodft10);
+    let solver = R2rSolver::<f64>::new(R2rKind::Rodft10, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -175,7 +175,7 @@ fn test_dst2_fast_matches_direct() {
 
 #[test]
 fn test_dst3_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Rodft01);
+    let solver = R2rSolver::<f64>::new(R2rKind::Rodft01, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];
@@ -197,7 +197,7 @@ fn test_dst3_fast_matches_direct() {
 
 #[test]
 fn test_dst4_fast_matches_direct() {
-    let solver = R2rSolver::<f64>::new(R2rKind::Rodft11);
+    let solver = R2rSolver::<f64>::new(R2rKind::Rodft11, 0);
     for &n in &[16usize, 32, 64, 128, 256] {
         let input = make_input(n);
         let mut out_direct = vec![0.0_f64; n];

@@ -24,14 +24,14 @@ pub fn stockham_generic<T: Float>(input: &[Complex<T>], output: &mut [Complex<T>
     let (mut src, mut dst) = if log_n.is_multiple_of(2) {
         output.copy_from_slice(input);
         (
-            std::ptr::from_mut::<[Complex<T>]>(output),
-            std::ptr::from_mut::<[Complex<T>]>(scratch.as_mut_slice()),
+            core::ptr::from_mut::<[Complex<T>]>(output),
+            core::ptr::from_mut::<[Complex<T>]>(scratch.as_mut_slice()),
         )
     } else {
         scratch.copy_from_slice(input);
         (
-            std::ptr::from_mut::<[Complex<T>]>(scratch.as_mut_slice()),
-            std::ptr::from_mut::<[Complex<T>]>(output),
+            core::ptr::from_mut::<[Complex<T>]>(scratch.as_mut_slice()),
+            core::ptr::from_mut::<[Complex<T>]>(output),
         )
     };
 
@@ -85,7 +85,6 @@ pub fn stockham_generic<T: Float>(input: &[Complex<T>], output: &mut [Complex<T>
 /// Stage-fused Stockham implementation for f64 (scalar).
 ///
 /// Fuses pairs of radix-2 stages to halve memory passes, achieving radix-4 equivalent performance.
-#[allow(dead_code)]
 pub fn stockham_radix4_scalar(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     // Use stage fusion for correctness and performance
     stockham_radix4_scalar_wip(input, output, sign);
@@ -95,7 +94,6 @@ pub fn stockham_radix4_scalar(input: &[Complex<f64>], output: &mut [Complex<f64>
 ///
 /// Fuses pairs of radix-2 stages together to reduce memory passes by half.
 /// This is NOT true radix-4, but combines two consecutive radix-2 stages.
-#[allow(dead_code)]
 fn stockham_radix4_scalar_wip(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     let n = input.len();
     let log_n = n.trailing_zeros() as usize;
@@ -269,7 +267,6 @@ fn stockham_radix4_scalar_wip(input: &[Complex<f64>], output: &mut [Complex<f64>
 /// Scalar Stockham implementation for f64 (radix-2, for reference/testing).
 ///
 /// Uses pre-computed twiddle factors per stage for efficiency.
-#[allow(dead_code)]
 pub fn stockham_scalar(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     let n = input.len();
     let log_n = n.trailing_zeros() as usize;
@@ -344,6 +341,7 @@ pub fn stockham_scalar(input: &[Complex<f64>], output: &mut [Complex<f64>], sign
 
 /// Size-2 FFT: single butterfly, no twiddle factors needed.
 #[allow(clippy::inline_always, dead_code)]
+// reason: small FFT kernel always inlined for performance; not called on all platforms but kept as building block
 #[inline(always)]
 pub fn stockham_size2(input: &[Complex<f64>], output: &mut [Complex<f64>]) {
     let x0 = input[0];
@@ -354,6 +352,7 @@ pub fn stockham_size2(input: &[Complex<f64>], output: &mut [Complex<f64>]) {
 
 /// Size-4 FFT: radix-4 butterfly with ±i rotation.
 #[allow(clippy::inline_always, dead_code)]
+// reason: small FFT kernel always inlined for performance; not called on all platforms but kept as building block
 #[inline(always)]
 pub fn stockham_size4(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     let x0 = input[0];
@@ -384,6 +383,7 @@ pub fn stockham_size4(input: &[Complex<f64>], output: &mut [Complex<f64>], sign:
 
 /// Size-8 FFT: Use 2 size-4 FFTs with twiddles (Cooley-Tukey decimation-in-time).
 #[allow(clippy::inline_always, dead_code)]
+// reason: small FFT kernel always inlined for performance; not called on all platforms but kept as building block
 #[inline(always)]
 pub fn stockham_size8(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     let sign_val = f64::from(sign.value());
@@ -411,6 +411,7 @@ pub fn stockham_size8(input: &[Complex<f64>], output: &mut [Complex<f64>], sign:
 
 /// Size-16 FFT: Use 2 size-8 FFTs with twiddles.
 #[allow(clippy::inline_always, dead_code)]
+// reason: small FFT kernel always inlined for performance; not called on all platforms but kept as building block
 #[inline(always)]
 pub fn stockham_size16(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     let sign_val = f64::from(sign.value());
@@ -439,5 +440,63 @@ pub fn stockham_size16(input: &[Complex<f64>], output: &mut [Complex<f64>], sign
 
         output[k] = even_out[k] + t;
         output[k + 8] = even_out[k] - t;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn complex_approx_eq(a: Complex<f64>, b: Complex<f64>, eps: f64) -> bool {
+        (a.re - b.re).abs() < eps && (a.im - b.im).abs() < eps
+    }
+
+    #[test]
+    fn test_stockham_radix4_scalar_size8() {
+        // stockham_radix4_scalar delegates to stockham_radix4_scalar_wip
+        let input: Vec<Complex<f64>> = (0..8).map(|i| Complex::new(f64::from(i), 0.0)).collect();
+        let mut out_r4 = vec![Complex::zero(); 8];
+        let mut out_scalar = vec![Complex::zero(); 8];
+        stockham_radix4_scalar(&input, &mut out_r4, Sign::Forward);
+        stockham_scalar(&input, &mut out_scalar, Sign::Forward);
+        // Both should agree
+        for (a, b) in out_r4.iter().zip(out_scalar.iter()) {
+            assert!(complex_approx_eq(*a, *b, 1e-9));
+        }
+    }
+
+    #[test]
+    fn test_stockham_radix4_scalar_size16() {
+        let input: Vec<Complex<f64>> = (0..16).map(|i| Complex::new(f64::from(i), 0.0)).collect();
+        let mut out_r4 = vec![Complex::zero(); 16];
+        let mut out_scalar = vec![Complex::zero(); 16];
+        stockham_radix4_scalar(&input, &mut out_r4, Sign::Forward);
+        stockham_scalar(&input, &mut out_scalar, Sign::Forward);
+        for (a, b) in out_r4.iter().zip(out_scalar.iter()) {
+            assert!(complex_approx_eq(*a, *b, 1e-9));
+        }
+    }
+
+    #[test]
+    fn test_stockham_scalar_size4() {
+        let input: Vec<Complex<f64>> = (0..4).map(|i| Complex::new(f64::from(i), 0.0)).collect();
+        let mut output = vec![Complex::zero(); 4];
+        stockham_scalar(&input, &mut output, Sign::Forward);
+        // DC component = sum of all inputs = 0+1+2+3 = 6
+        assert!((output[0].re - 6.0).abs() < 1e-9);
+        assert!(output[0].im.abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_stockham_scalar_inverse() {
+        let input: Vec<Complex<f64>> = (0..8).map(|i| Complex::new(f64::from(i), 0.0)).collect();
+        let mut forward = vec![Complex::zero(); 8];
+        let mut backward = vec![Complex::zero(); 8];
+        stockham_scalar(&input, &mut forward, Sign::Forward);
+        stockham_scalar(&forward, &mut backward, Sign::Backward);
+        let n = 8.0_f64;
+        for (orig, recov) in input.iter().zip(backward.iter()) {
+            assert!(complex_approx_eq(*orig, *recov / n, 1e-9));
+        }
     }
 }

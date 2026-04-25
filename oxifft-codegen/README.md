@@ -1,7 +1,7 @@
 # oxifft-codegen
 
-**Version:** 0.2.0  
-**Status:** ⚠️ Early Development — API may change
+**Version:** 0.3.0  
+**Status:** ✅ Stable — codelet generation complete for all supported sizes
 
 Procedural macro crate for OxiFFT codelet generation.
 

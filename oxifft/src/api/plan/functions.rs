@@ -6,10 +6,10 @@ use crate::api::{Direction, Flags};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
 
-use super::types::{
-    Plan, Plan2D, PlanND, RealPlan2D, RealPlan3D, RealPlanND, SplitPlan, SplitPlan2D, SplitPlan3D,
-    SplitPlanND,
-};
+use super::types::{Plan, Plan2D};
+use super::types_nd::{PlanND, RealPlanND};
+use super::types_real::{RealPlan2D, RealPlan3D};
+use super::types_split::{SplitPlan, SplitPlan2D, SplitPlan3D, SplitPlanND};
 
 /// Convenience function for N-dimensional forward FFT.
 ///

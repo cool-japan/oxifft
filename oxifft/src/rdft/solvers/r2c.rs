@@ -11,7 +11,7 @@
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
-use crate::rdft::codelets::{r2hc_4, r2hc_8};
+use crate::rdft::codelets::{r2hc_4_gen, r2hc_8_gen};
 
 /// Real-to-Complex FFT solver.
 ///
@@ -100,12 +100,12 @@ impl<T: Float> R2cSolver<T> {
         }
 
         if n == 4 {
-            r2hc_4(input, output);
+            r2hc_4_gen(input, output);
             return;
         }
 
         if n == 8 {
-            r2hc_8(input, output);
+            r2hc_8_gen(input, output);
             return;
         }
 

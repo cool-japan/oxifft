@@ -18,3 +18,9 @@ rustc-ice-*.txt
 
 # Proptest failure persistence files (auto-generated during test runs)
 **/*.proptest-regressions
+
+
+# wasm-pack build outputs
+**/pkg/
+**/pkg_simd/
+**/pkg_node/

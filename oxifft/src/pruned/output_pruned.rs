@@ -2,12 +2,7 @@
 
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
-
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use crate::prelude::*;
 
 /// Compute FFT for only selected output frequencies.
 ///
@@ -47,7 +42,7 @@ pub fn fft_pruned_output<T: Float>(
 
     // Decision: use Goertzel for few outputs, full FFT for many
     // Crossover point is approximately log2(N)
-    let crossover = (n as f64).log2().ceil() as usize;
+    let crossover = libm::ceil(libm::log2(n as f64)) as usize;
 
     if output_indices.len() <= crossover {
         // Use Goertzel algorithm for each frequency
@@ -96,7 +91,7 @@ fn fft_and_select<T: Float>(input: &[Complex<T>], output_indices: &[usize]) -> V
 /// # Returns
 ///
 /// Vector of complex values at the specified frequencies.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: public API for output-pruned FFT; not all call sites are compiled in every feature configuration
 pub fn fft_pruned_output_butterfly<T: Float>(
     input: &[Complex<T>],
     output_indices: &[usize],

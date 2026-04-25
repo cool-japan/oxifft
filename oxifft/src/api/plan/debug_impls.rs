@@ -8,11 +8,12 @@
 
 use core::fmt;
 
-use super::types::{
-    GuruPlan, Plan, Plan2D, Plan3D, PlanND, RealPlan, RealPlan2D, RealPlan3D, RealPlanND,
-    SplitPlan, SplitPlan2D, SplitPlan3D, SplitPlanND,
-};
+use super::types::{Plan, Plan2D, Plan3D};
+use super::types_guru::GuruPlan;
+use super::types_nd::{PlanND, RealPlanND};
 use super::types_r2r::R2rPlan;
+use super::types_real::{RealPlan, RealPlan2D, RealPlan3D};
+use super::types_split::{SplitPlan, SplitPlan2D, SplitPlan3D, SplitPlanND};
 use crate::kernel::Float;
 
 // ---------------------------------------------------------------------------

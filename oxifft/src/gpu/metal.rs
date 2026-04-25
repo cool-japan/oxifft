@@ -38,6 +38,11 @@ pub fn is_available() -> bool {
 }
 
 /// Query Metal device capabilities.
+///
+/// # Errors
+///
+/// Returns `GpuError::InitializationFailed` if no Metal-capable device is
+/// found (non-macOS or unsupported hardware).
 pub fn query_capabilities() -> GpuResult<GpuCapabilities> {
     let device = oxicuda_metal::device::MetalDevice::new()
         .map_err(|e| GpuError::InitializationFailed(e.to_string()))?;
@@ -55,6 +60,12 @@ pub fn query_capabilities() -> GpuResult<GpuCapabilities> {
 }
 
 /// Synchronize Metal device.
+///
+/// # Errors
+///
+/// This function currently cannot return an error; command buffers are
+/// submitted synchronously by oxicuda-metal.  The `Result` signature is
+/// retained for API symmetry with asynchronous backends.
 pub fn synchronize() -> GpuResult<()> {
     // Metal command buffers are submitted synchronously in oxicuda-metal;
     // no additional synchronisation is required here.
@@ -105,8 +116,8 @@ impl MetalFftPlan {
             ));
         }
 
-        let inner = oxicuda_metal::fft::MetalFftPlan::new(size, batch_size)
-            .map_err(|e| GpuError::InitializationFailed(e.to_string()))?;
+        let inner =
+            oxicuda_metal::fft::MetalFftPlan::new(size, batch_size).map_err(GpuError::from)?;
 
         Ok(Self {
             size,
@@ -120,6 +131,11 @@ impl MetalFftPlan {
     /// Input samples are converted from `Complex<T>` to `Complex<f32>` (Metal
     /// natively operates on f32), dispatched to the GPU, and the results are
     /// converted back to `Complex<T>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::SizeMismatch` if buffer sizes do not match the plan,
+    /// or propagates Metal execution errors from the oxicuda-metal backend.
     pub fn execute<T: Float>(
         &self,
         input: &GpuBuffer<T>,
@@ -160,7 +176,7 @@ impl MetalFftPlan {
         // Execute on the Metal GPU.
         self.inner
             .execute(&input_f32, &mut output_f32, metal_dir)
-            .map_err(|e| GpuError::ExecutionFailed(e.to_string()))?;
+            .map_err(GpuError::from)?;
 
         // Convert output Complex<f32> → Complex<T>.
         let out_data = output.cpu_data_mut();
@@ -169,6 +185,133 @@ impl MetalFftPlan {
         }
 
         Ok(())
+    }
+
+    /// Execute a real-to-complex forward FFT on the Metal GPU.
+    ///
+    /// # Strategy
+    ///
+    /// Real input is zero-extended to complex (imaginary parts = 0), then a
+    /// full C2C forward FFT is run.  The first `n/2 + 1` frequency bins are
+    /// extracted into `output` (the half-spectrum sufficient to describe a
+    /// real signal by the Hermitian symmetry property).
+    ///
+    /// # Errors
+    ///
+    /// - `GpuError::SizeMismatch` — lengths are inconsistent.
+    /// - Propagated Metal execution errors.
+    pub fn forward_r2c(
+        &self,
+        input: &[f32],
+        output: &mut [num_complex::Complex<f32>],
+    ) -> GpuResult<()> {
+        let n = self.size;
+        let half = n / 2 + 1;
+
+        if input.len() != n {
+            return Err(GpuError::SizeMismatch {
+                expected: n,
+                got: input.len(),
+            });
+        }
+        if output.len() != half {
+            return Err(GpuError::SizeMismatch {
+                expected: half,
+                got: output.len(),
+            });
+        }
+
+        // Zero-extend real input → full complex buffer.
+        let complex_input: Vec<num_complex::Complex<f32>> = input
+            .iter()
+            .map(|&x| num_complex::Complex::new(x, 0.0_f32))
+            .collect();
+        let mut complex_output = vec![num_complex::Complex::<f32>::new(0.0, 0.0); n];
+
+        self.inner
+            .execute(
+                &complex_input,
+                &mut complex_output,
+                oxicuda_metal::fft::MetalFftDirection::Forward,
+            )
+            .map_err(GpuError::from)?;
+
+        // Extract the first n/2 + 1 bins (half-spectrum).
+        output.copy_from_slice(&complex_output[..half]);
+        Ok(())
+    }
+
+    /// Execute a complex-to-real inverse FFT on the Metal GPU.
+    ///
+    /// # Strategy
+    ///
+    /// Input is `n/2 + 1` complex bins (the positive-frequency half-spectrum).
+    /// A full `n`-point conjugate-symmetric spectrum is reconstructed via
+    /// `X[n-k] = conj(X[k])` for `k in 1..n/2`, then an inverse C2C FFT is
+    /// run.  The real parts of the time-domain output are written to `output`;
+    /// imaginary parts are discarded (they are numerically zero by construction).
+    ///
+    /// # Errors
+    ///
+    /// - `GpuError::SizeMismatch` — lengths are inconsistent.
+    /// - Propagated Metal execution errors.
+    pub fn inverse_c2r(
+        &self,
+        input: &[num_complex::Complex<f32>],
+        output: &mut [f32],
+    ) -> GpuResult<()> {
+        let n = self.size;
+        let half = n / 2 + 1;
+
+        if input.len() != half {
+            return Err(GpuError::SizeMismatch {
+                expected: half,
+                got: input.len(),
+            });
+        }
+        if output.len() != n {
+            return Err(GpuError::SizeMismatch {
+                expected: n,
+                got: output.len(),
+            });
+        }
+
+        // Reconstruct the full conjugate-symmetric spectrum.
+        let mut full_spectrum = vec![num_complex::Complex::<f32>::new(0.0, 0.0); n];
+        // Copy the positive-frequency half (indices 0..=n/2).
+        full_spectrum[..half].copy_from_slice(input);
+        // Mirror: X[n-k] = conj(X[k]) for k in 1..n/2.
+        for k in 1..n / 2 {
+            full_spectrum[n - k] = input[k].conj();
+        }
+
+        let mut time_domain = vec![num_complex::Complex::<f32>::new(0.0, 0.0); n];
+
+        self.inner
+            .execute(
+                &full_spectrum,
+                &mut time_domain,
+                oxicuda_metal::fft::MetalFftDirection::Inverse,
+            )
+            .map_err(GpuError::from)?;
+
+        // Extract real parts; imaginary parts are ~0 by Hermitian symmetry.
+        for (i, c) in time_domain.iter().enumerate() {
+            output[i] = c.re;
+        }
+        Ok(())
+    }
+
+    /// Return the transform size this plan was created for.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Return the batch size this plan was created for.
+    #[must_use]
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
     }
 
     /// Return log₂ of the transform size.
@@ -199,6 +342,11 @@ pub struct MetalBufferHandle {
 ///
 /// Metal buffer staging is handled transparently inside `execute`; this
 /// function is a no-op.
+///
+/// # Errors
+///
+/// This function currently cannot return an error; the `Result` signature is
+/// retained for API symmetry with backends that perform explicit buffer uploads.
 pub fn upload_buffer<T: Float>(_buffer: &mut GpuBuffer<T>) -> GpuResult<()> {
     Ok(())
 }
@@ -207,6 +355,11 @@ pub fn upload_buffer<T: Float>(_buffer: &mut GpuBuffer<T>) -> GpuResult<()> {
 ///
 /// Metal buffer readback is handled transparently inside `execute`; this
 /// function is a no-op.
+///
+/// # Errors
+///
+/// This function currently cannot return an error; the `Result` signature is
+/// retained for API symmetry with backends that perform explicit buffer readback.
 pub fn download_buffer<T: Float>(_buffer: &mut GpuBuffer<T>) -> GpuResult<()> {
     Ok(())
 }
@@ -215,8 +368,67 @@ pub fn download_buffer<T: Float>(_buffer: &mut GpuBuffer<T>) -> GpuResult<()> {
 ///
 /// Metal buffers are reference-counted and freed automatically; this
 /// function is a no-op.
+///
+/// # Errors
+///
+/// This function currently cannot return an error; the `Result` signature is
+/// retained for API symmetry with backends that perform explicit GPU memory
+/// deallocation.
 pub fn free_buffer(_handle: MetalBufferHandle) -> GpuResult<()> {
     Ok(())
+}
+
+#[cfg(all(test, feature = "metal"))]
+mod gpu_r2c_tests {
+    use super::*;
+
+    fn run_r2c_roundtrip(n: usize) {
+        if !is_available() {
+            return;
+        }
+        let plan = MetalFftPlan::new(n, 1).expect("MetalFftPlan::new");
+        let half = n / 2 + 1;
+        let tolerance = 1e-6_f32 * n as f32;
+
+        let input: Vec<f32> = (0..n)
+            .map(|k| {
+                let t = k as f32 / n as f32;
+                (2.0 * std::f32::consts::PI * t).sin()
+                    + 0.5 * (6.0 * std::f32::consts::PI * t).cos()
+            })
+            .collect();
+
+        let mut spectrum = vec![num_complex::Complex::<f32>::new(0.0, 0.0); half];
+        plan.forward_r2c(&input, &mut spectrum)
+            .expect("forward_r2c");
+
+        let mut recovered = vec![0.0_f32; n];
+        plan.inverse_c2r(&spectrum, &mut recovered)
+            .expect("inverse_c2r");
+
+        for (i, (&orig, &rec)) in input.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            assert!(
+                err <= tolerance,
+                "n={n} sample {i}: expected {orig}, got {rec}, error {err} > {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_r2c_roundtrip_size64() {
+        run_r2c_roundtrip(64);
+    }
+
+    #[test]
+    fn metal_r2c_roundtrip_size256() {
+        run_r2c_roundtrip(256);
+    }
+
+    #[test]
+    fn metal_r2c_roundtrip_size1024() {
+        run_r2c_roundtrip(1024);
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +545,53 @@ mod tests {
                 recovered[i].re,
                 recovered[i].im
             );
+        }
+    }
+
+    #[test]
+    fn metal_roundtrip_sizes_6_to_16() {
+        if !is_available() {
+            return;
+        }
+        for n_exp in 6usize..=16 {
+            let n = 1usize << n_exp;
+            let plan = MetalFftPlan::new(n, 1).expect("MetalFftPlan::new failed");
+
+            let original: Vec<Complex<f32>> = (0..n)
+                .map(|i| {
+                    let t = i as f32 / n as f32;
+                    Complex::new(t.sin(), t.cos())
+                })
+                .collect();
+
+            let mut buf_in: GpuBuffer<f32> = GpuBuffer::new(n, GpuBackend::Metal).expect("buf_in");
+            let mut buf_mid: GpuBuffer<f32> =
+                GpuBuffer::new(n, GpuBackend::Metal).expect("buf_mid");
+            let mut buf_out: GpuBuffer<f32> =
+                GpuBuffer::new(n, GpuBackend::Metal).expect("buf_out");
+
+            buf_in.upload(&original).expect("upload");
+
+            plan.execute(&buf_in, &mut buf_mid, GpuDirection::Forward)
+                .expect("forward");
+
+            plan.execute(&buf_mid, &mut buf_out, GpuDirection::Inverse)
+                .expect("inverse");
+
+            let mut recovered = vec![Complex::<f32>::zero(); n];
+            buf_out.download(&mut recovered).expect("download");
+
+            for (i, (orig, rec)) in original.iter().zip(recovered.iter()).enumerate() {
+                let err = ((rec.re - orig.re).powi(2) + (rec.im - orig.im).powi(2)).sqrt();
+                assert!(
+                    err < 1e-3,
+                    "size={n} (n_exp={n_exp}) sample {i}: expected ({}, {}), got ({}, {}), error={err}",
+                    orig.re,
+                    orig.im,
+                    rec.re,
+                    rec.im
+                );
+            }
         }
     }
 }

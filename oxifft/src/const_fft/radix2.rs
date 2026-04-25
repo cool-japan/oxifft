@@ -238,8 +238,8 @@ fn cooley_tukey_iterative<const N: usize>(data: &mut [Complex<f64>; N], inverse:
             let mut angle: f64 = 0.0;
 
             for k in 0..half_len {
-                let c = angle.cos();
-                let s = angle.sin();
+                let c = libm::cos(angle);
+                let s = libm::sin(angle);
 
                 let i = group_start + k;
                 let j = i + half_len;

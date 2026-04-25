@@ -29,7 +29,7 @@ pub struct F128 {
 // Constants for IEEE 754 binary128
 const EXPONENT_BIAS: i32 = 16383;
 const EXPONENT_BITS: u32 = 15;
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: documentation constant showing IEEE 754 binary128 structure; not used in computations
 const SIGNIFICAND_BITS: u32 = 112; // for documentation - total bits in significand
 const SIGN_MASK: u64 = 1 << 63;
 const EXPONENT_MASK: u64 = ((1u64 << EXPONENT_BITS) - 1) << (63 - EXPONENT_BITS);

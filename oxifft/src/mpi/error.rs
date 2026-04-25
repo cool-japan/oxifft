@@ -39,6 +39,19 @@ pub enum MpiError {
         /// Description of the error.
         message: String,
     },
+    /// The element count for MPI communication exceeds `i32::MAX`.
+    ///
+    /// # Notes
+    ///
+    /// MPI counts are 32-bit signed integers. For buffers larger than ~2 GB
+    /// (at `i32::MAX` elements of f64), split the operation or use a different
+    /// communication strategy.
+    CountOverflow {
+        /// The count that could not fit in `i32`.
+        count: usize,
+        /// The rank (process index) whose send/recv count overflowed.
+        rank: usize,
+    },
 }
 
 impl fmt::Display for MpiError {
@@ -64,6 +77,12 @@ impl fmt::Display for MpiError {
             }
             Self::FftError { message } => {
                 write!(f, "FFT error: {message}")
+            }
+            Self::CountOverflow { count, rank } => {
+                write!(
+                    f,
+                    "MPI count overflow: count {count} exceeds i32::MAX for rank {rank}"
+                )
             }
         }
     }

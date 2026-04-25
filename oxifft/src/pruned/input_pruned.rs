@@ -2,12 +2,7 @@
 
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
-
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use crate::prelude::*;
 
 /// Compute FFT when only some inputs are non-zero.
 ///
@@ -53,7 +48,7 @@ pub fn fft_pruned_input<T: Float>(
     // Crossover: K * N vs N * log(N)
     // So K < log(N) is the threshold
     let k = nonzero_inputs.len();
-    let crossover = (n as f64).log2().ceil() as usize;
+    let crossover = libm::ceil(libm::log2(n as f64)) as usize;
 
     if k <= crossover {
         // Direct DFT: O(K * N)
@@ -132,7 +127,7 @@ fn fft_full_from_sparse<T: Float>(
 /// # Returns
 ///
 /// Full FFT output.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: public API for input-pruned FFT; not all call sites are compiled in every feature configuration
 pub fn fft_pruned_input_butterfly<T: Float>(
     nonzero_inputs: &[(usize, Complex<T>)],
     n: usize,

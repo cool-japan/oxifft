@@ -2,6 +2,7 @@
 
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
+use crate::prelude::*;
 
 use super::bucket::BucketArray;
 use super::decoder::PeelingDecoder;
@@ -9,12 +10,6 @@ use super::filter::{create_optimal_filter, AliasingFilter};
 use super::hash::{generate_coprime_factors, FrequencyHash};
 use super::problem::SparseProblem;
 use super::result::SparseResult;
-
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
 
 /// Sparse FFT plan for k-sparse signals.
 ///
@@ -341,7 +336,7 @@ impl<T: Float> SparsePlan<T> {
         // Sparse FFT: O(k log n) operations
         // More precisely: O(B log B * num_stages + k * num_stages)
         let b = self.num_buckets;
-        let log_b = (b as f64).log2().ceil() as usize;
+        let log_b = libm::ceil(libm::log2(b as f64)) as usize;
 
         // Bucket FFTs
         let bucket_fft_ops = self.num_stages * b * log_b;
@@ -365,7 +360,7 @@ mod tests {
         let plan: Option<SparsePlan<f64>> = SparsePlan::new(1024, 10, Flags::ESTIMATE);
         assert!(plan.is_some());
 
-        let plan = plan.unwrap();
+        let plan = plan.expect("plan creation should succeed for valid params");
         assert_eq!(plan.n(), 1024);
         assert_eq!(plan.k(), 10);
         assert!(plan.num_stages() >= 2);
@@ -388,7 +383,8 @@ mod tests {
         let n = 256;
         let k = 5;
 
-        let plan = SparsePlan::<f64>::new(n, k, Flags::ESTIMATE).unwrap();
+        let plan =
+            SparsePlan::<f64>::new(n, k, Flags::ESTIMATE).expect("plan creation should succeed");
 
         // Create a simple sparse signal
         let mut input = vec![Complex::new(0.0_f64, 0.0); n];
@@ -408,7 +404,8 @@ mod tests {
 
     #[test]
     fn test_estimated_ops() {
-        let plan = SparsePlan::<f64>::new(1024, 10, Flags::ESTIMATE).unwrap();
+        let plan = SparsePlan::<f64>::new(1024, 10, Flags::ESTIMATE)
+            .expect("plan creation should succeed");
 
         let ops = plan.estimated_ops();
         // Should be much less than O(n log n) = 10240
@@ -417,7 +414,8 @@ mod tests {
 
     #[test]
     fn test_threshold() {
-        let mut plan = SparsePlan::<f64>::new(256, 5, Flags::ESTIMATE).unwrap();
+        let mut plan =
+            SparsePlan::<f64>::new(256, 5, Flags::ESTIMATE).expect("plan creation should succeed");
 
         plan.set_threshold(0.001);
         assert_eq!(plan.threshold(), 0.001);
@@ -426,7 +424,8 @@ mod tests {
     /// suggest_k with empty stages returns the current k unchanged.
     #[test]
     fn test_suggest_k_no_stages() {
-        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let plan =
+            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
         let stages: Vec<BucketArray<f64>> = Vec::new();
         assert_eq!(plan.suggest_k(&stages), 8);
     }
@@ -434,7 +433,8 @@ mod tests {
     /// suggest_k should increase k when more than 50 % of buckets are occupied.
     #[test]
     fn test_suggest_k_crowded_buckets() {
-        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let plan =
+            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
         let threshold = plan.threshold();
         let num_buckets = 16;
         let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
@@ -460,7 +460,8 @@ mod tests {
     /// suggest_k should decrease k when fewer than 5 % of buckets are occupied.
     #[test]
     fn test_suggest_k_sparse_buckets() {
-        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let plan =
+            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
         let threshold = plan.threshold();
         let num_buckets = 32;
         let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
@@ -483,7 +484,8 @@ mod tests {
     /// suggest_k should leave k unchanged when occupancy is in the 5-50 % range.
     #[test]
     fn test_suggest_k_normal_occupancy() {
-        let plan = SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).unwrap();
+        let plan =
+            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
         let threshold = plan.threshold();
         let num_buckets = 20;
         let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);

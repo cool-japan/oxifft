@@ -1,0 +1,5 @@
+error: gen_notw_codelet: unsupported size 6 (expected one of 2, 4, 8, 16, 32, 64)
+ --> tests/compile_fail/notw_unknown_size.rs:3:19
+  |
+3 | gen_notw_codelet!(6);
+  |                   ^

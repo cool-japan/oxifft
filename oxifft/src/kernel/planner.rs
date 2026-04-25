@@ -17,8 +17,8 @@ use super::{Float, PlannerFlags};
 use crate::dft::problem::Sign;
 #[cfg(feature = "std")]
 use crate::dft::solvers::{
-    BluesteinSolver, CooleyTukeySolver, CtVariant, DirectSolver, GenericSolver, RaderSolver,
-    StockhamSolver,
+    BluesteinSolver, CacheObliviousSolver, CooleyTukeySolver, CtVariant, DirectSolver,
+    GenericSolver, RaderSolver, StockhamSolver,
 };
 use crate::prelude::*;
 
@@ -61,6 +61,8 @@ pub enum SolverChoice {
     Bluestein,
     /// Rader's algorithm for prime sizes
     Rader,
+    /// Cache-oblivious four-step FFT for large power-of-2 sizes
+    CacheOblivious,
 }
 
 impl SolverChoice {
@@ -80,6 +82,7 @@ impl SolverChoice {
             Self::Generic => "generic",
             Self::Bluestein => "bluestein",
             Self::Rader => "rader",
+            Self::CacheOblivious => "cache-oblivious",
         }
     }
 }
@@ -339,6 +342,11 @@ impl<T: Float> Planner<T> {
                 candidates.push(SolverChoice::Stockham);
             }
 
+            // Cache-oblivious four-step FFT for large sizes (>= 1024)
+            if n >= 1024 {
+                candidates.push(SolverChoice::CacheOblivious);
+            }
+
             // PATIENT mode: also try specialized radix variants
             if patient_or_exhaustive {
                 // Radix-4 requires n to be a power of 4
@@ -528,6 +536,10 @@ impl<T: Float> Planner<T> {
                 output.copy_from_slice(input);
                 execute_composite_codelet(output, n, -1); // Forward direction
             }
+            SolverChoice::CacheOblivious => {
+                let s = CacheObliviousSolver::<T>::new();
+                s.execute(input, output, Sign::Forward);
+            }
         }
     }
 
@@ -631,6 +643,12 @@ impl<T: Float> Planner<T> {
                 let m = n - 1;
                 let log_m = (m as f64).log2();
                 2.0 * m as f64 * log_m * 5.0 + n as f64 * 8.0
+            }
+            SolverChoice::CacheOblivious => {
+                // Four-step FFT: similar operation count to CT but with better cache behavior
+                // Cost model: slightly higher constant due to transpose, but cache-friendly
+                let log_n = (n as f64).log2();
+                n as f64 * log_n * 4.8 + n as f64 * 2.0 // +2n for transpose
             }
         }
     }
@@ -863,6 +881,7 @@ fn solver_from_name(name: &str) -> SolverChoice {
         "generic" => SolverChoice::Generic,
         "bluestein" => SolverChoice::Bluestein,
         "rader" => SolverChoice::Rader,
+        "cache-oblivious" => SolverChoice::CacheOblivious,
         _ => SolverChoice::Bluestein, // Safe fallback
     }
 }

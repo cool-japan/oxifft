@@ -2,8 +2,8 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-#![allow(clippy::approx_constant)] // Precomputed twiddle factors for FFT
-#![allow(clippy::unreadable_literal)] // Precomputed FFT twiddle factors
+#![allow(clippy::approx_constant)] // reason: twiddle constants are trigonometric values, not approximations of named constants
+#![allow(clippy::unreadable_literal)] // reason: machine-generated FFT twiddle factor literals
 
 use crate::dft::codelets::simd;
 use crate::kernel::{Complex, Float};
@@ -386,20 +386,15 @@ pub fn execute_composite_codelet<T: Float>(x: &mut [Complex<T>], n: usize, sign:
 }
 #[cfg(test)]
 #[allow(
-    clippy::cast_lossless,
-    clippy::cast_precision_loss,
-    clippy::uninlined_format_args,
-    clippy::redundant_clone
+    clippy::cast_lossless,          // reason: test helpers cast indices to f64 for FFT input
+    clippy::cast_precision_loss,    // reason: usize-to-f64 cast is intentional for test data
+    clippy::uninlined_format_args,  // reason: generated test code uses explicit format args
+    clippy::redundant_clone         // reason: explicit clones in test setup for clarity
 )]
 mod tests {
     use super::*;
     use crate::dft::problem::Sign;
     use crate::dft::solvers::DirectSolver;
-    #[allow(dead_code)]
-    fn complex_approx_eq(a: Complex<f64>, b: Complex<f64>, eps: f64) -> bool {
-        let err = ((a.re - b.re).powi(2) + (a.im - b.im).powi(2)).sqrt();
-        err < eps
-    }
     fn test_composite_codelet(n: usize, codelet_fn: fn(&mut [Complex<f64>], i32)) {
         let input: Vec<Complex<f64>> = (0..n)
             .map(|i| Complex::new((i as f64).sin(), (i as f64 * 0.1).cos()))

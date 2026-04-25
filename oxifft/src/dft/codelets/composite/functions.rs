@@ -2,9 +2,10 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-#![allow(clippy::approx_constant)] // Precomputed twiddle factors for FFT
-#![allow(clippy::items_after_statements)] // Function-local constants
-#![allow(clippy::unreadable_literal)] // Precomputed FFT twiddle factors
+#![allow(clippy::approx_constant)]
+// reason: trigonometric constants in Winograd-style DFT are genuinely full-precision, not approximations of PI
+#![allow(clippy::items_after_statements)] // reason: DFT codelet constants defined after input extraction for readability
+#![allow(clippy::unreadable_literal)] // reason: precomputed FFT twiddle factor literals are machine-generated; underscore grouping would not add clarity
 
 use crate::dft::codelets::simd;
 use crate::kernel::{Complex, Float};
@@ -12,7 +13,7 @@ use crate::kernel::{Complex, Float};
 /// Optimized size-5 DFT using Winograd-style butterfly.
 /// This uses ~5 real multiplies instead of 25 complex multiplies.
 #[inline]
-#[allow(clippy::excessive_precision)]
+#[allow(clippy::excessive_precision)] // reason: Winograd DFT-5 coefficients require full f64 precision
 pub(super) fn dft5<T: Float>(input: &[Complex<T>; 5], sign_t: T) -> [Complex<T>; 5] {
     let c1 = T::from_f64(0.30901699437494742);
     let c2 = T::from_f64(-0.80901699437494742);

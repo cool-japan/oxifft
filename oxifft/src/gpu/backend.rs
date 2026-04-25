@@ -16,12 +16,6 @@ pub enum GpuBackend {
     Cuda,
     /// Apple Metal backend.
     Metal,
-    /// OpenCL backend (future).
-    #[allow(dead_code)]
-    OpenCL,
-    /// Vulkan compute backend (future).
-    #[allow(dead_code)]
-    Vulkan,
 }
 
 impl GpuBackend {
@@ -60,7 +54,6 @@ impl GpuBackend {
                     false
                 }
             }
-            Self::OpenCL | Self::Vulkan => false, // Not yet implemented
         }
     }
 
@@ -71,8 +64,6 @@ impl GpuBackend {
             Self::Auto => "Auto",
             Self::Cuda => "CUDA",
             Self::Metal => "Metal",
-            Self::OpenCL => "OpenCL",
-            Self::Vulkan => "Vulkan",
         }
     }
 }

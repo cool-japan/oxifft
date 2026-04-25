@@ -68,7 +68,7 @@ pub fn factor(mut n: usize) -> Vec<(usize, usize)> {
 }
 
 /// Get all prime factors (with repetition).
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: public utility for prime factorization; not used in all solver paths
 #[must_use]
 pub fn prime_factors(n: usize) -> Vec<usize> {
     let mut result = Vec::new();
@@ -128,7 +128,7 @@ pub fn mod_pow(mut base: usize, mut exp: usize, modulus: usize) -> usize {
 /// Modular inverse using extended Euclidean algorithm.
 ///
 /// Returns `None` if the inverse doesn't exist.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: modular inverse utility for Rader's algorithm; not called in all solver configurations
 #[must_use]
 pub fn mod_inv(a: usize, m: usize) -> Option<usize> {
     let (g, x, _) = extended_gcd(a as isize, m as isize);
@@ -142,7 +142,7 @@ pub fn mod_inv(a: usize, m: usize) -> Option<usize> {
 /// Extended Euclidean algorithm.
 ///
 /// Returns (gcd, x, y) such that ax + by = gcd.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: helper for mod_inv; not called when modular inverse path is inactive
 fn extended_gcd(a: isize, b: isize) -> (isize, isize, isize) {
     if a == 0 {
         (b, 0, 1)
@@ -153,7 +153,7 @@ fn extended_gcd(a: isize, b: isize) -> (isize, isize, isize) {
 }
 
 /// Find the next power of 2 >= n.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: power-of-two utility; not used in all solver paths
 #[must_use]
 pub fn next_power_of_two(n: usize) -> usize {
     if n == 0 {
@@ -164,7 +164,7 @@ pub fn next_power_of_two(n: usize) -> usize {
 }
 
 /// Check if n is a power of 2.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: power-of-two predicate; not used in all solver paths
 #[must_use]
 pub const fn is_power_of_two(n: usize) -> bool {
     n.is_power_of_two()

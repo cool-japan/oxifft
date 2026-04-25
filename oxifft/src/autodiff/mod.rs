@@ -204,6 +204,20 @@ pub struct DiffFftPlan<T: Float> {
 
 impl<T: Float> DiffFftPlan<T> {
     /// Create a new differentiable FFT plan.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use oxifft::autodiff::DiffFftPlan;
+    /// use oxifft::Complex;
+    ///
+    /// let plan = DiffFftPlan::<f64>::new(8).expect("plan creation failed");
+    /// let input: Vec<Complex<f64>> = (0..8).map(|i| Complex::new(i as f64, 0.0)).collect();
+    /// let mut output = vec![Complex::<f64>::zero(); 8];
+    /// plan.forward(&input, &mut output);
+    /// // DC bin = sum of 0+1+...+7 = 28
+    /// assert!((output[0].re - 28.0_f64).abs() < 1e-9);
+    /// ```
     pub fn new(size: usize) -> Option<Self> {
         let fwd_plan = Plan::dft_1d(size, Direction::Forward, Flags::MEASURE)?;
         let inv_plan = Plan::dft_1d(size, Direction::Backward, Flags::MEASURE)?;

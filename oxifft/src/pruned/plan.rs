@@ -42,6 +42,7 @@ pub struct PrunedPlan<T: Float> {
     mode: PruningMode,
     /// Inner FFT plan (for full FFT fallback when pruned is not beneficial).
     #[allow(dead_code)]
+    // reason: reserved field for full-FFT fallback path; used when input/output pruning is not beneficial
     inner_plan: Option<Plan<T>>,
     /// Direction.
     direction: Direction,

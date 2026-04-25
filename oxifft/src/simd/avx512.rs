@@ -11,7 +11,6 @@ use super::traits::{SimdComplex, SimdVector};
 use core::arch::x86_64::*;
 
 /// Check if AVX-512F (foundation) is available at runtime.
-#[allow(dead_code)]
 #[inline]
 pub fn has_avx512f() -> bool {
     is_x86_feature_detected!("avx512f")
@@ -42,21 +41,33 @@ impl SimdVector for Avx512F64 {
         unsafe { Self(_mm512_set1_pd(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f64) -> Self {
         unsafe { Self(_mm512_load_pd(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f64) -> Self {
         unsafe { Self(_mm512_loadu_pd(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f64) {
         unsafe { _mm512_store_pd(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f64) {
         unsafe { _mm512_storeu_pd(ptr, self.0) }
@@ -83,7 +94,6 @@ impl SimdVector for Avx512F64 {
     }
 }
 
-#[allow(dead_code)]
 impl Avx512F64 {
     /// Create a vector from eight f64 values.
     #[inline]
@@ -220,21 +230,33 @@ impl SimdVector for Avx512F32 {
         unsafe { Self(_mm512_set1_ps(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f32) -> Self {
         unsafe { Self(_mm512_load_ps(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f32) -> Self {
         unsafe { Self(_mm512_loadu_ps(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f32) {
         unsafe { _mm512_store_ps(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f32) {
         unsafe { _mm512_storeu_ps(ptr, self.0) }
@@ -261,7 +283,6 @@ impl SimdVector for Avx512F32 {
     }
 }
 
-#[allow(dead_code)]
 impl Avx512F32 {
     /// Fused multiply-add: self * a + b
     #[inline]

@@ -9,7 +9,7 @@ use super::{Complex, Float};
 use alloc::vec::Vec;
 
 /// Precomputed tables for Rader's algorithm.
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: Rader's algorithm tables; struct fields are accessed via pub fields in the Bluestein solver
 pub struct RaderOmega<T: Float> {
     /// Prime size.
     pub p: usize,
@@ -23,7 +23,7 @@ pub struct RaderOmega<T: Float> {
     pub omega: Vec<Complex<T>>,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: impl block for RaderOmega; methods used by Bluestein/Rader solvers but not in all build configurations
 impl<T: Float> RaderOmega<T> {
     /// Compute Rader omega tables for prime p.
     ///

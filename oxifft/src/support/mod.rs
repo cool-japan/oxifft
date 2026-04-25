@@ -4,6 +4,7 @@ mod align;
 mod copy;
 #[cfg(feature = "std")]
 mod debug;
+pub mod scratch;
 mod transpose;
 
 pub use align::*;

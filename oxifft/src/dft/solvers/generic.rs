@@ -246,9 +246,9 @@ impl<T: Float> GenericSolver<T> {
         if core::any::TypeId::of::<T>() == core::any::TypeId::of::<f64>() {
             // Safety: We've verified T is f64
             let temp_f64: &mut [Complex<f64>] =
-                unsafe { &mut *(std::ptr::from_mut::<[Complex<T>]>(temp) as *mut [Complex<f64>]) };
+                unsafe { &mut *(core::ptr::from_mut::<[Complex<T>]>(temp) as *mut [Complex<f64>]) };
             let twiddles_f64: &[Complex<f64>] = unsafe {
-                &*(std::ptr::from_ref::<[Complex<T>]>(twiddles) as *const [Complex<f64>])
+                &*(core::ptr::from_ref::<[Complex<T>]>(twiddles) as *const [Complex<f64>])
             };
 
             Self::apply_twiddles_f64(temp_f64, twiddles_f64);
@@ -405,7 +405,7 @@ impl<T: Float> GenericSolver<T> {
     }
 
     /// Execute the mixed-radix FFT with provided work buffers.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // reason: mixed-radix solver requires 6 pre-allocated work buffers; grouping into struct would add unnecessary allocations
     fn execute_with_buffers(
         &self,
         input: &[Complex<T>],

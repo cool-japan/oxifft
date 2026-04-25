@@ -3,13 +3,15 @@
 //! Contains iterative DIT implementations with precomputed twiddle factors
 //! and architecture-specific SIMD butterfly operations.
 
-// Items after statements are intentional for precomputed twiddle tables
-#![allow(clippy::items_after_statements)]
-// Large stack arrays are intentional for performance in fixed-size transforms
-#![allow(clippy::large_stack_arrays)]
+#![allow(clippy::items_after_statements)] // reason: precomputed twiddle table structures defined inside functions for locality
+#![allow(clippy::large_stack_arrays)] // reason: bit-reversal and twiddle tables are fixed-size for cache-friendly SIMD access
 
 use crate::kernel::Complex;
-use crate::prelude::*;
+use crate::prelude::Box;
+// Float trait needed for sin_cos on f64 in no_std (libm-backed impl).
+// In std mode f64::sin_cos is a lang item; in no_std we need the num_traits impl.
+#[cfg(not(feature = "std"))]
+use num_traits::Float as _;
 
 /// Size-64 DFT with SIMD acceleration for f64.
 ///
@@ -33,44 +35,79 @@ fn dit_64_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
 
-    // Precomputed twiddles for all 6 stages
-    static TWIDDLES: OnceLock<[[Complex<f64>; 32]; 6]> = OnceLock::new();
-    let twiddles = TWIDDLES.get_or_init(|| {
-        let mut tw = [[Complex::new(0.0, 0.0); 32]; 6];
-        for s in 0..6 {
-            let m = 2usize << s;
-            let half_m = m / 2;
-            for j in 0..half_m {
-                let angle = -core::f64::consts::TAU * (j as f64) / (m as f64);
-                tw[s][j] = Complex::cis(angle);
+    /// Precomputed twiddle factors as f64 pairs for size 64.
+    struct TwiddlesF64_64 {
+        forward: [[[f64; 2]; 32]; 6],
+        inverse: [[[f64; 2]; 32]; 6],
+    }
+
+    impl TwiddlesF64_64 {
+        fn new() -> Self {
+            let mut forward = [[[0.0_f64; 2]; 32]; 6];
+            let mut inverse = [[[0.0_f64; 2]; 32]; 6];
+            for s in 0..6 {
+                let m = 2usize << s;
+                let half_m = m / 2;
+                for j in 0..half_m {
+                    let angle = -core::f64::consts::TAU * (j as f64) / (m as f64);
+                    let (sin_a, cos_a) = angle.sin_cos();
+                    forward[s][j] = [cos_a, sin_a];
+                    inverse[s][j] = [cos_a, -sin_a];
+                }
             }
+            Self { forward, inverse }
         }
-        tw
-    });
+    }
+
+    static TWIDDLES: OnceLock<TwiddlesF64_64> = OnceLock::new();
+    let twiddles = TWIDDLES.get_or_init(TwiddlesF64_64::new);
 
     let ptr = data.as_mut_ptr() as *mut f64;
     let sign_arr = [-1.0_f64, 1.0];
 
     unsafe {
         let sign_pattern = vld1q_f64(sign_arr.as_ptr());
+        let tw_table = if sign > 0 {
+            &twiddles.inverse
+        } else {
+            &twiddles.forward
+        };
 
         let mut m = 2usize;
         for s in 0..6 {
             let half_m = m / 2;
-            let tw_stage = &twiddles[s];
+            let tw_stage = &tw_table[s];
 
-            if sign > 0 {
-                for k in (0..64).step_by(m) {
-                    for j in 0..half_m {
-                        let w = Complex::new(tw_stage[j].re, -tw_stage[j].im);
-                        neon_butterfly_inline(ptr, k + j, half_m, w, sign_pattern);
-                    }
+            for k in (0..64).step_by(m) {
+                let mut j = 0;
+                while j + 3 < half_m {
+                    neon_butterfly_fast(ptr, k + j, half_m, tw_stage[j].as_ptr(), sign_pattern);
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 1,
+                        half_m,
+                        tw_stage[j + 1].as_ptr(),
+                        sign_pattern,
+                    );
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 2,
+                        half_m,
+                        tw_stage[j + 2].as_ptr(),
+                        sign_pattern,
+                    );
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 3,
+                        half_m,
+                        tw_stage[j + 3].as_ptr(),
+                        sign_pattern,
+                    );
+                    j += 4;
                 }
-            } else {
-                for k in (0..64).step_by(m) {
-                    for j in 0..half_m {
-                        neon_butterfly_inline(ptr, k + j, half_m, tw_stage[j], sign_pattern);
-                    }
+                while j < half_m {
+                    neon_butterfly_fast(ptr, k + j, half_m, tw_stage[j].as_ptr(), sign_pattern);
+                    j += 1;
                 }
             }
             m *= 2;
@@ -130,105 +167,79 @@ fn dit_128_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
 
-    // Precomputed twiddles for all 7 stages
-    static TWIDDLES: OnceLock<[[Complex<f64>; 64]; 7]> = OnceLock::new();
-    let twiddles = TWIDDLES.get_or_init(|| {
-        let mut tw = [[Complex::new(0.0, 0.0); 64]; 7];
-        for s in 0..7 {
-            let m = 2usize << s;
-            let half_m = m / 2;
-            for j in 0..half_m {
-                let angle = -core::f64::consts::TAU * (j as f64) / (m as f64);
-                tw[s][j] = Complex::cis(angle);
+    /// Precomputed twiddle factors as f64 pairs for size 128.
+    struct TwiddlesF64_128 {
+        forward: [[[f64; 2]; 64]; 7],
+        inverse: [[[f64; 2]; 64]; 7],
+    }
+
+    impl TwiddlesF64_128 {
+        fn new() -> Self {
+            let mut forward = [[[0.0_f64; 2]; 64]; 7];
+            let mut inverse = [[[0.0_f64; 2]; 64]; 7];
+            for s in 0..7 {
+                let m = 2usize << s;
+                let half_m = m / 2;
+                for j in 0..half_m {
+                    let angle = -core::f64::consts::TAU * (j as f64) / (m as f64);
+                    let (sin_a, cos_a) = angle.sin_cos();
+                    forward[s][j] = [cos_a, sin_a];
+                    inverse[s][j] = [cos_a, -sin_a];
+                }
             }
+            Self { forward, inverse }
         }
-        tw
-    });
+    }
+
+    static TWIDDLES: OnceLock<TwiddlesF64_128> = OnceLock::new();
+    let twiddles = TWIDDLES.get_or_init(TwiddlesF64_128::new);
 
     let ptr = data.as_mut_ptr() as *mut f64;
     let sign_arr = [-1.0_f64, 1.0];
 
     unsafe {
         let sign_pattern = vld1q_f64(sign_arr.as_ptr());
+        let tw_table = if sign > 0 {
+            &twiddles.inverse
+        } else {
+            &twiddles.forward
+        };
 
         let mut m = 2usize;
         for s in 0..7 {
             let half_m = m / 2;
-            let tw_stage = &twiddles[s];
+            let tw_stage = &tw_table[s];
 
-            // Use 4x unrolling for large stages
-            if half_m >= 4 {
-                if sign > 0 {
-                    // Inverse transform - conjugate twiddles with 4x unrolling
-                    for k in (0..128).step_by(m) {
-                        let mut j = 0;
-                        while j + 3 < half_m {
-                            let w0 = Complex::new(tw_stage[j].re, -tw_stage[j].im);
-                            let w1 = Complex::new(tw_stage[j + 1].re, -tw_stage[j + 1].im);
-                            let w2 = Complex::new(tw_stage[j + 2].re, -tw_stage[j + 2].im);
-                            let w3 = Complex::new(tw_stage[j + 3].re, -tw_stage[j + 3].im);
-                            neon_butterfly_inline(ptr, k + j, half_m, w0, sign_pattern);
-                            neon_butterfly_inline(ptr, k + j + 1, half_m, w1, sign_pattern);
-                            neon_butterfly_inline(ptr, k + j + 2, half_m, w2, sign_pattern);
-                            neon_butterfly_inline(ptr, k + j + 3, half_m, w3, sign_pattern);
-                            j += 4;
-                        }
-                        while j < half_m {
-                            let w = Complex::new(tw_stage[j].re, -tw_stage[j].im);
-                            neon_butterfly_inline(ptr, k + j, half_m, w, sign_pattern);
-                            j += 1;
-                        }
-                    }
-                } else {
-                    // Forward transform with 4x unrolling
-                    for k in (0..128).step_by(m) {
-                        let mut j = 0;
-                        while j + 3 < half_m {
-                            neon_butterfly_inline(ptr, k + j, half_m, tw_stage[j], sign_pattern);
-                            neon_butterfly_inline(
-                                ptr,
-                                k + j + 1,
-                                half_m,
-                                tw_stage[j + 1],
-                                sign_pattern,
-                            );
-                            neon_butterfly_inline(
-                                ptr,
-                                k + j + 2,
-                                half_m,
-                                tw_stage[j + 2],
-                                sign_pattern,
-                            );
-                            neon_butterfly_inline(
-                                ptr,
-                                k + j + 3,
-                                half_m,
-                                tw_stage[j + 3],
-                                sign_pattern,
-                            );
-                            j += 4;
-                        }
-                        while j < half_m {
-                            neon_butterfly_inline(ptr, k + j, half_m, tw_stage[j], sign_pattern);
-                            j += 1;
-                        }
-                    }
+            for k in (0..128).step_by(m) {
+                let mut j = 0;
+                while j + 3 < half_m {
+                    neon_butterfly_fast(ptr, k + j, half_m, tw_stage[j].as_ptr(), sign_pattern);
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 1,
+                        half_m,
+                        tw_stage[j + 1].as_ptr(),
+                        sign_pattern,
+                    );
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 2,
+                        half_m,
+                        tw_stage[j + 2].as_ptr(),
+                        sign_pattern,
+                    );
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 3,
+                        half_m,
+                        tw_stage[j + 3].as_ptr(),
+                        sign_pattern,
+                    );
+                    j += 4;
                 }
-            } else {
-                // Small stages - no unrolling
-                if sign > 0 {
-                    for k in (0..128).step_by(m) {
-                        for j in 0..half_m {
-                            let w = Complex::new(tw_stage[j].re, -tw_stage[j].im);
-                            neon_butterfly_inline(ptr, k + j, half_m, w, sign_pattern);
-                        }
-                    }
-                } else {
-                    for k in (0..128).step_by(m) {
-                        for j in 0..half_m {
-                            neon_butterfly_inline(ptr, k + j, half_m, tw_stage[j], sign_pattern);
-                        }
-                    }
+                while j < half_m {
+                    neon_butterfly_fast(ptr, k + j, half_m, tw_stage[j].as_ptr(), sign_pattern);
+                    j += 1;
                 }
             }
             m *= 2;
@@ -380,6 +391,14 @@ fn dit_256_precomputed(data: &mut [Complex<f64>], sign: i32) {
 }
 
 /// Fast NEON butterfly that loads twiddle directly from memory pointer.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `neon` feature (always true on aarch64).
+/// - `ptr` must be valid for reads and writes of at least `(k_j + half_m + 1) * 2` `f64` values.
+/// - `tw_ptr` must point to valid precomputed twiddle factor data (at least 2 `f64` values).
+/// - `sign_pattern` must be a valid NEON `float64x2_t` register (typically `[-1.0, 1.0]` or
+///   `[1.0, -1.0]` depending on transform direction).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn neon_butterfly_fast(
@@ -425,42 +444,6 @@ fn dit_256_precomputed(data: &mut [Complex<f64>], sign: i32) {
         Sign::Backward
     };
     dit_butterflies_f64(data, sign_val);
-}
-
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-unsafe fn neon_butterfly_inline(
-    ptr: *mut f64,
-    k_j: usize,
-    half_m: usize,
-    w: Complex<f64>,
-    sign_pattern: core::arch::aarch64::float64x2_t,
-) {
-    use core::arch::aarch64::*;
-
-    unsafe {
-        let u_ptr = ptr.add(k_j * 2);
-        let v_ptr = ptr.add((k_j + half_m) * 2);
-        let u = vld1q_f64(u_ptr);
-        let v = vld1q_f64(v_ptr);
-
-        // Load twiddle directly from memory (Complex<f64> is repr(C) with [re, im] layout)
-        let tw_ptr = core::ptr::from_ref(&w) as *const f64;
-        let tw = vld1q_f64(tw_ptr);
-        let tw_flip = vextq_f64(tw, tw, 1);
-
-        // Use vdupq_laneq_f64 for efficient lane broadcast (single instruction on Apple Silicon)
-        let v_re = vdupq_laneq_f64::<0>(v);
-        let v_im = vdupq_laneq_f64::<1>(v);
-        let prod1 = vmulq_f64(v_re, tw);
-        let prod2 = vmulq_f64(v_im, tw_flip);
-        let t = vfmaq_f64(prod1, prod2, sign_pattern);
-        let out_u = vaddq_f64(u, t);
-        let out_v = vsubq_f64(u, t);
-
-        vst1q_f64(u_ptr, out_u);
-        vst1q_f64(v_ptr, out_v);
-    }
 }
 
 /// Fast bit-reverse permutation for size 256.
@@ -515,105 +498,79 @@ fn dit_512_precomputed(data: &mut [Complex<f64>], sign: i32) {
     use crate::prelude::OnceLockExt;
     use core::arch::aarch64::*;
 
-    // Precomputed twiddles for all 9 stages
-    static TWIDDLES: OnceLock<[[Complex<f64>; 256]; 9]> = OnceLock::new();
-    let twiddles = TWIDDLES.get_or_init(|| {
-        let mut tw = [[Complex::new(0.0, 0.0); 256]; 9];
-        for s in 0..9 {
-            let m = 2usize << s;
-            let half_m = m / 2;
-            for j in 0..half_m {
-                let angle = -core::f64::consts::TAU * (j as f64) / (m as f64);
-                tw[s][j] = Complex::cis(angle);
+    /// Precomputed twiddle factors as f64 pairs for size 512.
+    struct TwiddlesF64_512 {
+        forward: [[[f64; 2]; 256]; 9],
+        inverse: [[[f64; 2]; 256]; 9],
+    }
+
+    impl TwiddlesF64_512 {
+        fn new() -> Self {
+            let mut forward = [[[0.0_f64; 2]; 256]; 9];
+            let mut inverse = [[[0.0_f64; 2]; 256]; 9];
+            for s in 0..9 {
+                let m = 2usize << s;
+                let half_m = m / 2;
+                for j in 0..half_m {
+                    let angle = -core::f64::consts::TAU * (j as f64) / (m as f64);
+                    let (sin_a, cos_a) = angle.sin_cos();
+                    forward[s][j] = [cos_a, sin_a];
+                    inverse[s][j] = [cos_a, -sin_a];
+                }
             }
+            Self { forward, inverse }
         }
-        tw
-    });
+    }
+
+    static TWIDDLES: OnceLock<TwiddlesF64_512> = OnceLock::new();
+    let twiddles = TWIDDLES.get_or_init(TwiddlesF64_512::new);
 
     let ptr = data.as_mut_ptr() as *mut f64;
     let sign_arr = [-1.0_f64, 1.0];
 
     unsafe {
         let sign_pattern = vld1q_f64(sign_arr.as_ptr());
+        let tw_table = if sign > 0 {
+            &twiddles.inverse
+        } else {
+            &twiddles.forward
+        };
 
         let mut m = 2usize;
         for s in 0..9 {
             let half_m = m / 2;
-            let tw_stage = &twiddles[s];
+            let tw_stage = &tw_table[s];
 
-            // Use 4x unrolling for large stages
-            if half_m >= 4 {
-                if sign > 0 {
-                    // Inverse transform - conjugate twiddles with 4x unrolling
-                    for k in (0..512).step_by(m) {
-                        let mut j = 0;
-                        while j + 3 < half_m {
-                            let w0 = Complex::new(tw_stage[j].re, -tw_stage[j].im);
-                            let w1 = Complex::new(tw_stage[j + 1].re, -tw_stage[j + 1].im);
-                            let w2 = Complex::new(tw_stage[j + 2].re, -tw_stage[j + 2].im);
-                            let w3 = Complex::new(tw_stage[j + 3].re, -tw_stage[j + 3].im);
-                            neon_butterfly_inline(ptr, k + j, half_m, w0, sign_pattern);
-                            neon_butterfly_inline(ptr, k + j + 1, half_m, w1, sign_pattern);
-                            neon_butterfly_inline(ptr, k + j + 2, half_m, w2, sign_pattern);
-                            neon_butterfly_inline(ptr, k + j + 3, half_m, w3, sign_pattern);
-                            j += 4;
-                        }
-                        while j < half_m {
-                            let w = Complex::new(tw_stage[j].re, -tw_stage[j].im);
-                            neon_butterfly_inline(ptr, k + j, half_m, w, sign_pattern);
-                            j += 1;
-                        }
-                    }
-                } else {
-                    // Forward transform with 4x unrolling
-                    for k in (0..512).step_by(m) {
-                        let mut j = 0;
-                        while j + 3 < half_m {
-                            neon_butterfly_inline(ptr, k + j, half_m, tw_stage[j], sign_pattern);
-                            neon_butterfly_inline(
-                                ptr,
-                                k + j + 1,
-                                half_m,
-                                tw_stage[j + 1],
-                                sign_pattern,
-                            );
-                            neon_butterfly_inline(
-                                ptr,
-                                k + j + 2,
-                                half_m,
-                                tw_stage[j + 2],
-                                sign_pattern,
-                            );
-                            neon_butterfly_inline(
-                                ptr,
-                                k + j + 3,
-                                half_m,
-                                tw_stage[j + 3],
-                                sign_pattern,
-                            );
-                            j += 4;
-                        }
-                        while j < half_m {
-                            neon_butterfly_inline(ptr, k + j, half_m, tw_stage[j], sign_pattern);
-                            j += 1;
-                        }
-                    }
+            for k in (0..512).step_by(m) {
+                let mut j = 0;
+                while j + 3 < half_m {
+                    neon_butterfly_fast(ptr, k + j, half_m, tw_stage[j].as_ptr(), sign_pattern);
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 1,
+                        half_m,
+                        tw_stage[j + 1].as_ptr(),
+                        sign_pattern,
+                    );
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 2,
+                        half_m,
+                        tw_stage[j + 2].as_ptr(),
+                        sign_pattern,
+                    );
+                    neon_butterfly_fast(
+                        ptr,
+                        k + j + 3,
+                        half_m,
+                        tw_stage[j + 3].as_ptr(),
+                        sign_pattern,
+                    );
+                    j += 4;
                 }
-            } else {
-                // Small stages - no unrolling
-                if sign > 0 {
-                    for k in (0..512).step_by(m) {
-                        for j in 0..half_m {
-                            let w = Complex::new(tw_stage[j].re, -tw_stage[j].im);
-                            neon_butterfly_inline(ptr, k + j, half_m, w, sign_pattern);
-                        }
-                    }
-                } else {
-                    for k in (0..512).step_by(m) {
-                        for j in 0..half_m {
-                            neon_butterfly_inline(ptr, k + j, half_m, tw_stage[j], sign_pattern);
-                        }
-                    }
+                while j < half_m {
+                    neon_butterfly_fast(ptr, k + j, half_m, tw_stage[j].as_ptr(), sign_pattern);
+                    j += 1;
                 }
             }
             m *= 2;
@@ -817,6 +774,13 @@ fn dit_1024_precomputed(data: &mut [Complex<f64>], sign: i32) {
 }
 
 /// AVX2 DIT butterflies for size 1024 with fused stages and precomputed twiddles.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `avx2` and `fma` features.
+/// Calling this function on a CPU that lacks these features causes undefined
+/// behavior (illegal instruction trap at runtime).
+/// `data` must have exactly 1024 elements.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn dit_1024_avx2(data: &mut [Complex<f64>], sign: i32) {
@@ -1128,7 +1092,7 @@ struct TwiddlesF64_4096 {
 
 #[cfg(target_arch = "aarch64")]
 impl TwiddlesF64_4096 {
-    #[allow(clippy::large_stack_frames)]
+    #[allow(clippy::large_stack_frames)] // reason: Box::new() for [[[f64;2];2048];12] is allocated via heap; stack frame is large but unavoidable
     fn new() -> Self {
         let mut forward = Box::new([[[-0.0_f64; 2]; 2048]; 12]);
         let mut inverse = Box::new([[[-0.0_f64; 2]; 2048]; 12]);
@@ -1251,7 +1215,7 @@ struct TwiddlesF64_4096X86 {
 
 #[cfg(target_arch = "x86_64")]
 impl TwiddlesF64_4096X86 {
-    #[allow(clippy::large_stack_frames)]
+    #[allow(clippy::large_stack_frames)] // reason: Box::new() for [[[f64;2];2048];12] is allocated via heap; stack frame is large but unavoidable
     fn new() -> Self {
         let mut forward = Box::new([[[-0.0_f64; 2]; 2048]; 12]);
         let mut inverse = Box::new([[[-0.0_f64; 2]; 2048]; 12]);
@@ -1288,6 +1252,13 @@ fn dit_4096_precomputed(data: &mut [Complex<f64>], sign: i32) {
 
 /// AVX2 DIT butterflies for size 4096 with fused stages and precomputed twiddles.
 /// Fuses stages 0-3 to reduce memory traffic, then uses SIMD for stages 4-11.
+///
+/// # Safety
+///
+/// Caller must ensure the target CPU supports the `avx2` and `fma` features.
+/// Calling this function on a CPU that lacks these features causes undefined
+/// behavior (illegal instruction trap at runtime).
+/// `data` must have exactly 4096 elements.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn dit_4096_avx2(data: &mut [Complex<f64>], sign: i32) {

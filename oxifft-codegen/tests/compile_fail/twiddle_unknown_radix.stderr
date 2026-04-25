@@ -1,0 +1,5 @@
+error: gen_twiddle_codelet: unsupported radix 3 (expected one of 2, 4, 8, 16)
+ --> tests/compile_fail/twiddle_unknown_radix.rs:3:22
+  |
+3 | gen_twiddle_codelet!(3);
+  |                      ^

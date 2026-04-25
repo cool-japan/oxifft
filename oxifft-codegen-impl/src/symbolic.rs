@@ -7,16 +7,17 @@
 //! Note: These types are infrastructure for the codegen proc-macros and are tested
 //! but not directly exported (proc-macro crates can only export proc-macro functions).
 
-#![allow(dead_code)] // Infrastructure types used by tests and codegen
 #![allow(clippy::cast_precision_loss)] // FFT sizes fit comfortably in f64 mantissa
 
+#[cfg(test)]
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 
 /// A symbolic expression representing FFT operations.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    /// Input variable: x[index].re or x[index].im
+    /// Input variable: `x[index].re` or `x[index].im`
     Input { index: usize, is_real: bool },
     /// Constant value
     Const(f64),
@@ -34,6 +35,7 @@ pub enum Expr {
 
 impl Expr {
     /// Create a real input reference.
+    #[must_use]
     pub const fn input_re(index: usize) -> Self {
         Self::Input {
             index,
@@ -42,6 +44,7 @@ impl Expr {
     }
 
     /// Create an imaginary input reference.
+    #[must_use]
     pub const fn input_im(index: usize) -> Self {
         Self::Input {
             index,
@@ -50,36 +53,34 @@ impl Expr {
     }
 
     /// Create a constant.
+    #[must_use]
     pub const fn constant(value: f64) -> Self {
         Self::Const(value)
     }
 
-    /// Create addition.
+    /// Create addition expression.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Self) -> Self {
         Self::Add(Box::new(self), Box::new(other))
     }
 
-    /// Create subtraction.
+    /// Create subtraction expression.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, other: Self) -> Self {
         Self::Sub(Box::new(self), Box::new(other))
     }
 
-    /// Create multiplication.
+    /// Create multiplication expression.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, other: Self) -> Self {
         Self::Mul(Box::new(self), Box::new(other))
     }
 
-    /// Create negation.
-    pub fn neg(self) -> Self {
-        Self::Neg(Box::new(self))
-    }
-
-    /// Check if this is a constant.
-    pub const fn is_const(&self) -> bool {
-        matches!(self, Self::Const(_))
-    }
-
     /// Get constant value if this is a constant.
+    #[must_use]
     pub const fn const_value(&self) -> Option<f64> {
         match self {
             Self::Const(v) => Some(*v),
@@ -88,6 +89,7 @@ impl Expr {
     }
 
     /// Hash the expression for CSE.
+    #[must_use]
     pub fn structural_hash(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::Hasher;
@@ -135,13 +137,39 @@ impl Expr {
         }
     }
 
+    /// Collect all `Temp` variable names referenced in this expression.
+    pub fn collect_temp_refs(&self, refs: &mut HashSet<String>) {
+        match self {
+            Self::Temp(name) => {
+                refs.insert(name.clone());
+            }
+            Self::Add(a, b) | Self::Sub(a, b) | Self::Mul(a, b) => {
+                a.collect_temp_refs(refs);
+                b.collect_temp_refs(refs);
+            }
+            Self::Neg(a) => a.collect_temp_refs(refs),
+            Self::Input { .. } | Self::Const(_) => {}
+        }
+    }
+
     /// Count operations in this expression.
+    #[must_use]
     pub fn op_count(&self) -> usize {
         match self {
             Self::Input { .. } | Self::Const(_) | Self::Temp(_) => 0,
             Self::Add(a, b) | Self::Sub(a, b) | Self::Mul(a, b) => 1 + a.op_count() + b.op_count(),
             Self::Neg(a) => 1 + a.op_count(),
         }
+    }
+}
+
+#[cfg(test)]
+impl Expr {
+    /// Create negation. (test helper)
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn neg(self) -> Self {
+        Self::Neg(Box::new(self))
     }
 }
 
@@ -170,6 +198,7 @@ pub struct ComplexExpr {
 
 impl ComplexExpr {
     /// Create from input index.
+    #[must_use]
     pub const fn input(index: usize) -> Self {
         Self {
             re: Expr::input_re(index),
@@ -178,6 +207,7 @@ impl ComplexExpr {
     }
 
     /// Create from constant.
+    #[must_use]
     pub const fn constant(re: f64, im: f64) -> Self {
         Self {
             re: Expr::constant(re),
@@ -186,6 +216,8 @@ impl ComplexExpr {
     }
 
     /// Complex addition.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn add(&self, other: &Self) -> Self {
         Self {
             re: self.re.clone().add(other.re.clone()),
@@ -194,6 +226,8 @@ impl ComplexExpr {
     }
 
     /// Complex subtraction.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(&self, other: &Self) -> Self {
         Self {
             re: self.re.clone().sub(other.re.clone()),
@@ -202,6 +236,8 @@ impl ComplexExpr {
     }
 
     /// Complex multiplication.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(&self, other: &Self) -> Self {
         // (a + bi)(c + di) = (ac - bd) + (ad + bc)i
         Self {
@@ -217,8 +253,12 @@ impl ComplexExpr {
                 .add(self.im.clone().mul(other.re.clone())),
         }
     }
+}
 
-    /// Multiply by j = sqrt(-1).
+#[cfg(test)]
+impl ComplexExpr {
+    /// Multiply by j = sqrt(-1). (test helper)
+    #[must_use]
     pub fn mul_j(&self) -> Self {
         // (a + bi) * i = -b + ai
         Self {
@@ -227,7 +267,8 @@ impl ComplexExpr {
         }
     }
 
-    /// Multiply by -j = -sqrt(-1).
+    /// Multiply by -j = -sqrt(-1). (test helper)
+    #[must_use]
     pub fn mul_neg_j(&self) -> Self {
         // (a + bi) * (-i) = b - ai
         Self {
@@ -236,7 +277,8 @@ impl ComplexExpr {
         }
     }
 
-    /// Negation.
+    /// Negation. (test helper)
+    #[must_use]
     pub fn neg(&self) -> Self {
         Self {
             re: self.re.clone().neg(),
@@ -245,7 +287,8 @@ impl ComplexExpr {
     }
 }
 
-/// Common Subexpression Elimination optimizer.
+/// Common Subexpression Elimination optimizer. (used only in tests)
+#[cfg(test)]
 pub struct CseOptimizer {
     /// Map from expression hash to (expression, temp name, use count).
     expr_cache: HashMap<u64, (Expr, String, usize)>,
@@ -255,8 +298,10 @@ pub struct CseOptimizer {
     min_uses: usize,
 }
 
+#[cfg(test)]
 impl CseOptimizer {
     /// Create a new CSE optimizer.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             expr_cache: HashMap::new(),
@@ -266,12 +311,14 @@ impl CseOptimizer {
     }
 
     /// Set minimum uses threshold for CSE.
+    #[must_use]
     pub const fn with_min_uses(mut self, min_uses: usize) -> Self {
         self.min_uses = min_uses;
         self
     }
 
     /// Register an expression and return the optimized version.
+    #[must_use]
     pub fn register(&mut self, expr: &Expr) -> Expr {
         // Don't CSE simple expressions
         if matches!(expr, Expr::Input { .. } | Expr::Const(_) | Expr::Temp(_)) {
@@ -293,6 +340,7 @@ impl CseOptimizer {
     }
 
     /// Get all temporaries that should be generated.
+    #[must_use]
     pub fn get_temporaries(&self) -> Vec<(String, Expr)> {
         let mut temps: Vec<_> = self
             .expr_cache
@@ -305,6 +353,7 @@ impl CseOptimizer {
     }
 }
 
+#[cfg(test)]
 impl Default for CseOptimizer {
     fn default() -> Self {
         Self::new()
@@ -317,6 +366,7 @@ pub struct StrengthReducer;
 impl StrengthReducer {
     /// Apply strength reduction to an expression.
     /// Reduces recursively from bottom up.
+    #[must_use]
     pub fn reduce(expr: &Expr) -> Expr {
         match expr {
             // Mul: reduce children first, then simplify
@@ -373,6 +423,10 @@ impl StrengthReducer {
                 let ra = Self::reduce(a);
                 let rb = Self::reduce(b);
 
+                // x - x -> 0 (structural equality)
+                if ra == rb {
+                    return Expr::Const(0.0);
+                }
                 // Sub with 0 -> identity/negation
                 if rb.const_value() == Some(0.0) {
                     return ra;
@@ -408,48 +462,203 @@ impl StrengthReducer {
     }
 }
 
+/// Constant folder that applies algebraic simplifications to fixpoint.
+///
+/// This wraps [`StrengthReducer`] and applies it repeatedly until the expression
+/// no longer changes, ensuring all nested constant folding opportunities are caught.
+pub struct ConstantFolder;
+
+impl ConstantFolder {
+    /// Apply constant folding to an expression until fixpoint.
+    ///
+    /// This applies strength reduction (which includes constant folding rules)
+    /// repeatedly until the expression stabilizes.
+    #[must_use]
+    pub fn fold(expr: &Expr) -> Expr {
+        let mut current = expr.clone();
+        loop {
+            let folded = StrengthReducer::reduce(&current);
+            if folded == current {
+                return current;
+            }
+            current = folded;
+        }
+    }
+}
+
+#[cfg(test)]
+impl ConstantFolder {
+    /// Apply constant folding to all expressions in a program. (test helper)
+    pub fn fold_program(program: &mut Program) {
+        for (_name, expr) in &mut program.assignments {
+            *expr = Self::fold(expr);
+        }
+        for expr in &mut program.outputs {
+            *expr = Self::fold(expr);
+        }
+    }
+}
+
+/// Dead code eliminator for symbolic programs. (used only in tests)
+#[cfg(test)]
+pub struct DeadCodeEliminator;
+
+#[cfg(test)]
+impl DeadCodeEliminator {
+    /// Eliminate dead temporary assignments from a program.
+    ///
+    /// Performs a reachability analysis starting from output expressions,
+    /// transitively marking all referenced temporaries as live, then
+    /// removes any assignments not in the live set.
+    pub fn eliminate(program: &mut Program) {
+        // Collect all temp refs from output expressions
+        let mut live: HashSet<String> = HashSet::new();
+        for expr in &program.outputs {
+            expr.collect_temp_refs(&mut live);
+        }
+
+        // Build a map from temp name to its expression for transitive lookup
+        let assign_map: HashMap<String, &Expr> = program
+            .assignments
+            .iter()
+            .map(|(name, expr)| (name.clone(), expr))
+            .collect();
+
+        // Transitive closure: keep discovering new live temps
+        let mut worklist: Vec<String> = live.iter().cloned().collect();
+        while let Some(name) = worklist.pop() {
+            if let Some(expr) = assign_map.get(&name) {
+                let mut new_refs = HashSet::new();
+                expr.collect_temp_refs(&mut new_refs);
+                for r in new_refs {
+                    if live.insert(r.clone()) {
+                        worklist.push(r);
+                    }
+                }
+            }
+        }
+
+        // Retain only live assignments
+        program.assignments.retain(|(name, _)| live.contains(name));
+    }
+}
+
+/// A symbolic program: a sequence of temporary assignments plus output expressions.
+///
+/// This type is used in tests for the optimization pipeline infrastructure.
+/// For code generation, `emit_body_from_symbolic` uses `RecursiveCse` directly.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub struct Program {
+    /// Temporary variable assignments in order: `(name, expression)`.
+    pub assignments: Vec<(String, Expr)>,
+    /// Output expressions (may reference temps from assignments).
+    pub outputs: Vec<Expr>,
+}
+
+#[cfg(test)]
+impl Program {
+    /// Create a new empty program.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            assignments: Vec::new(),
+            outputs: Vec::new(),
+        }
+    }
+
+    /// Create a program from CSE optimizer results and output expressions.
+    #[must_use]
+    pub fn from_cse(cse: &CseOptimizer, outputs: Vec<Expr>) -> Self {
+        Self {
+            assignments: cse.get_temporaries(),
+            outputs,
+        }
+    }
+
+    /// Total operation count across all assignments and outputs.
+    #[must_use]
+    pub fn op_count(&self) -> usize {
+        let assign_ops: usize = self.assignments.iter().map(|(_, e)| e.op_count()).sum();
+        let output_ops: usize = self.outputs.iter().map(Expr::op_count).sum();
+        assign_ops + output_ops
+    }
+}
+
+#[cfg(test)]
+impl Default for Program {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Apply all optimization passes to a program.
+///
+/// The optimization pipeline is:
+/// 1. **Constant folding** — simplify constant expressions and algebraic identities
+/// 2. **CSE** — extract common subexpressions into temporaries
+/// 3. **Dead code elimination** — remove unused temporaries
+///
+/// Returns the optimized program.
+#[cfg(test)]
+#[must_use]
+pub fn optimize(mut program: Program) -> Program {
+    // Pass 1: Constant folding
+    ConstantFolder::fold_program(&mut program);
+
+    // Pass 2: CSE on the folded expressions
+    let mut cse = CseOptimizer::new();
+    let new_outputs: Vec<Expr> = program
+        .outputs
+        .iter()
+        .map(|expr| cse.register(expr))
+        .collect();
+
+    // Also register assignment RHS through CSE
+    let new_assignments: Vec<(String, Expr)> = program
+        .assignments
+        .iter()
+        .map(|(name, expr)| (name.clone(), cse.register(expr)))
+        .collect();
+
+    // Merge CSE-generated temporaries with existing ones
+    let mut all_assignments = cse.get_temporaries();
+    for (name, expr) in new_assignments {
+        if !all_assignments.iter().any(|(n, _)| n == &name) {
+            all_assignments.push((name, expr));
+        }
+    }
+
+    program.assignments = all_assignments;
+    program.outputs = new_outputs;
+
+    // Pass 3: Dead code elimination
+    DeadCodeEliminator::eliminate(&mut program);
+
+    program
+}
+
+/// Apply constant folding and DCE without CSE (for cases where CSE is handled separately).
+#[cfg(test)]
+#[must_use]
+pub fn optimize_fold_and_dce(mut program: Program) -> Program {
+    ConstantFolder::fold_program(&mut program);
+    DeadCodeEliminator::eliminate(&mut program);
+    program
+}
+
 /// FFT symbolic computation.
 pub struct SymbolicFFT {
-    /// Size of the FFT.
-    pub n: usize,
-    /// Output expressions (real, imag pairs).
+    /// Output expressions (real, imag pairs). Length equals the transform size.
     pub outputs: Vec<ComplexExpr>,
 }
 
 impl SymbolicFFT {
-    /// Generate symbolic DFT for size n.
-    pub fn dft(n: usize, forward: bool) -> Self {
-        let sign = if forward { -1.0 } else { 1.0 };
-        let mut outputs = Vec::with_capacity(n);
-
-        // Generate DFT symbolically
-        for k in 0..n {
-            let mut re = Expr::Const(0.0);
-            let mut im = Expr::Const(0.0);
-
-            for j in 0..n {
-                let angle = sign * 2.0 * std::f64::consts::PI * (k * j) as f64 / n as f64;
-                let tw_re = angle.cos();
-                let tw_im = angle.sin();
-
-                let input = ComplexExpr::input(j);
-                let twiddle = ComplexExpr::constant(tw_re, tw_im);
-                let product = input.mul(&twiddle);
-
-                re = re.add(product.re);
-                im = im.add(product.im);
-            }
-
-            outputs.push(ComplexExpr {
-                re: StrengthReducer::reduce(&re),
-                im: StrengthReducer::reduce(&im),
-            });
-        }
-
-        Self { n, outputs }
-    }
-
     /// Generate radix-2 Cooley-Tukey FFT symbolically.
+    ///
+    /// # Panics
+    /// Panics if `n` is not a power of two.
+    #[must_use]
     pub fn radix2_dit(n: usize, forward: bool) -> Self {
         assert!(n.is_power_of_two(), "n must be power of 2");
 
@@ -503,10 +712,11 @@ impl SymbolicFFT {
             })
             .collect();
 
-        Self { n, outputs }
+        Self { outputs }
     }
 
     /// Total operation count.
+    #[must_use]
     pub fn op_count(&self) -> usize {
         self.outputs
             .iter()
@@ -516,95 +726,60 @@ impl SymbolicFFT {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_expr_basic() {
-        let a = Expr::input_re(0);
-        let b = Expr::input_re(1);
-        let sum = a.add(b);
-        assert!(matches!(sum, Expr::Add(_, _)));
+impl SymbolicFFT {
+    /// Size of the FFT (derived from output count).
+    #[must_use]
+    pub fn n(&self) -> usize {
+        self.outputs.len()
     }
 
-    #[test]
-    fn test_strength_reduction_mul_zero() {
-        let a = Expr::input_re(0);
-        let zero = Expr::Const(0.0);
-        let product = a.mul(zero);
-        let reduced = StrengthReducer::reduce(&product);
-        assert_eq!(reduced, Expr::Const(0.0));
-    }
+    /// Generate naive O(n²) DFT symbolically. (test helper)
+    #[must_use]
+    pub fn dft(n: usize, forward: bool) -> Self {
+        let sign = if forward { -1.0 } else { 1.0 };
+        let mut outputs = Vec::with_capacity(n);
 
-    #[test]
-    fn test_strength_reduction_mul_one() {
-        let a = Expr::input_re(0);
-        let one = Expr::Const(1.0);
-        let product = a.mul(one);
-        let reduced = StrengthReducer::reduce(&product);
-        assert!(matches!(
-            reduced,
-            Expr::Input {
-                index: 0,
-                is_real: true
+        for k in 0..n {
+            let mut re = Expr::Const(0.0);
+            let mut im = Expr::Const(0.0);
+
+            for j in 0..n {
+                let angle = sign * 2.0 * std::f64::consts::PI * (k * j) as f64 / n as f64;
+                let tw_re = angle.cos();
+                let tw_im = angle.sin();
+
+                let input = ComplexExpr::input(j);
+                let twiddle = ComplexExpr::constant(tw_re, tw_im);
+                let product = input.mul(&twiddle);
+
+                re = re.add(product.re);
+                im = im.add(product.im);
             }
-        ));
-    }
 
-    #[test]
-    fn test_strength_reduction_add_zero() {
-        let a = Expr::input_re(0);
-        let zero = Expr::Const(0.0);
-        let sum = a.add(zero);
-        let reduced = StrengthReducer::reduce(&sum);
-        assert!(matches!(
-            reduced,
-            Expr::Input {
-                index: 0,
-                is_real: true
-            }
-        ));
-    }
+            outputs.push(ComplexExpr {
+                re: StrengthReducer::reduce(&re),
+                im: StrengthReducer::reduce(&im),
+            });
+        }
 
-    #[test]
-    fn test_strength_reduction_double_neg() {
-        let a = Expr::input_re(0);
-        let neg_neg = a.neg().neg();
-        let reduced = StrengthReducer::reduce(&neg_neg);
-        assert!(matches!(
-            reduced,
-            Expr::Input {
-                index: 0,
-                is_real: true
-            }
-        ));
-    }
-
-    #[test]
-    fn test_complex_mul() {
-        let a = ComplexExpr::constant(1.0, 0.0);
-        let b = ComplexExpr::constant(0.0, 1.0);
-        let product = a.mul(&b);
-
-        // (1 + 0i) * (0 + 1i) = 0 + 1i
-        let re = StrengthReducer::reduce(&product.re);
-        let im = StrengthReducer::reduce(&product.im);
-
-        assert_eq!(re.const_value(), Some(0.0));
-        assert_eq!(im.const_value(), Some(1.0));
-    }
-
-    #[test]
-    fn test_symbolic_dft_size_2() {
-        let fft = SymbolicFFT::dft(2, true);
-        assert_eq!(fft.n, 2);
-        assert_eq!(fft.outputs.len(), 2);
-    }
-
-    #[test]
-    fn test_symbolic_radix2_size_4() {
-        let fft = SymbolicFFT::radix2_dit(4, true);
-        assert_eq!(fft.n, 4);
-        assert_eq!(fft.outputs.len(), 4);
+        Self { outputs }
     }
 }
+
+// ============================================================================
+// Code emission: symbolic FFT → proc_macro2::TokenStream
+// (implementation lives in symbolic_emit.rs to keep this file under 2000 lines)
+// ============================================================================
+
+#[path = "symbolic_emit.rs"]
+mod symbolic_emit;
+pub use symbolic_emit::{emit_body_from_symbolic, schedule_instructions};
+
+// ============================================================================
+// Tests
+// (implementation lives in symbolic_tests.rs to keep this file under 2000 lines)
+// ============================================================================
+
+#[cfg(test)]
+#[path = "symbolic_tests.rs"]
+mod tests;

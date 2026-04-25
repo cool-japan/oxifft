@@ -13,11 +13,7 @@
 //! | Blackman | Wide | -58 dB | High dynamic range |
 //! | Kaiser (β) | Variable | Variable | Adjustable trade-off |
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use crate::prelude::*;
 
 use crate::kernel::Float;
 

@@ -1,0 +1,34 @@
+[package]
+name = "oxifft-codegen-impl"
+description = "Internal codelet generation logic for OxiFFT (not a proc-macro; used by oxifft-codegen and benchmarks)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/cool-japan/oxifft"
+documentation = "https://docs.rs/oxifft-codegen-impl"
+readme = "README.md"
+rust-version.workspace = true
+keywords = ["fft", "codegen", "proc-macro", "simd"]
+categories = ["development-tools::procedural-macro-helpers"]
+exclude = [
+    "benches/",
+    "tests/",
+    "fuzz/",
+    ".github/",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "TODO.md",
+]
+
+[lib]
+name = "oxifft_codegen_impl"
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[lints]
+workspace = true

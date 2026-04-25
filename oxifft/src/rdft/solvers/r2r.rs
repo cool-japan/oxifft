@@ -2,12 +2,25 @@
 //!
 //! All transforms have two implementations:
 //! - `_direct`: O(n²) direct computation, used for n < 16
-//! - `_fast`: O(n log n) FFT-based computation, used for n >= 16
+//! - `_fast`:   O(n log n) FFT-based computation, used for n >= 16
 //!
 //! The public API dispatches automatically based on size.
+//!
+//! ## Makhoul DCT-II reduction (v0.3.0)
+//!
+//! `execute_dct2_fast` now uses the Makhoul (1980) algorithm:
+//! 1. Rearrange N-point real input into an N-point sequence y.
+//! 2. Compute N-point forward FFT of y (plan cached on solver).
+//! 3. Multiply by cached twiddle table (O(N), SIMD-accelerated).
+//!
+//! This requires only an N-point FFT (not 2N), and the plan is cached
+//! on the `R2rSolver` struct, eliminating per-call planning overhead.
 
 use crate::api::{Direction, Flags, Plan};
-use crate::kernel::{Complex, Float};
+use crate::kernel::{complex_mul::complex_mul_aos, Complex, Float};
+use crate::prelude::*;
+
+pub use super::types_r2r::R2rSolver;
 
 /// Type of DCT/DST/DHT transform (FFTW terminology).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,50 +46,7 @@ pub enum R2rKind {
     Dht,
 }
 
-/// Real-to-Real transform solver.
-pub struct R2rSolver<T: Float> {
-    kind: R2rKind,
-    _marker: core::marker::PhantomData<T>,
-}
-
-impl<T: Float> Default for R2rSolver<T> {
-    fn default() -> Self {
-        Self::new(R2rKind::Redft10)
-    }
-}
-
 impl<T: Float> R2rSolver<T> {
-    /// Create a new R2R solver with specified kind.
-    #[must_use]
-    pub fn new(kind: R2rKind) -> Self {
-        Self {
-            kind,
-            _marker: core::marker::PhantomData,
-        }
-    }
-
-    /// Get the solver name.
-    #[must_use]
-    pub fn name(&self) -> &'static str {
-        match self.kind {
-            R2rKind::Redft00 => "rdft-redft00",
-            R2rKind::Redft10 => "rdft-redft10",
-            R2rKind::Redft01 => "rdft-redft01",
-            R2rKind::Redft11 => "rdft-redft11",
-            R2rKind::Rodft00 => "rdft-rodft00",
-            R2rKind::Rodft10 => "rdft-rodft10",
-            R2rKind::Rodft01 => "rdft-rodft01",
-            R2rKind::Rodft11 => "rdft-rodft11",
-            R2rKind::Dht => "rdft-dht",
-        }
-    }
-
-    /// Check if this solver is applicable for the given size.
-    #[must_use]
-    pub fn applicable(&self, n: usize) -> bool {
-        n >= 1
-    }
-
     // -------------------------------------------------------------------------
     // DCT-II
     // -------------------------------------------------------------------------
@@ -104,50 +74,115 @@ impl<T: Float> R2rSolver<T> {
         }
     }
 
-    /// Execute DCT-II using FFT-based O(n log n) algorithm.
+    /// Execute DCT-II using the Makhoul O(n log n) algorithm.
     ///
-    /// Algorithm (2N-point FFT, even reflection):
-    ///   v\[i\] = x\[i\]           for i = 0..N-1
-    ///   v\[i\] = x\[2N-1-i\]      for i = N..2N-1
-    ///   Y = FFT_{2N}(v)
-    ///   DCT_II\[k\] = (c_k * Y\[k\].re - s_k * Y\[k\].im) / 2
-    ///   where c_k = cos(-π*k/(2N)), s_k = sin(-π*k/(2N))
+    /// **Algorithm** (Makhoul 1980):
+    ///
+    /// Step 1 — rearrange x into complex y of length N:
+    /// - `y[i]     = x[2i]`   for `i in 0..N/2`  (even-indexed → front)
+    /// - `y[N-1-i] = x[2i+1]` for `i in 0..N/2`  (odd-indexed, reversed → back)
+    ///
+    /// Step 2 — N-point forward complex DFT of y → Y[0..N].
+    ///   Uses `self.plan_fwd_n` (cached); falls back to a temporary plan if size differs.
+    ///
+    /// Step 3 — post-twiddle with cached `twiddle[k] = exp(-j·π·k/(2N))`:
+    /// - `X[0]   = Y[0].re`
+    /// - `X[k]   = (Y[k] * twiddle[k]).re`  for `k in 1..=N/2`
+    /// - `X[N-k] = -(Y[k] * twiddle[k]).im` for `k in 1..N/2`
+    /// - `X[N/2] = (Y[N/2] * twiddle[N/2]).re`
     pub fn execute_dct2_fast(&self, input: &[T], output: &mut [T]) {
         let n = input.len();
-        debug_assert!(n > 0, "DCT-II requires at least 1 element");
+        debug_assert!(
+            n > 0 && n.is_multiple_of(2),
+            "DCT-II fast requires even n >= 2"
+        );
         debug_assert_eq!(output.len(), n, "Output must match input size");
 
-        let two_n = 2 * n;
-        let two_n_f = T::from_usize(two_n);
+        // Use cached plan if available and size matches; otherwise build a temp plan.
+        let plan_ok = self
+            .plan_fwd_n
+            .as_ref()
+            .map(|p| p.size() == n)
+            .unwrap_or(false);
 
-        // Build 2N-point even-reflection vector (real-valued)
-        let mut v_complex: Vec<Complex<T>> = Vec::with_capacity(two_n);
-        for i in 0..n {
-            v_complex.push(Complex::new(input[i], T::ZERO));
+        if !plan_ok {
+            return self.execute_dct2_fast_tmp(input, output);
         }
-        for i in n..two_n {
-            v_complex.push(Complex::new(input[2 * n - 1 - i], T::ZERO));
+
+        let half = n / 2;
+
+        // Step 1: Makhoul rearrangement into complex y.
+        let mut y_slice: Vec<Complex<T>> = vec![Complex::zero(); n];
+        for i in 0..half {
+            y_slice[i] = Complex::new(input[2 * i], T::ZERO);
+            y_slice[n - 1 - i] = Complex::new(input[2 * i + 1], T::ZERO);
         }
 
-        let mut y = vec![Complex::zero(); two_n];
+        // Step 2: N-point forward DFT using cached plan.
+        let mut y_fft = vec![Complex::zero(); n];
+        if let Some(plan) = &self.plan_fwd_n {
+            plan.execute(&y_slice, &mut y_fft);
+        }
 
-        if let Some(plan) = Plan::dft_1d(two_n, Direction::Forward, Flags::ESTIMATE) {
-            plan.execute(&v_complex, &mut y);
+        // Step 3: post-twiddle (SIMD-accelerated via complex_mul_aos).
+        let mut prod = vec![Complex::zero(); half + 1];
+        prod[0] = y_fft[0]; // twiddle[0] = 1+0j
+
+        complex_mul_aos(
+            &mut prod[1..=half],
+            &y_fft[1..=half],
+            &self.twiddles_dct2[1..=half],
+        );
+
+        output[0] = prod[0].re;
+        for k in 1..half {
+            output[k] = prod[k].re;
+            output[n - k] = -prod[k].im;
+        }
+        output[half] = prod[half].re;
+    }
+
+    /// Fallback DCT-II when no cached plan is available for the input size.
+    fn execute_dct2_fast_tmp(&self, input: &[T], output: &mut [T]) {
+        let n = input.len();
+        debug_assert!(n > 0 && n.is_multiple_of(2));
+
+        let half = n / 2;
+        let two_n_f = T::from_usize(2 * n);
+
+        // Makhoul rearrangement
+        let mut y: Vec<Complex<T>> = vec![Complex::zero(); n];
+        for i in 0..half {
+            y[i] = Complex::new(input[2 * i], T::ZERO);
+            y[n - 1 - i] = Complex::new(input[2 * i + 1], T::ZERO);
+        }
+
+        let mut y_fft = vec![Complex::zero(); n];
+        if let Some(plan) = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE) {
+            plan.execute(&y, &mut y_fft);
         } else {
             return self.execute_dct2_direct(input, output);
         }
 
-        // Extract DCT-II coefficients from the FFT output
-        for k in 0..n {
+        // Post-twiddle
+        output[0] = y_fft[0].re;
+        for k in 1..half {
             let angle = -<T as Float>::PI * T::from_usize(k) / two_n_f;
-            let (s_k, c_k) = Float::sin_cos(angle);
-            output[k] = (c_k * y[k].re - s_k * y[k].im) / T::TWO;
+            let (s, c) = Float::sin_cos(angle);
+            let tw = Complex::new(c, s);
+            let prod = y_fft[k] * tw;
+            output[k] = prod.re;
+            output[n - k] = -prod.im;
         }
+        let angle = -<T as Float>::PI * T::from_usize(half) / two_n_f;
+        let (s, c) = Float::sin_cos(angle);
+        output[half] = (y_fft[half] * Complex::new(c, s)).re;
     }
 
-    /// Execute DCT-II transform (dispatches to fast for n >= 16, direct otherwise).
+    /// Execute DCT-II transform (dispatches to fast for n >= 16 and even, direct otherwise).
     pub fn execute_dct2(&self, input: &[T], output: &mut [T]) {
-        if input.len() >= 16 {
+        let n = input.len();
+        if n >= 16 && n.is_multiple_of(2) {
             self.execute_dct2_fast(input, output);
         } else {
             self.execute_dct2_direct(input, output);
@@ -182,33 +217,75 @@ impl<T: Float> R2rSolver<T> {
         }
     }
 
-    /// Execute DCT-III using FFT-based O(n log n) algorithm.
+    /// Execute DCT-III using FFT-based O(n log n) algorithm (inverse of DCT-II).
     ///
-    /// DCT-III is the transpose/inverse of DCT-II. We use the conj-FFT-conj trick:
-    ///   IFFT_{2N}(Z) = conj(FFT_{2N}(conj(Z))) / (2N)
-    ///
-    /// Build Z of length 2N:
-    ///   Z\[0\] = 2*X\[0\], Z\[N\] = 0
-    ///   Z\[k\] = 2*X\[k\]*exp(i*π*k/(2N))   for k = 1..N-1
-    ///   Z\[2N-k\] = conj(Z\[k\])             for k = 1..N-1
-    ///
-    /// Then DCT_III\[n\] = Re(IFFT_{2N}(Z)\[n\]) = Re(conj(FFT_{2N}(conj(Z)))\[n\]) / (2N)
+    /// Uses the N-point conj-FFT-conj trick with Hermitian-symmetric input.
+    /// The plan `self.plan_fwd_n` is cached; falls back to a 2N-point approach
+    /// when the cached plan size doesn't match.
     pub fn execute_dct3_fast(&self, input: &[T], output: &mut [T]) {
         let n = input.len();
         debug_assert!(n > 0, "DCT-III requires at least 1 element");
         debug_assert_eq!(output.len(), n, "Output must match input size");
 
+        if !n.is_multiple_of(2) || n < 16 {
+            return self.execute_dct3_direct(input, output);
+        }
+
+        let plan_ok = self
+            .plan_fwd_n
+            .as_ref()
+            .map(|p| p.size() == n)
+            .unwrap_or(false);
+
+        if !plan_ok {
+            return self.execute_dct3_fast_tmp(input, output);
+        }
+
+        let half = n / 2;
+
+        // Step 1: Reconstruct Y (Hermitian, length N) from X = input using Makhoul inverse.
+        //
+        // The DCT-II Makhoul algorithm maps: x[2i] → y[i], x[2i+1] → y[N-1-i]
+        // Therefore DCT-III must unpack:  Y[k] = (X[k] - j·X[N-k]) · exp(+j·π·k/(2N))
+        // twiddles_dct2[k] = exp(-j·π·k/(2N)), so tw_conj = exp(+j·π·k/(2N)).
+        let mut y_freq = vec![Complex::zero(); n];
+        y_freq[0] = Complex::new(input[0], T::ZERO);
+        for k in 1..half {
+            let tw_conj = self.twiddles_dct2[k].conj();
+            let val = Complex::new(input[k], -input[n - k]) * tw_conj;
+            y_freq[k] = val;
+            y_freq[n - k] = val.conj();
+        }
+        // Nyquist bin (k = half): X[N/2] maps to Y[N/2]; imaginary part = -X[N - N/2] = -X[N/2].
+        let tw_conj_nyq = self.twiddles_dct2[half].conj();
+        y_freq[half] = Complex::new(input[half], -input[half]) * tw_conj_nyq;
+
+        // Step 2: IFFT via conj-FFT-conj trick. Y is Hermitian so the result is real.
+        // IFFT(Y) = conj(FFT(conj(Y))) / N
+        let y_freq_conj: Vec<Complex<T>> = y_freq.iter().map(|c| c.conj()).collect();
+        let mut y_time = vec![Complex::zero(); n];
+        if let Some(plan) = &self.plan_fwd_n {
+            plan.execute(&y_freq_conj, &mut y_time);
+        }
+
+        // Step 3: Unpermute (undo the Makhoul even/odd split) and scale by 1/2.
+        //   DCT-III[2i]   = y_time[i].re / 2      for i in 0..N/2
+        //   DCT-III[2i+1] = y_time[N-1-i].re / 2  for i in 0..N/2
+        for i in 0..half {
+            output[2 * i] = y_time[i].re / T::TWO;
+            output[2 * i + 1] = y_time[n - 1 - i].re / T::TWO;
+        }
+    }
+
+    /// Fallback DCT-III using 2N-point FFT (when no cached plan matches).
+    fn execute_dct3_fast_tmp(&self, input: &[T], output: &mut [T]) {
+        let n = input.len();
         let two_n = 2 * n;
         let two_n_f = T::from_usize(two_n);
 
-        // Build Z of length 2N
         let mut z: Vec<Complex<T>> = vec![Complex::zero(); two_n];
-
-        // Z[0] = 2 * X[0]
         z[0] = Complex::new(T::TWO * input[0], T::ZERO);
-        // Z[N] = 0 (already zero from initialization)
 
-        // Z[k] = 2*X[k]*exp(i*π*k/(2N)) for k=1..N-1
         for k in 1..n {
             let angle = <T as Float>::PI * T::from_usize(k) / two_n_f;
             let (s, c) = Float::sin_cos(angle);
@@ -218,8 +295,6 @@ impl<T: Float> R2rSolver<T> {
             z[two_n - k] = val.conj();
         }
 
-        // conj(Z) then forward FFT then conj gives IFFT
-        // Take conjugate of input for conj-FFT-conj trick
         let z_conj: Vec<Complex<T>> = z.iter().map(|c| c.conj()).collect();
         let mut y = vec![Complex::zero(); two_n];
 
@@ -229,10 +304,6 @@ impl<T: Float> R2rSolver<T> {
             return self.execute_dct3_direct(input, output);
         }
 
-        // DCT_III[n] = Re(FFT_2N(conj(Z))[n]) / 4
-        // (Derivation: IFFT_2N(Z)[n] = (2/N)*DCT_III[n], and
-        //  Re(IFFT_2N(Z)[n]) = Re(FFT_2N(conj(Z))[n]) / (2N),
-        //  so DCT_III[n] = N/2 * Re(FFT_2N(conj(Z))[n]) / (2N) = Re(FFT_2N(conj(Z))[n]) / 4)
         let four = T::TWO + T::TWO;
         for i in 0..n {
             output[i] = y[i].re / four;
@@ -357,25 +428,71 @@ impl<T: Float> R2rSolver<T> {
         }
     }
 
-    /// Execute DCT-IV using FFT-based O(n log n) algorithm.
+    /// Execute DCT-IV using the anti-symmetric 2N-point DFT algorithm.
     ///
-    /// Algorithm using 4N-point FFT:
-    ///   Pad x to length 4N (zeros for indices N..4N-1)
-    ///   Y = FFT_{4N}(x_padded)
-    ///   DCT_IV\[k\] = Re(exp(-i*π*(2k+1)/(4N)) * Y\[2k+1\])
+    /// **Algorithm (zero-padded 4N FFT extraction):**
     ///
-    /// Derivation: DCT_IV\[k\] = Re(sum_n x\[n\]*exp(i*π*(2n+1)*(2k+1)/(4N)))
-    ///           = Re(exp(-i*π*(2k+1)/(4N)) * sum_n x\[n\]*exp(-2*π*i*n*(2k+1)/(4N)))
-    ///           = Re(exp(-i*π*(2k+1)/(4N)) * FFT_{4N}(x_padded)\[2k+1\])
+    /// Step 1 — zero-pad x to length 4N:
+    /// - `y[n] = x[n]` for `n in 0..N`
+    /// - `y[n] = 0`    for `n in N..4N`
+    ///
+    /// Step 2 — 4N-point complex DFT of y → `Z[0..4N]`.
+    ///   Uses `self.plan_fwd_4n` (cached).
+    ///
+    /// Step 3 — extract DCT-IV from odd-indexed bins with SIMD twiddle:
+    /// - `X[k] = Re(Z[2k+1] · twiddle_iv[k])`
+    /// - `twiddle_iv[k] = exp(-j·π·(2k+1)/(4N))`.
+    ///
+    /// Falls back to ad-hoc plan when cached plan size differs.
     pub fn execute_dct4_fast(&self, input: &[T], output: &mut [T]) {
         let n = input.len();
         debug_assert!(n > 0, "DCT-IV requires at least 1 element");
         debug_assert_eq!(output.len(), n, "Output must match input size");
 
+        let plan_ok = self
+            .plan_fwd_4n
+            .as_ref()
+            .map(|p| p.size() == 4 * n)
+            .unwrap_or(false);
+
+        if !plan_ok {
+            return self.execute_dct4_fast_tmp(input, output);
+        }
+
+        let four_n = 4 * n;
+
+        // Step 1: zero-pad x to 4N.
+        let mut y: Vec<Complex<T>> = Vec::with_capacity(four_n);
+        for &xi in input {
+            y.push(Complex::new(xi, T::ZERO));
+        }
+        for _ in n..four_n {
+            y.push(Complex::zero());
+        }
+
+        // Step 2: 4N-point forward DFT using cached plan.
+        let mut z = vec![Complex::zero(); four_n];
+        if let Some(plan) = &self.plan_fwd_4n {
+            plan.execute(&y, &mut z);
+        }
+
+        // Step 3: extract odd bins with SIMD twiddle multiply.
+        // X[k] = Re(Z[2k+1] · twiddle_iv[k]) where twiddle_iv[k] = exp(-jπ(2k+1)/(4N)).
+        let odd_bins: Vec<Complex<T>> = (0..n).map(|k| z[2 * k + 1]).collect();
+        let mut prod = vec![Complex::zero(); n];
+        complex_mul_aos(&mut prod, &odd_bins, &self.twiddles_dct4);
+
+        for k in 0..n {
+            output[k] = prod[k].re;
+        }
+    }
+
+    /// Fallback DCT-IV using 4N-point zero-padded approach.
+    fn execute_dct4_fast_tmp(&self, input: &[T], output: &mut [T]) {
+        let n = input.len();
         let four_n = 4 * n;
         let four_n_f = T::from_usize(four_n);
 
-        // Build zero-padded input of length 4N
         let mut x_padded: Vec<Complex<T>> = Vec::with_capacity(four_n);
         for &xi in input {
             x_padded.push(Complex::new(xi, T::ZERO));
@@ -392,13 +509,11 @@ impl<T: Float> R2rSolver<T> {
             return self.execute_dct4_direct(input, output);
         }
 
-        // DCT_IV[k] = Re(exp(-i*π*(2k+1)/(4N)) * Y[2k+1])
         for k in 0..n {
             let angle = -<T as Float>::PI * T::from_usize(2 * k + 1) / four_n_f;
             let (s, c) = Float::sin_cos(angle);
             let phase = Complex::new(c, s);
-            let val = phase * y[2 * k + 1];
-            output[k] = val.re;
+            output[k] = (phase * y[2 * k + 1]).re;
         }
     }
 
@@ -538,8 +653,8 @@ impl<T: Float> R2rSolver<T> {
             .collect();
 
         let mut dct2_y = vec![T::ZERO; n];
-        let helper = Self::new(R2rKind::Redft10);
-        helper.execute_dct2_fast(&y, &mut dct2_y);
+        let helper = Self::new(R2rKind::Redft10, n);
+        helper.execute_dct2(&y, &mut dct2_y);
 
         // DST_II[k] = DCT_II(y)[N-1-k]
         for k in 0..n {
@@ -599,7 +714,7 @@ impl<T: Float> R2rSolver<T> {
         let f_reversed: Vec<T> = (0..n).map(|k| input[n - 1 - k]).collect();
 
         let mut dct3_out = vec![T::ZERO; n];
-        let helper = Self::new(R2rKind::Redft01);
+        let helper = Self::new(R2rKind::Redft01, n);
         helper.execute_dct3_fast(&f_reversed, &mut dct3_out);
 
         // DST_III[n] = (-1)^n * DCT_III(f_reversed)[n]
@@ -661,7 +776,7 @@ impl<T: Float> R2rSolver<T> {
         let x_reversed: Vec<T> = (0..n).map(|i| input[n - 1 - i]).collect();
 
         let mut dct4_out = vec![T::ZERO; n];
-        let helper = Self::new(R2rKind::Redft11);
+        let helper = Self::new(R2rKind::Redft11, n);
         helper.execute_dct4_fast(&x_reversed, &mut dct4_out);
 
         // DST_IV[k] = (-1)^k * DCT_IV(x_reversed)[k]
@@ -777,42 +892,42 @@ impl<T: Float> R2rSolver<T> {
 
 /// Convenience function for DCT-II transform.
 pub fn dct2<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Redft10).execute_dct2(input, output);
+    R2rSolver::new(R2rKind::Redft10, input.len()).execute_dct2(input, output);
 }
 
 /// Convenience function for DCT-III transform (inverse DCT-II).
 pub fn dct3<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Redft01).execute_dct3(input, output);
+    R2rSolver::new(R2rKind::Redft01, input.len()).execute_dct3(input, output);
 }
 
 /// Convenience function for DCT-I transform.
 pub fn dct1<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Redft00).execute_dct1(input, output);
+    R2rSolver::new(R2rKind::Redft00, input.len()).execute_dct1(input, output);
 }
 
 /// Convenience function for DCT-IV transform.
 pub fn dct4<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Redft11).execute_dct4(input, output);
+    R2rSolver::new(R2rKind::Redft11, input.len()).execute_dct4(input, output);
 }
 
 /// Convenience function for DST-I transform.
 pub fn dst1<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Rodft00).execute_dst1(input, output);
+    R2rSolver::new(R2rKind::Rodft00, input.len()).execute_dst1(input, output);
 }
 
 /// Convenience function for DST-II transform.
 pub fn dst2<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Rodft10).execute_dst2(input, output);
+    R2rSolver::new(R2rKind::Rodft10, input.len()).execute_dst2(input, output);
 }
 
 /// Convenience function for DST-III transform (inverse DST-II).
 pub fn dst3<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Rodft01).execute_dst3(input, output);
+    R2rSolver::new(R2rKind::Rodft01, input.len()).execute_dst3(input, output);
 }
 
 /// Convenience function for DST-IV transform.
 pub fn dst4<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Rodft11).execute_dst4(input, output);
+    R2rSolver::new(R2rKind::Rodft11, input.len()).execute_dst4(input, output);
 }
 
 /// Convenience function for Discrete Hartley Transform.
@@ -820,7 +935,7 @@ pub fn dst4<T: Float>(input: &[T], output: &mut [T]) {
 /// The DHT is its own inverse (up to scaling by N):
 /// DHT(DHT(x)) = N * x
 pub fn dht<T: Float>(input: &[T], output: &mut [T]) {
-    R2rSolver::new(R2rKind::Dht).execute_dht(input, output);
+    R2rSolver::new(R2rKind::Dht, input.len()).execute_dht(input, output);
 }
 
 #[cfg(test)]
@@ -1207,7 +1322,7 @@ mod tests {
 
     #[test]
     fn test_dct2_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Redft10);
+        let solver = R2rSolver::<f64>::new(R2rKind::Redft10, 0);
         for &n in &[16usize, 32, 64, 128, 256, 512, 1024] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1229,7 +1344,7 @@ mod tests {
 
     #[test]
     fn test_dct3_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Redft01);
+        let solver = R2rSolver::<f64>::new(R2rKind::Redft01, 0);
         for &n in &[16usize, 32, 64, 128, 256] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1251,7 +1366,7 @@ mod tests {
 
     #[test]
     fn test_dct4_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Redft11);
+        let solver = R2rSolver::<f64>::new(R2rKind::Redft11, 0);
         for &n in &[16usize, 32, 64, 128, 256] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1273,7 +1388,7 @@ mod tests {
 
     #[test]
     fn test_dct1_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Redft00);
+        let solver = R2rSolver::<f64>::new(R2rKind::Redft00, 0);
         for &n in &[16usize, 32, 64, 128, 256] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1295,7 +1410,7 @@ mod tests {
 
     #[test]
     fn test_dht_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Dht);
+        let solver = R2rSolver::<f64>::new(R2rKind::Dht, 0);
         for &n in &[16usize, 32, 64, 128, 256] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1317,7 +1432,7 @@ mod tests {
 
     #[test]
     fn test_dst1_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Rodft00);
+        let solver = R2rSolver::<f64>::new(R2rKind::Rodft00, 0);
         for &n in &[16usize, 32, 64, 128, 256] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1339,7 +1454,7 @@ mod tests {
 
     #[test]
     fn test_dst2_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Rodft10);
+        let solver = R2rSolver::<f64>::new(R2rKind::Rodft10, 0);
         for &n in &[16usize, 32, 64, 128, 256] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1361,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_dst3_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Rodft01);
+        let solver = R2rSolver::<f64>::new(R2rKind::Rodft01, 0);
         for &n in &[16usize, 32, 64, 128, 256] {
             let input: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) / n as f64).collect();
             let mut out_direct = vec![0.0_f64; n];
@@ -1383,7 +1498,7 @@ mod tests {
 
     #[test]
     fn test_dst4_fast_matches_direct() {
-        let solver = R2rSolver::<f64>::new(R2rKind::Rodft11);
+        let solver = R2rSolver::<f64>::new(R2rKind::Rodft11, 0);
         // DST-IV is computed indirectly via DCT-IV (itself FFT-based), so
         // accumulated floating-point rounding grows with N; 1e-6 relative
         // tolerance is appropriate for sizes up to 256.
@@ -1404,5 +1519,198 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // New Makhoul-specific tests (Step 7)
+    // -----------------------------------------------------------------------
+
+    /// Scalar reference implementation of DCT-II for validation.
+    fn dct2_reference(x: &[f64]) -> Vec<f64> {
+        let n = x.len();
+        let mut out = vec![0.0_f64; n];
+        for k in 0..n {
+            let mut sum = 0.0_f64;
+            for i in 0..n {
+                sum += x[i]
+                    * (std::f64::consts::PI * (2 * i + 1) as f64 * k as f64 / (2.0 * n as f64))
+                        .cos();
+            }
+            out[k] = sum;
+        }
+        out
+    }
+
+    /// Scalar reference implementation of DCT-IV for validation.
+    fn dct4_reference(x: &[f64]) -> Vec<f64> {
+        let n = x.len();
+        let mut out = vec![0.0_f64; n];
+        for k in 0..n {
+            let mut sum = 0.0_f64;
+            for i in 0..n {
+                sum += x[i]
+                    * (std::f64::consts::PI * (2 * i + 1) as f64 * (2 * k + 1) as f64
+                        / (4.0 * n as f64))
+                        .cos();
+            }
+            out[k] = sum;
+        }
+        out
+    }
+
+    /// Makhoul DCT-II fast path vs scalar reference.
+    #[test]
+    fn test_makhoul_dct2_vs_reference() {
+        for &n in &[32usize, 64, 128] {
+            let input: Vec<f64> = (0..n)
+                .map(|i| (i as f64 * 1.7 + 0.3).sin() * 10.0)
+                .collect();
+            let reference = dct2_reference(&input);
+
+            let solver = R2rSolver::<f64>::new(R2rKind::Redft10, n);
+            let mut fast = vec![0.0_f64; n];
+            solver.execute_dct2_fast(&input, &mut fast);
+
+            for k in 0..n {
+                let ref_v = reference[k];
+                let fast_v = fast[k];
+                let err = (ref_v - fast_v).abs();
+                let scale = ref_v.abs().max(fast_v.abs()).max(1e-30_f64);
+                assert!(
+                    err / scale < 1e-10,
+                    "Makhoul DCT-II n={} k={}: ref={} fast={} rel_err={}",
+                    n,
+                    k,
+                    ref_v,
+                    fast_v,
+                    err / scale
+                );
+            }
+        }
+    }
+
+    /// Makhoul DCT-IV fast path vs scalar reference.
+    #[test]
+    fn test_makhoul_dct4_vs_reference() {
+        for &n in &[32usize, 64, 128] {
+            let input: Vec<f64> = (0..n).map(|i| (i as f64 * 2.3 + 0.7).cos() * 5.0).collect();
+            let reference = dct4_reference(&input);
+
+            let solver = R2rSolver::<f64>::new(R2rKind::Redft11, n);
+            let mut fast = vec![0.0_f64; n];
+            solver.execute_dct4_fast(&input, &mut fast);
+
+            for k in 0..n {
+                let ref_v = reference[k];
+                let fast_v = fast[k];
+                let err = (ref_v - fast_v).abs();
+                let scale = ref_v.abs().max(fast_v.abs()).max(1e-30_f64);
+                assert!(
+                    err / scale < 1e-10,
+                    "Makhoul DCT-IV n={} k={}: ref={} fast={} rel_err={}",
+                    n,
+                    k,
+                    ref_v,
+                    fast_v,
+                    err / scale
+                );
+            }
+        }
+    }
+
+    /// Round-trip DCT-II → DCT-III at larger sizes (f64 and f32).
+    #[test]
+    fn test_dct2_dct3_roundtrip_sized() {
+        // f64 round-trip
+        for &n in &[64usize, 128, 256, 512, 1024, 2048, 4096] {
+            let input: Vec<f64> = (0..n).map(|i| (i as f64 * 0.9 + 0.1).sin() * 7.0).collect();
+            let solver2 = R2rSolver::<f64>::new(R2rKind::Redft10, n);
+            let solver3 = R2rSolver::<f64>::new(R2rKind::Redft01, n);
+            let mut freq = vec![0.0_f64; n];
+            let mut recovered = vec![0.0_f64; n];
+            solver2.execute_dct2(&input, &mut freq);
+            solver3.execute_dct3(&freq, &mut recovered);
+
+            let ref_idx = input
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    a.abs()
+                        .partial_cmp(&b.abs())
+                        .unwrap_or(core::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+
+            if input[ref_idx].abs() < 1e-10 {
+                continue;
+            }
+            let scale = recovered[ref_idx] / input[ref_idx];
+
+            let max_err = input
+                .iter()
+                .zip(recovered.iter())
+                .filter(|(a, _)| a.abs() > 1e-10)
+                .map(|(a, r)| ((r / scale - a) / a).abs())
+                .fold(0.0_f64, f64::max);
+
+            assert!(
+                max_err < 1e-10,
+                "f64 DCT-II/III round-trip n={n}: max_rel_err={max_err}"
+            );
+        }
+
+        // f32 round-trip
+        for &n in &[64usize, 128, 256, 512, 1024] {
+            let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.9 + 0.1).sin() * 7.0).collect();
+            let solver2 = R2rSolver::<f32>::new(R2rKind::Redft10, n);
+            let solver3 = R2rSolver::<f32>::new(R2rKind::Redft01, n);
+            let mut freq = vec![0.0_f32; n];
+            let mut recovered = vec![0.0_f32; n];
+            solver2.execute_dct2(&input, &mut freq);
+            solver3.execute_dct3(&freq, &mut recovered);
+
+            let ref_idx = input
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    a.abs()
+                        .partial_cmp(&b.abs())
+                        .unwrap_or(core::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+
+            if input[ref_idx].abs() < 1e-4 {
+                continue;
+            }
+            let scale = recovered[ref_idx] / input[ref_idx];
+
+            let max_err = input
+                .iter()
+                .zip(recovered.iter())
+                .filter(|(a, _)| a.abs() > 1e-4)
+                .map(|(a, r)| ((r / scale - a) / a).abs())
+                .fold(0.0_f32, f32::max);
+
+            assert!(
+                max_err < 1e-3,
+                "f32 DCT-II/III round-trip n={n}: max_rel_err={max_err}"
+            );
+        }
+    }
+
+    /// Plan-caching smoke test: build solver once, run execute 200× without panic.
+    #[test]
+    fn test_plan_caching_smoke() {
+        let n = 1024_usize;
+        let solver = R2rSolver::<f64>::new(R2rKind::Redft10, n);
+        let input: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
+        let mut output = vec![0.0_f64; n];
+        for _ in 0..200 {
+            solver.execute_dct2(&input, &mut output);
+        }
+        // Verify result is non-trivial (DC component should be non-zero for non-zero input).
+        assert!(output[0].abs() > 1e-6, "DCT-II DC should be non-zero");
     }
 }

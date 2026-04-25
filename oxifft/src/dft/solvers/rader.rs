@@ -10,13 +10,27 @@
 //!
 //! Time complexity: O(p log p) for prime p (when p-1 has good factors)
 //! Space complexity: O(p)
+//!
+//! # Optimizations in this implementation
+//!
+//! - **SIMD-accelerated pointwise multiply** of `a_fft[i] * twiddle_fft[i]` via
+//!   `complex_mul_aos`, dispatching to AVX2+FMA / SSE2 / NEON at runtime.
+//! - **4th inplace scratch mutex**: `work_inplace` avoids an unconditional
+//!   `data.to_vec()` allocation in `execute_inplace` for the common case.
+//! - **Unique solver ID**: assigned at construction for potential debugging.
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::dft::problem::Sign;
+use crate::kernel::complex_mul::complex_mul_aos;
 use crate::kernel::{is_prime, primitive_root};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
 
 use super::bluestein::BluesteinSolver;
+
+/// Global counter for assigning unique IDs to each `RaderSolver`.
+static RADER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Rader's algorithm solver for prime sizes.
 ///
@@ -41,6 +55,8 @@ pub struct RaderSolver<T: Float> {
     twiddle_fft_bwd: Vec<Complex<T>>,
     /// Bluestein solver for the convolution (size p-1)
     conv_solver: BluesteinSolver<T>,
+    /// Unique solver identifier for debugging.
+    pub(crate) solver_id: u64,
     /// Pre-allocated work buffer for reordered input
     #[cfg(feature = "std")]
     work_a: Mutex<Vec<Complex<T>>>,
@@ -50,6 +66,9 @@ pub struct RaderSolver<T: Float> {
     /// Pre-allocated work buffer for convolution result
     #[cfg(feature = "std")]
     work_conv: Mutex<Vec<Complex<T>>>,
+    /// Pre-allocated work buffer for in-place scratch (avoids unconditional alloc)
+    #[cfg(feature = "std")]
+    work_inplace: Mutex<Vec<Complex<T>>>,
 }
 
 impl<T: Float> RaderSolver<T> {
@@ -62,6 +81,7 @@ impl<T: Float> RaderSolver<T> {
             return None;
         }
 
+        let solver_id = RADER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         let g = primitive_root(p)?;
         let n = p - 1; // Convolution size
 
@@ -116,12 +136,15 @@ impl<T: Float> RaderSolver<T> {
             twiddle_fft_fwd,
             twiddle_fft_bwd,
             conv_solver,
+            solver_id,
             #[cfg(feature = "std")]
             work_a: Mutex::new(vec![Complex::zero(); n]),
             #[cfg(feature = "std")]
             work_a_fft: Mutex::new(vec![Complex::zero(); n]),
             #[cfg(feature = "std")]
             work_conv: Mutex::new(vec![Complex::zero(); n]),
+            #[cfg(feature = "std")]
+            work_inplace: Mutex::new(vec![Complex::zero(); p]),
         })
     }
 
@@ -139,9 +162,14 @@ impl<T: Float> RaderSolver<T> {
 
     /// Get the primitive root used.
     #[must_use]
-    #[allow(dead_code)]
     pub fn primitive_root(&self) -> usize {
         self.g
+    }
+
+    /// Returns the unique solver ID (monotonically increasing per-process counter).
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.solver_id
     }
 
     /// Check if this solver is applicable (p is prime and >= 3).
@@ -170,6 +198,7 @@ impl<T: Float> RaderSolver<T> {
         }
 
         // Step 2: Reorder input according to g^(-j)
+        // This scatter/gather pattern stays scalar (indexing is indirect).
         for j in 0..n {
             a[j] = input[self.g_inv_powers[j]];
         }
@@ -177,15 +206,17 @@ impl<T: Float> RaderSolver<T> {
         // Step 3: FFT of reordered input
         self.conv_solver.execute(a, a_fft, Sign::Forward);
 
-        // Step 4: Pointwise multiply with appropriate twiddle FFT
+        // Step 4: Pointwise multiply with appropriate twiddle FFT (SIMD-accelerated).
         let twiddle_fft = match sign {
             Sign::Forward => &self.twiddle_fft_fwd,
             Sign::Backward => &self.twiddle_fft_bwd,
         };
 
-        for i in 0..n {
-            a_fft[i] = a_fft[i] * twiddle_fft[i];
-        }
+        // Use conv as temp storage to avoid aliasing a_fft as both src and dst.
+        complex_mul_aos(&mut conv[..n], a_fft, twiddle_fft);
+        // Now conv holds a_fft * twiddle_fft; use it as input to IFFT
+        // and write result back to a_fft (reusing that buffer).
+        a_fft[..n].copy_from_slice(&conv[..n]);
 
         // Step 5: IFFT to get convolution result
         self.conv_solver.execute(a_fft, conv, Sign::Backward);
@@ -253,11 +284,28 @@ impl<T: Float> RaderSolver<T> {
     }
 
     /// Execute Rader's FFT in-place.
+    ///
+    /// Uses the pre-allocated `work_inplace` buffer when available (avoids
+    /// an unconditional `data.to_vec()` allocation in the common case).
     pub fn execute_inplace(&self, data: &mut [Complex<T>], sign: Sign) {
         let p = self.p;
         debug_assert_eq!(data.len(), p);
 
-        // Need temporary storage
+        #[cfg(feature = "std")]
+        {
+            if let Ok(mut inplace_buf) = self.work_inplace.try_lock() {
+                if inplace_buf.len() < p {
+                    inplace_buf.resize(p, Complex::zero());
+                }
+                inplace_buf[..p].copy_from_slice(data);
+                let input_ptr = inplace_buf[..p].as_ptr();
+                let input_slice = unsafe { core::slice::from_raw_parts(input_ptr, p) };
+                self.execute(input_slice, data, sign);
+                return;
+            }
+        }
+
+        // Fallback: allocate a fresh copy (mutex contended or no_std)
         let input: Vec<Complex<T>> = data.to_vec();
         self.execute(&input, data, sign);
     }
@@ -296,9 +344,11 @@ mod tests {
         let mut output_rader = vec![Complex::zero(); 3];
         let mut output_direct = vec![Complex::zero(); 3];
 
-        RaderSolver::new(3)
-            .unwrap()
-            .execute(&input, &mut output_rader, Sign::Forward);
+        RaderSolver::new(3).expect("p=3 is prime").execute(
+            &input,
+            &mut output_rader,
+            Sign::Forward,
+        );
         DirectSolver::new().execute(&input, &mut output_direct, Sign::Forward);
 
         for (a, b) in output_rader.iter().zip(output_direct.iter()) {
@@ -314,9 +364,11 @@ mod tests {
         let mut output_rader = vec![Complex::zero(); 5];
         let mut output_direct = vec![Complex::zero(); 5];
 
-        RaderSolver::new(5)
-            .unwrap()
-            .execute(&input, &mut output_rader, Sign::Forward);
+        RaderSolver::new(5).expect("p=5 is prime").execute(
+            &input,
+            &mut output_rader,
+            Sign::Forward,
+        );
         DirectSolver::new().execute(&input, &mut output_direct, Sign::Forward);
 
         for (a, b) in output_rader.iter().zip(output_direct.iter()) {
@@ -332,9 +384,11 @@ mod tests {
         let mut output_rader = vec![Complex::zero(); 7];
         let mut output_direct = vec![Complex::zero(); 7];
 
-        RaderSolver::new(7)
-            .unwrap()
-            .execute(&input, &mut output_rader, Sign::Forward);
+        RaderSolver::new(7).expect("p=7 is prime").execute(
+            &input,
+            &mut output_rader,
+            Sign::Forward,
+        );
         DirectSolver::new().execute(&input, &mut output_direct, Sign::Forward);
 
         for (a, b) in output_rader.iter().zip(output_direct.iter()) {
@@ -350,9 +404,11 @@ mod tests {
         let mut output_rader = vec![Complex::zero(); 13];
         let mut output_direct = vec![Complex::zero(); 13];
 
-        RaderSolver::new(13)
-            .unwrap()
-            .execute(&input, &mut output_rader, Sign::Forward);
+        RaderSolver::new(13).expect("p=13 is prime").execute(
+            &input,
+            &mut output_rader,
+            Sign::Forward,
+        );
         DirectSolver::new().execute(&input, &mut output_direct, Sign::Forward);
 
         for (a, b) in output_rader.iter().zip(output_direct.iter()) {
@@ -368,7 +424,7 @@ mod tests {
         let mut transformed = vec![Complex::zero(); 11];
         let mut recovered = vec![Complex::zero(); 11];
 
-        let solver = RaderSolver::new(11).unwrap();
+        let solver = RaderSolver::new(11).expect("p=11 is prime");
         solver.execute(&original, &mut transformed, Sign::Forward);
         solver.execute(&transformed, &mut recovered, Sign::Backward);
 
@@ -389,7 +445,7 @@ mod tests {
 
         // Out-of-place reference
         let mut out_of_place = vec![Complex::zero(); 7];
-        let solver = RaderSolver::new(7).unwrap();
+        let solver = RaderSolver::new(7).expect("p=7 is prime");
         solver.execute(&original, &mut out_of_place, Sign::Forward);
 
         // In-place
@@ -398,6 +454,157 @@ mod tests {
 
         for (a, b) in out_of_place.iter().zip(in_place.iter()) {
             assert!(complex_approx_eq(*a, *b, 1e-10));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Round-trip tests for prime sizes (f64 and f32)
+    // -------------------------------------------------------------------------
+
+    fn roundtrip_f64(n: usize) {
+        let original: Vec<Complex<f64>> = (0..n)
+            .map(|i| Complex::new((i as f64).sin(), (i as f64 * 0.7).cos()))
+            .collect();
+        let mut transformed = vec![Complex::zero(); n];
+        let mut recovered = vec![Complex::zero(); n];
+
+        let solver = RaderSolver::new(n).expect("n must be prime");
+        solver.execute(&original, &mut transformed, Sign::Forward);
+        solver.execute(&transformed, &mut recovered, Sign::Backward);
+
+        let n_f = n as f64;
+        let mut max_rel = 0.0_f64;
+        for (orig, rec) in original.iter().zip(recovered.iter()) {
+            let rec_scaled = *rec / n_f;
+            let re_err = (orig.re - rec_scaled.re).abs();
+            let im_err = (orig.im - rec_scaled.im).abs();
+            let norm = (orig.re * orig.re + orig.im * orig.im).sqrt().max(1e-30);
+            max_rel = max_rel.max((re_err + im_err) / norm);
+        }
+        assert!(
+            max_rel < 1e-12,
+            "rader f64 round-trip n={n}: max_rel={max_rel} (must be < 1e-12)"
+        );
+    }
+
+    fn roundtrip_f32(n: usize) {
+        let original: Vec<Complex<f32>> = (0..n)
+            .map(|i| Complex::new((i as f32).sin(), (i as f32 * 0.7).cos()))
+            .collect();
+        let mut transformed = vec![Complex::new(0.0_f32, 0.0); n];
+        let mut recovered = vec![Complex::new(0.0_f32, 0.0); n];
+
+        let solver = RaderSolver::<f32>::new(n).expect("n must be prime");
+        solver.execute(&original, &mut transformed, Sign::Forward);
+        solver.execute(&transformed, &mut recovered, Sign::Backward);
+
+        let n_f = n as f32;
+        let mut max_rel = 0.0_f32;
+        for (orig, rec) in original.iter().zip(recovered.iter()) {
+            let rec_scaled = *rec / n_f;
+            let re_err = (orig.re - rec_scaled.re).abs();
+            let im_err = (orig.im - rec_scaled.im).abs();
+            let norm = (orig.re * orig.re + orig.im * orig.im)
+                .sqrt()
+                .max(1e-10_f32);
+            max_rel = max_rel.max((re_err + im_err) / norm);
+        }
+        // f32 accumulates more rounding in Rader's nested FFT chain (Bluestein inside Rader).
+        // For n=1009, two levels of FFT means error budget ≈ O(log²(n) * eps_f32).
+        assert!(
+            max_rel < 1e-3,
+            "rader f32 round-trip n={n}: max_rel={max_rel} (must be < 1e-3)"
+        );
+    }
+
+    #[test]
+    fn roundtrip_prime_17_f64() {
+        roundtrip_f64(17);
+    }
+    #[test]
+    fn roundtrip_prime_61_f64() {
+        roundtrip_f64(61);
+    }
+    #[test]
+    fn roundtrip_prime_127_f64() {
+        roundtrip_f64(127);
+    }
+    #[test]
+    fn roundtrip_prime_257_f64() {
+        roundtrip_f64(257);
+    }
+    #[test]
+    fn roundtrip_prime_509_f64() {
+        roundtrip_f64(509);
+    }
+    #[test]
+    fn roundtrip_prime_1009_f64() {
+        roundtrip_f64(1009);
+    }
+
+    #[test]
+    fn roundtrip_prime_17_f32() {
+        roundtrip_f32(17);
+    }
+    #[test]
+    fn roundtrip_prime_61_f32() {
+        roundtrip_f32(61);
+    }
+    #[test]
+    fn roundtrip_prime_127_f32() {
+        roundtrip_f32(127);
+    }
+    #[test]
+    fn roundtrip_prime_257_f32() {
+        roundtrip_f32(257);
+    }
+    #[test]
+    fn roundtrip_prime_509_f32() {
+        roundtrip_f32(509);
+    }
+    #[test]
+    fn roundtrip_prime_1009_f32() {
+        roundtrip_f32(1009);
+    }
+
+    // -------------------------------------------------------------------------
+    // Parallel (rayon) test: many threads share a single RaderSolver
+    // -------------------------------------------------------------------------
+
+    #[cfg(feature = "threading")]
+    #[test]
+    fn parallel_shared_rader_correctness() {
+        use rayon::prelude::*;
+
+        let p = 61_usize;
+        let solver = std::sync::Arc::new(RaderSolver::new(p).expect("p=61 is prime"));
+
+        // Reference: single-threaded forward FFT
+        let input: Vec<Complex<f64>> = (0..p)
+            .map(|i| Complex::new((i as f64).sin(), (i as f64).cos()))
+            .collect();
+        let mut reference = vec![Complex::zero(); p];
+        solver.execute(&input, &mut reference, Sign::Forward);
+
+        // Run 16 parallel computations — each must match the reference
+        let results: Vec<Vec<Complex<f64>>> = (0..16_usize)
+            .into_par_iter()
+            .map(|_| {
+                let mut out = vec![Complex::zero(); p];
+                solver.execute(&input, &mut out, Sign::Forward);
+                out
+            })
+            .collect();
+
+        for (thread_idx, result) in results.iter().enumerate() {
+            for (k, (r, rr)) in result.iter().zip(reference.iter()).enumerate() {
+                let err = ((r.re - rr.re).abs() + (r.im - rr.im).abs())
+                    / (rr.re * rr.re + rr.im * rr.im).sqrt().max(1e-30);
+                assert!(
+                    err < 1e-12,
+                    "parallel thread {thread_idx} output[{k}] diverged: err={err}"
+                );
+            }
         }
     }
 }

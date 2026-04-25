@@ -2,7 +2,7 @@
 //!
 //! This module provides the high-level interface for creating and executing FFT plans.
 
-#![allow(hidden_glob_reexports)]
+#![allow(hidden_glob_reexports)] // reason: api module intentionally re-exports types from sub-modules; shadowing is expected
 
 mod execute;
 mod memory;

@@ -6,6 +6,13 @@
 #[cfg(test)]
 mod codegen_tests;
 mod composite;
+pub mod generated_simd;
+#[cfg(target_arch = "x86_64")]
+pub mod hand_avx512;
+#[cfg(all(test, target_arch = "x86_64"))]
+mod hand_avx512_tests;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod hand_avx512_twiddles;
 mod notw;
 pub mod simd;
 mod twiddle;
@@ -13,6 +20,9 @@ mod twiddle;
 pub use composite::{
     execute_composite_codelet, has_composite_codelet, notw_100, notw_12, notw_15, notw_18, notw_20,
     notw_24, notw_30, notw_36, notw_45, notw_48, notw_50, notw_60, notw_72, notw_80, notw_96,
+};
+pub use generated_simd::{
+    generated_simd_2_dispatch, generated_simd_4_dispatch, generated_simd_8_dispatch,
 };
 pub use notw::*;
 pub use simd::{

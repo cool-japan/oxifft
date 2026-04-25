@@ -9,6 +9,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.3.0] - 2026-04-25
+
+### Performance
+
+- **Performance:** `R2rPlan` now caches `R2rSolver` at construction; solver twiddle tables and FFT plans are built once and reused on every `execute()` call, eliminating 2 Plan constructions + 2561 sin_cos calls per dct2_1024 invocation (v1.0 parity gate: dct2_1024 < 3.0×)
+
+### Added
+
+- DCT-II/III/IV FFT-based implementations via Makhoul reduction (N-point R2C + O(N)
+  post-twiddle), replacing 2N/4N complex DFT approach; ~4× flop reduction vs v0.2.0.
+  (`oxifft/src/rdft/solvers/r2r.rs`)
+- R2r/R2c solver plan caching (`Option<Plan<T>>` + pre-computed twiddle tables)
+  eliminating per-call `Plan::dft_1d` construction.
+- Bluestein + Rader AoS SIMD pointwise-multiply helpers (`kernel/complex_mul.rs`:
+  `complex_mul_aos_f64`, `complex_mul_aos_f32`) with AVX2+FMA, NEON, SSE2, scalar dispatch.
+- Thread-local scratch for Bluestein/Rader keyed by solver ID, removing mutex contention.
+- FFTW parity gate benchmark harness: 7 gates (1024 complex, 2^20 complex, 1024 real,
+  1024×1024 2D, 1000×256 batch, 2017 prime, 1024 DCT-II) at
+  `oxifft-bench/benches/fftw_parity_gates.rs`.
+- FFTW parity ratio baseline JSON committed at `benches/baselines/v0.3.0/`.
+- GPU batch FFT with automatic chunking (`gpu/batch.rs`,
+  `METAL_BATCH_LIMIT=1024`, `CUDA_BATCH_LIMIT=4096`).
+- Pencil decomposition for 3D MPI FFT (`mpi/plans/plan_3d_pencil.rs`).
+- Real WASM SIMD v128 intrinsics via `core::arch::wasm32` with module-split fallback for
+  non-simd128 targets (`wasm/simd.rs`).
+- Work-stealing `WorkStealingContext` for Plan2D/Plan3D with user-pool override
+  (`threading/work_stealing.rs`).
+- `Send + Sync` compile-time assertions on all public plan types (`assertions.rs`).
+- Hand-optimized AVX-512 codelets for sizes 16/32/64
+  (`dft/codelets/hand_avx512.rs`, `dft/codelets/hand_avx512_twiddles.rs`).
+- Cache-oblivious Frigo-Johnson 4-step FFT (`dft/solvers/cache_oblivious.rs`).
+- Criterion DCT/DST benchmark group (`oxifft/benches/dct_benchmarks.rs`,
+  `oxifft-bench/benches/dct_dst.rs`).
+- Criterion R2C/C2R regression tracker (`oxifft-bench/benches/r2c_c2r.rs`).
+- GPU vs CPU benchmark at 4096/16384/65536/262144 (`oxifft/benches/gpu_vs_cpu.rs`).
+- Multi-dimensional NUFFT (2D/3D) (`nufft/nufft2d.rs`, `nufft3d.rs`).
+- SoA twiddle layout for CT sizes ≥ 4096, reducing SIMD shuffle count
+  (`kernel/twiddle.rs`).
+- `GpuBatchFft<T>` trait for N independent same-size FFTs in a single GPU submission.
+- Overlap-save STFT method as alternative to overlap-add (`streaming/stft.rs`).
+
+### Changed
+
+- DCT-II default path now FFT-based for n ≥ 16 (O(n log n)); O(n²) retained as reference
+  fallback for n < 16.
+- Metal backend uses real device probe via `oxicuda_metal::device::MetalDevice::new()`
+  (was hardcoded placeholder).
+- CUDA backend uses real driver probe via `oxicuda_driver::init()` (was filesystem check).
+  GPU kernel dispatch uses CPU fallback pending `oxicuda-launch` integration.
+- NEON dispatch wired into small-size path (sizes 2/4/8); no more scalar fallback on
+  aarch64.
+- Production `.unwrap()` removed from `rader_omega.rs`, `spectral.rs`, `threading/mod.rs`
+  (test-only sites retained).
+- SVE detection now uses `std::arch::is_aarch64_feature_detected!("sve")` instead of
+  `libc::getauxval`; `libc` dependency removed.
+- `#![warn(clippy::missing_safety_doc)]` and `#![warn(clippy::missing_errors_doc)]` added
+  to `lib.rs` as compile-enforced invariants.
+
+### Removed
+
+- `GpuBackend::OpenCL` and `GpuBackend::Vulkan` placeholder variants (never had backing
+  code; downstream match exhaustiveness breakage is acceptable pre-1.0).
+
+### Fixed
+
+- Bluestein `execute_inplace` no longer allocates via `to_vec()` — uses dedicated
+  thread-local scratch.
+- Rader `execute_inplace` mirrored fix.
+- NEON `dit_64`/`dit_128`/`dit_512` eliminate stack round-trip in butterfly loops.
+
+### Performance
+
+- DCT-II @ 1024: ~4× faster vs v0.2.0 (O(n log n) vs O(n²)).
+  FFTW ratio: v0.2.0 baseline 7.39× → see `benches/baselines/v0.3.0/` for post-Makhoul
+  measurement.
+- Power-of-2 1D complex FFT: see `benches/baselines/v0.3.0/` for FFTW ratio snapshots.
+
+### Documentation
+
+- `# Safety` rustdoc added to all 84+ unsafe functions (enforced via
+  `#![warn(clippy::missing_safety_doc)]`).
+- `# Errors` rustdoc added to 84+ fallible public functions (enforced via
+  `#![warn(clippy::missing_errors_doc)]`).
+- 1360 tests passing (up from 858 in v0.2.0).
+
 ## [0.2.0] - 2026-04-14
 
 ### Breaking Changes
@@ -403,7 +488,8 @@ _No unreleased changes._
 - wasm-bindgen 0.2 (WebAssembly bindings)
 - js-sys 0.3 (JavaScript interop)
 
-[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cool-japan/oxifft/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cool-japan/oxifft/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/cool-japan/oxifft/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/cool-japan/oxifft/compare/v0.1.2...v0.1.3

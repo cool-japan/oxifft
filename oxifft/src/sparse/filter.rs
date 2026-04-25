@@ -3,16 +3,8 @@
 //! Implements filters used in the subsampling stage of FFAST algorithm.
 //! These filters help isolate frequency components during bucketization.
 
-// Allow dead code - infrastructure for future algorithm enhancements
-#![allow(dead_code)]
-
 use crate::kernel::{Complex, Float};
-
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use crate::prelude::*;
 
 /// Filter type for sparse FFT subsampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,14 +112,14 @@ impl<T: Float> AliasingFilter<T> {
             let freq = if i <= n / 2 { i as f64 } else { i as f64 - n_f };
 
             // Gaussian: exp(-freq^2 / (2*sigma^2))
-            let val = (-freq * freq / (2.0 * sigma * sigma)).exp();
+            let val = libm::exp(-freq * freq / (2.0 * sigma * sigma));
             coeffs[i] = Complex::new(T::from_f64(val), T::ZERO);
         }
 
         Self {
             coeffs,
             filter_type: FilterType::Gaussian,
-            width: (4.0 * sigma).ceil() as usize,
+            width: libm::ceil(4.0 * sigma) as usize,
             n,
         }
     }
@@ -224,6 +216,24 @@ impl<T: Float> AliasingFilter<T> {
 
         count
     }
+
+    /// Return the filter width parameter.
+    #[inline]
+    pub fn filter_width(&self) -> usize {
+        self.width
+    }
+
+    /// Return the signal length this filter was designed for.
+    #[inline]
+    pub fn signal_length(&self) -> usize {
+        self.n
+    }
+
+    /// Return the filter type.
+    #[inline]
+    pub fn kind(&self) -> FilterType {
+        self.filter_type
+    }
 }
 
 /// Create optimal filter for sparse FFT based on sparsity.
@@ -310,5 +320,41 @@ mod tests {
         // Less sparse
         let filter3: AliasingFilter<f64> = create_optimal_filter(1024, 100, 32);
         assert_eq!(filter3.filter_type, FilterType::Flat);
+    }
+
+    #[test]
+    fn test_blackman_harris_filter() {
+        let filter: AliasingFilter<f64> = AliasingFilter::blackman_harris(64, 16);
+        assert_eq!(filter.coeffs.len(), 64);
+        assert_eq!(filter.filter_type, FilterType::BlackmanHarris);
+        // DC (index 0) coefficient should be non-zero
+        assert!(filter.coeffs[0].re > 0.0 || filter.coeffs[63].re > 0.0);
+    }
+
+    #[test]
+    fn test_apply_time_domain() {
+        let filter: AliasingFilter<f64> = AliasingFilter::flat(8, 4);
+        let signal = vec![Complex::new(1.0_f64, 0.0); 8];
+        let result = filter.apply_time_domain(&signal);
+        assert_eq!(result.len(), 8);
+    }
+
+    #[test]
+    fn test_bandwidth_3db() {
+        // Gaussian filter has DC peak, so at least one bin should exceed half power
+        let filter: AliasingFilter<f64> = AliasingFilter::gaussian(64, 8.0);
+        let bw = filter.bandwidth_3db();
+        assert!(
+            bw > 0,
+            "Gaussian filter should have non-zero -3dB bandwidth"
+        );
+    }
+
+    #[test]
+    fn test_filter_getters() {
+        let filter: AliasingFilter<f64> = AliasingFilter::flat(32, 8);
+        assert_eq!(filter.filter_width(), 8);
+        assert_eq!(filter.signal_length(), 32);
+        assert_eq!(filter.kind(), FilterType::Flat);
     }
 }

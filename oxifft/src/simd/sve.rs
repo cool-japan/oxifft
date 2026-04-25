@@ -81,20 +81,12 @@ pub fn sve_f32_lanes() -> usize {
 }
 
 /// Check if SVE is available.
-#[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "sve"))]
+#[cfg(all(target_arch = "aarch64", feature = "sve"))]
 pub fn has_sve() -> bool {
-    // Check HWCAP for SVE support
-    // HWCAP_SVE = 1 << 22
-    #[allow(unsafe_code)]
-    unsafe {
-        const AT_HWCAP: libc::c_ulong = 16;
-        const HWCAP_SVE: u64 = 1 << 22;
-        let hwcap = libc::getauxval(AT_HWCAP);
-        (hwcap & HWCAP_SVE) != 0
-    }
+    std::arch::is_aarch64_feature_detected!("sve")
 }
 
-#[cfg(not(all(target_arch = "aarch64", target_os = "linux", feature = "sve")))]
+#[cfg(not(all(target_arch = "aarch64", feature = "sve")))]
 pub fn has_sve() -> bool {
     false
 }
@@ -253,7 +245,6 @@ impl SimdVector for Sve256F64 {
     }
 }
 
-#[allow(dead_code)]
 impl Sve256F64 {
     /// Create a vector from four f64 values.
     #[inline]
@@ -515,7 +506,6 @@ impl SimdVector for Sve256F32 {
     }
 }
 
-#[allow(dead_code)]
 impl Sve256F32 {
     /// Create a vector from eight f32 values.
     #[inline]

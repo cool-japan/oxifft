@@ -9,16 +9,44 @@ repository.workspace = true
 homepage = "https://github.com/cool-japan/oxifft"
 documentation = "https://docs.rs/oxifft-codegen"
 readme = "README.md"
+rust-version.workspace = true
 keywords = ["fft", "codegen", "proc-macro", "simd"]
 categories = ["development-tools::procedural-macro-helpers"]
+exclude = [
+    "benches/",
+    "tests/",
+    "fuzz/",
+    ".github/",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "TODO.md",
+]
 
 [lib]
 proc-macro = true
 
 [dependencies]
+oxifft-codegen-impl.workspace = true
 proc-macro2.workspace = true
 quote.workspace = true
 syn.workspace = true
+
+[dev-dependencies]
+oxifft-codegen-impl.workspace = true
+trybuild = "1.0"
+num-complex.workspace = true
+num-traits.workspace = true
+criterion.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+
+[[bench]]
+name = "codegen_time_stub"
+harness = false
+
+[[bench]]
+name = "codegen_time"
+harness = false
 
 [lints]
 workspace = true

@@ -59,7 +59,6 @@ pub fn detect_simd_level() -> SimdLevel {
 }
 
 /// Check if AVX is available.
-#[allow(dead_code)]
 #[must_use]
 #[cfg(target_arch = "x86_64")]
 pub fn has_avx() -> bool {
@@ -67,7 +66,6 @@ pub fn has_avx() -> bool {
 }
 
 /// Check if AVX2 is available.
-#[allow(dead_code)]
 #[must_use]
 #[cfg(target_arch = "x86_64")]
 pub fn has_avx2() -> bool {
@@ -75,7 +73,6 @@ pub fn has_avx2() -> bool {
 }
 
 /// Check if AVX-512 is available.
-#[allow(dead_code)]
 #[must_use]
 #[cfg(target_arch = "x86_64")]
 pub fn has_avx512() -> bool {
@@ -83,25 +80,16 @@ pub fn has_avx512() -> bool {
 }
 
 /// Check if SVE is available at runtime.
-#[allow(dead_code)]
 #[must_use]
-#[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "sve"))]
+#[cfg(all(target_arch = "aarch64", feature = "sve"))]
 pub fn has_sve_runtime() -> bool {
-    // Check HWCAP for SVE support
-    // HWCAP_SVE = 1 << 22
-    #[allow(unsafe_code)]
-    unsafe {
-        const AT_HWCAP: libc::c_ulong = 16;
-        const HWCAP_SVE: u64 = 1 << 22;
-        let hwcap = libc::getauxval(AT_HWCAP);
-        (hwcap & HWCAP_SVE) != 0
-    }
+    std::arch::is_aarch64_feature_detected!("sve")
 }
 
-/// SVE not available on non-Linux aarch64 or without feature flag.
-#[allow(dead_code)]
+/// SVE not available on non-aarch64 or without feature flag.
 #[must_use]
-#[cfg(not(all(target_arch = "aarch64", target_os = "linux", feature = "sve")))]
+#[cfg(not(all(target_arch = "aarch64", feature = "sve")))]
+#[allow(dead_code)]
 pub fn has_sve_runtime() -> bool {
     false
 }

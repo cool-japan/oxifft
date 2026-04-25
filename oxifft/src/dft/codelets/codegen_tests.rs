@@ -7,7 +7,9 @@
 #![cfg(test)]
 
 use crate::kernel::Complex;
-use oxifft_codegen::{gen_notw_codelet, gen_twiddle_codelet};
+use oxifft_codegen::{
+    gen_notw_codelet, gen_simd_codelet, gen_split_radix_twiddle_codelet, gen_twiddle_codelet,
+};
 
 // ============================================================================
 // Generate the codelets under test (proc-macro invocations).
@@ -25,6 +27,16 @@ gen_twiddle_codelet!(2);
 gen_twiddle_codelet!(4);
 gen_twiddle_codelet!(8);
 gen_twiddle_codelet!(16);
+
+gen_split_radix_twiddle_codelet!();
+gen_split_radix_twiddle_codelet!(8);
+gen_split_radix_twiddle_codelet!(16);
+
+// SIMD dispatcher codelets (AVX-512F / AVX2 / SSE2 / NEON / scalar depending on host)
+gen_simd_codelet!(2);
+gen_simd_codelet!(4);
+gen_simd_codelet!(8);
+gen_simd_codelet!(16);
 
 // ============================================================================
 // Reference DFT (naive O(n²)) for ground-truth comparison
@@ -672,3 +684,1189 @@ fn test_codelet_twiddle_16_roundtrip_identity() {
         );
     }
 }
+
+// ============================================================================
+// Parseval's theorem tests (energy conservation)
+// |x|² = (1/N) * |X|²  where X = DFT(x)
+// ============================================================================
+
+fn energy(data: &[Complex<f64>]) -> f64 {
+    data.iter().map(|c| c.re * c.re + c.im * c.im).sum()
+}
+
+#[test]
+fn test_parseval_notw_2() {
+    let input: Vec<Complex<f64>> = (0..2)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 1.0, f64::from(i as i32).cos()))
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    codelet_notw_2(&mut output, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 2.0 - output_energy).abs() < 1e-10,
+        "Parseval notw_2: {input_energy} * 2 != {output_energy}"
+    );
+}
+
+#[test]
+fn test_parseval_notw_4() {
+    let input: Vec<Complex<f64>> = (0..4)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 1.0, f64::from(i as i32).cos()))
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    codelet_notw_4(&mut output, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 4.0 - output_energy).abs() < 1e-10,
+        "Parseval notw_4: {input_energy} * 4 != {output_energy}"
+    );
+}
+
+#[test]
+fn test_parseval_notw_8() {
+    let input: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 0.5, f64::from(i as i32).cos()))
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    codelet_notw_8(&mut output, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 8.0 - output_energy).abs() < 1e-9,
+        "Parseval notw_8: {input_energy} * 8 != {output_energy}"
+    );
+}
+
+#[test]
+fn test_parseval_notw_16() {
+    let input: Vec<Complex<f64>> = (0..16)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos() * 0.8))
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    codelet_notw_16(&mut output, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 16.0 - output_energy).abs() < 1e-8,
+        "Parseval notw_16: {input_energy} * 16 != {output_energy}"
+    );
+}
+
+#[test]
+fn test_parseval_notw_32() {
+    let input: Vec<Complex<f64>> = (0..32)
+        .map(|i| Complex::new(f64::from(i as i32).sin() * 0.3, f64::from(i as i32).cos()))
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    codelet_notw_32(&mut output, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 32.0 - output_energy).abs() < 1e-7,
+        "Parseval notw_32: {input_energy} * 32 != {output_energy}"
+    );
+}
+
+#[test]
+fn test_parseval_notw_64() {
+    let input: Vec<Complex<f64>> = (0..64)
+        .map(|i| {
+            Complex::new(
+                f64::from(i as i32).sin() * 0.2,
+                f64::from(i as i32).cos() * 0.4,
+            )
+        })
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    codelet_notw_64(&mut output, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 64.0 - output_energy).abs() < 1e-5,
+        "Parseval notw_64: {input_energy} * 64 != {output_energy}"
+    );
+}
+
+// ============================================================================
+// Forward+backward (roundtrip) tests for sizes 32 and 64
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_32_roundtrip() {
+    let original: Vec<Complex<f64>> = (0..32)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+    let mut data = original.clone();
+    codelet_notw_32(&mut data, -1);
+    codelet_notw_32(&mut data, 1);
+    for x in &mut data {
+        *x = Complex::new(x.re / 32.0, x.im / 32.0);
+    }
+    for (i, (a, e)) in data.iter().zip(original.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-8),
+            "notw_32 roundtrip index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_64_roundtrip() {
+    let original: Vec<Complex<f64>> = (0..64)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+    let mut data = original.clone();
+    codelet_notw_64(&mut data, -1);
+    codelet_notw_64(&mut data, 1);
+    for x in &mut data {
+        *x = Complex::new(x.re / 64.0, x.im / 64.0);
+    }
+    for (i, (a, e)) in data.iter().zip(original.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-7),
+            "notw_64 roundtrip index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Single-frequency sinusoid tests (verify energy concentrated at one bin)
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_8_single_freq() {
+    // Single frequency at bin 1: x[n] = exp(2πi * 1 * n / 8) = cos(2πn/8) + i*sin(2πn/8)
+    // Forward DFT should place all energy at bin 1: X[1] = 8, X[k≠1] ≈ 0
+    let n = 8;
+    let mut x: Vec<Complex<f64>> = (0..n)
+        .map(|i| {
+            let angle = 2.0 * core::f64::consts::PI * (i as f64) / (n as f64);
+            Complex::new(angle.cos(), angle.sin())
+        })
+        .collect();
+    codelet_notw_8(&mut x, -1);
+    // Bin 1 should have magnitude ≈ N
+    let mag1 = (x[1].re * x[1].re + x[1].im * x[1].im).sqrt();
+    assert!(
+        (mag1 - 8.0).abs() < 1e-10,
+        "notw_8 single freq: bin 1 magnitude {mag1} != 8"
+    );
+    // Other bins should be ≈ 0
+    for (k, v) in x.iter().enumerate() {
+        if k != 1 {
+            let mag = (v.re * v.re + v.im * v.im).sqrt();
+            assert!(
+                mag < 1e-10,
+                "notw_8 single freq: bin {k} magnitude {mag} should be ~0"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_codelet_notw_16_single_freq() {
+    let n = 16;
+    let freq_bin = 3;
+    let mut x: Vec<Complex<f64>> = (0..n)
+        .map(|i| {
+            let angle = 2.0 * core::f64::consts::PI * (freq_bin * i) as f64 / (n as f64);
+            Complex::new(angle.cos(), angle.sin())
+        })
+        .collect();
+    codelet_notw_16(&mut x, -1);
+    let mag = (x[freq_bin].re * x[freq_bin].re + x[freq_bin].im * x[freq_bin].im).sqrt();
+    assert!(
+        (mag - 16.0).abs() < 1e-9,
+        "notw_16 single freq: bin {freq_bin} magnitude {mag} != 16"
+    );
+    for (k, v) in x.iter().enumerate() {
+        if k != freq_bin {
+            let m = (v.re * v.re + v.im * v.im).sqrt();
+            assert!(
+                m < 1e-9,
+                "notw_16 single freq: bin {k} magnitude {m} should be ~0"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Linearity tests: DFT(a*x + b*y) = a*DFT(x) + b*DFT(y)
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_8_linearity() {
+    let n = 8;
+    let a_coeff = Complex::new(2.5_f64, -0.3);
+    let b_coeff = Complex::new(0.7_f64, 1.2);
+
+    let x: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+    let y: Vec<Complex<f64>> = (0..n)
+        .map(|i| {
+            Complex::new(
+                f64::from(i as i32) * 0.3 + 0.1,
+                1.0 - f64::from(i as i32) * 0.2,
+            )
+        })
+        .collect();
+
+    // DFT(a*x + b*y)
+    let mut combined: Vec<Complex<f64>> = x
+        .iter()
+        .zip(y.iter())
+        .map(|(&xi, &yi)| a_coeff * xi + b_coeff * yi)
+        .collect();
+    codelet_notw_8(&mut combined, -1);
+
+    // a*DFT(x) + b*DFT(y)
+    let mut dx = x;
+    let mut dy = y;
+    codelet_notw_8(&mut dx, -1);
+    codelet_notw_8(&mut dy, -1);
+    let expected: Vec<Complex<f64>> = dx
+        .iter()
+        .zip(dy.iter())
+        .map(|(&xi, &yi)| a_coeff * xi + b_coeff * yi)
+        .collect();
+
+    for (i, (c, e)) in combined.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*c, *e, 1e-9),
+            "notw_8 linearity index {i}: {c:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_16_linearity() {
+    let n = 16;
+    let a_coeff = Complex::new(1.5_f64, 0.7);
+    let b_coeff = Complex::new(-0.3_f64, 2.0);
+
+    let x: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+    let y: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32) * 0.1, f64::from(i as i32) * 0.2))
+        .collect();
+
+    let mut combined: Vec<Complex<f64>> = x
+        .iter()
+        .zip(y.iter())
+        .map(|(&xi, &yi)| a_coeff * xi + b_coeff * yi)
+        .collect();
+    codelet_notw_16(&mut combined, -1);
+
+    let mut dx = x;
+    let mut dy = y;
+    codelet_notw_16(&mut dx, -1);
+    codelet_notw_16(&mut dy, -1);
+    let expected: Vec<Complex<f64>> = dx
+        .iter()
+        .zip(dy.iter())
+        .map(|(&xi, &yi)| a_coeff * xi + b_coeff * yi)
+        .collect();
+
+    for (i, (c, e)) in combined.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*c, *e, 1e-8),
+            "notw_16 linearity index {i}: {c:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Backward-direction (inverse) tests for no-twiddle codelets
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_4_inverse_matches_naive() {
+    let input: Vec<Complex<f64>> = (0..4)
+        .map(|i| Complex::new(f64::from(i as i32) * 1.3, f64::from(i as i32) * 0.9))
+        .collect();
+    let expected = naive_dft(&input, 1); // sign=+1 for inverse
+    let mut actual = input;
+    codelet_notw_4(&mut actual, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-11),
+            "notw_4 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_8_inverse_matches_naive() {
+    let input: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+    let expected = naive_dft(&input, 1);
+    let mut actual = input;
+    codelet_notw_8(&mut actual, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-10),
+            "notw_8 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_16_inverse_matches_naive() {
+    let input: Vec<Complex<f64>> = (0..16)
+        .map(|i| Complex::new(f64::from(i as i32) * 0.5, -f64::from(i as i32) * 0.3))
+        .collect();
+    let expected = naive_dft(&input, 1);
+    let mut actual = input;
+    codelet_notw_16(&mut actual, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-9),
+            "notw_16 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_32_inverse_matches_naive() {
+    let input: Vec<Complex<f64>> = (0..32)
+        .map(|i| {
+            Complex::new(
+                f64::from(i as i32).sin() * 0.5,
+                f64::from(i as i32).cos() * 0.3,
+            )
+        })
+        .collect();
+    let expected = naive_dft(&input, 1);
+    let mut actual = input;
+    codelet_notw_32(&mut actual, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-8),
+            "notw_32 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_64_inverse_matches_naive() {
+    let input: Vec<Complex<f64>> = (0..64)
+        .map(|i| {
+            Complex::new(
+                f64::from(i as i32).sin() * 0.1,
+                f64::from(i as i32).cos() * 0.2,
+            )
+        })
+        .collect();
+    let expected = naive_dft(&input, 1);
+    let mut actual = input;
+    codelet_notw_64(&mut actual, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-7),
+            "notw_64 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Backward-direction (inverse) tests for twiddle codelets
+// ============================================================================
+
+#[test]
+fn test_codelet_twiddle_4_inverse() {
+    // Inverse twiddle is conjugate: W4^{-k} = conj(W4^k)
+    let tw1 = Complex::new(0.0_f64, 1.0); // conj(W4^1) = +i for inverse
+    let tw2 = Complex::new(-1.0_f64, 0.0); // conj(W4^2) = -1
+    let tw3 = Complex::new(0.0_f64, -1.0); // conj(W4^3) = -i
+    let input: Vec<Complex<f64>> = (0..4)
+        .map(|i| Complex::new(f64::from(i as i32) + 0.5, 1.0 - f64::from(i as i32) * 0.3))
+        .collect();
+    let tweaked: Vec<Complex<f64>> = vec![input[0], input[1] * tw1, input[2] * tw2, input[3] * tw3];
+    let expected = naive_dft(&tweaked, 1);
+    let mut actual = input;
+    codelet_twiddle_4(&mut actual, tw1, tw2, tw3, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-11),
+            "twiddle_4 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_twiddle_8_inverse() {
+    // Conjugate twiddles for inverse direction
+    let twiddles: [Complex<f64>; 7] = {
+        let mut arr = [Complex::new(0.0_f64, 0.0); 7];
+        for (k, item) in arr.iter_mut().enumerate() {
+            let angle = 2.0 * core::f64::consts::PI * ((k + 1) as f64) / 8.0; // positive for inverse
+            *item = Complex::new(angle.cos(), angle.sin());
+        }
+        arr
+    };
+    let input: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex::new(f64::from(i as i32) * 0.7, f64::from(i as i32) * 0.3 + 0.5))
+        .collect();
+    let mut tweaked = input.clone();
+    for k in 0..7 {
+        tweaked[k + 1] = input[k + 1] * twiddles[k];
+    }
+    let expected = naive_dft(&tweaked, 1);
+    let mut actual = input;
+    codelet_twiddle_8(&mut actual, &twiddles, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-10),
+            "twiddle_8 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_twiddle_16_inverse_vs_naive() {
+    // Conjugate twiddles for inverse
+    let twiddles: [Complex<f64>; 15] = {
+        let mut arr = [Complex::new(0.0_f64, 0.0); 15];
+        for (k, item) in arr.iter_mut().enumerate() {
+            let angle = 2.0 * core::f64::consts::PI * ((k + 1) as f64) / 16.0;
+            *item = Complex::new(angle.cos(), angle.sin());
+        }
+        arr
+    };
+    let input: Vec<Complex<f64>> = (0..16)
+        .map(|i| {
+            Complex::new(
+                f64::from(i as i32) * 0.2 + 0.3,
+                0.5 - f64::from(i as i32) * 0.1,
+            )
+        })
+        .collect();
+    let mut tweaked = input.clone();
+    for k in 0..15 {
+        tweaked[k + 1] = input[k + 1] * twiddles[k];
+    }
+    let expected = naive_dft(&tweaked, 1);
+    let mut actual = input;
+    codelet_twiddle_16(&mut actual, &twiddles, 1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-9),
+            "twiddle_16 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Twiddle codelet Parseval's theorem (with identity twiddles)
+// ============================================================================
+
+#[test]
+fn test_parseval_twiddle_8_identity() {
+    let input: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 1.0, f64::from(i as i32).cos()))
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    let identity = [Complex::new(1.0_f64, 0.0); 7];
+    codelet_twiddle_8(&mut output, &identity, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 8.0 - output_energy).abs() < 1e-9,
+        "Parseval twiddle_8: {input_energy} * 8 != {output_energy}"
+    );
+}
+
+#[test]
+fn test_parseval_twiddle_16_identity() {
+    let input: Vec<Complex<f64>> = (0..16)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos() * 0.6))
+        .collect();
+    let input_energy = energy(&input);
+    let mut output = input;
+    let identity = [Complex::new(1.0_f64, 0.0); 15];
+    codelet_twiddle_16(&mut output, &identity, -1);
+    let output_energy = energy(&output);
+    assert!(
+        (input_energy * 16.0 - output_energy).abs() < 1e-8,
+        "Parseval twiddle_16: {input_energy} * 16 != {output_energy}"
+    );
+}
+
+// ============================================================================
+// Twiddle codelet roundtrip tests
+// ============================================================================
+
+#[test]
+fn test_codelet_twiddle_2_roundtrip() {
+    let original = [Complex::new(1.5_f64, -0.3), Complex::new(-0.7, 2.1)];
+    let mut data = original;
+    codelet_twiddle_2(&mut data, Complex::new(1.0, 0.0));
+    codelet_twiddle_2(&mut data, Complex::new(1.0, 0.0));
+    // With identity twiddle, this is just like notw_2 roundtrip
+    for x in &mut data {
+        *x = Complex::new(x.re / 2.0, x.im / 2.0);
+    }
+    for (i, (a, e)) in data.iter().zip(original.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-12),
+            "twiddle_2 roundtrip index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_twiddle_4_roundtrip_identity() {
+    let original: Vec<Complex<f64>> = (0..4)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+    let identity = Complex::new(1.0_f64, 0.0);
+    let mut data = original.clone();
+    codelet_twiddle_4(&mut data, identity, identity, identity, -1);
+    codelet_twiddle_4(&mut data, identity, identity, identity, 1);
+    for x in &mut data {
+        *x = Complex::new(x.re / 4.0, x.im / 4.0);
+    }
+    for (i, (a, e)) in data.iter().zip(original.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-12),
+            "twiddle_4 roundtrip index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_twiddle_8_roundtrip_identity() {
+    let original: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+    let identity = [Complex::new(1.0_f64, 0.0); 7];
+    let mut data = original.clone();
+    codelet_twiddle_8(&mut data, &identity, -1);
+    codelet_twiddle_8(&mut data, &identity, 1);
+    for x in &mut data {
+        *x = Complex::new(x.re / 8.0, x.im / 8.0);
+    }
+    for (i, (a, e)) in data.iter().zip(original.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-11),
+            "twiddle_8 roundtrip index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Complex input pattern tests (all-imaginary, alternating, etc.)
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_8_all_imaginary() {
+    // Pure imaginary input: x[n] = i*n
+    let input: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex::new(0.0, f64::from(i as i32)))
+        .collect();
+    let expected = naive_dft(&input, -1);
+    let mut actual = input;
+    codelet_notw_8(&mut actual, -1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-10),
+            "notw_8 all-imag index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_16_alternating() {
+    // Alternating +1, -1 pattern → should concentrate at bin N/2
+    let mut x: Vec<Complex<f64>> = (0..16)
+        .map(|i| {
+            if i % 2 == 0 {
+                Complex::new(1.0, 0.0)
+            } else {
+                Complex::new(-1.0, 0.0)
+            }
+        })
+        .collect();
+    codelet_notw_16(&mut x, -1);
+    // Bin N/2 = 8 should have magnitude 16
+    let mag8 = (x[8].re * x[8].re + x[8].im * x[8].im).sqrt();
+    assert!(
+        (mag8 - 16.0).abs() < 1e-9,
+        "notw_16 alternating: bin 8 magnitude {mag8} != 16"
+    );
+    // Other bins should be ~0
+    for (k, v) in x.iter().enumerate() {
+        if k != 8 {
+            let mag = (v.re * v.re + v.im * v.im).sqrt();
+            assert!(
+                mag < 1e-9,
+                "notw_16 alternating: bin {k} magnitude {mag} should be ~0"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_codelet_notw_4_random_complex() {
+    // Specific complex values that exercise both real and imaginary parts
+    let input = vec![
+        Complex::new(0.731_f64, -0.429),
+        Complex::new(-1.213, 0.876),
+        Complex::new(0.051, 2.001),
+        Complex::new(-0.999, -0.555),
+    ];
+    let expected = naive_dft(&input, -1);
+    let mut actual = input;
+    codelet_notw_4(&mut actual, -1);
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-11),
+            "notw_4 random_complex index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Split-radix twiddle codelet tests (generic)
+// ============================================================================
+
+/// Helper: prepare data in split-radix layout (E | O1 | O3) and compute
+/// expected result using the generic codelet, then compare against naive DFT.
+///
+/// For the split-radix combining step, we need the sub-DFT results already
+/// computed. So we test the combining step by:
+/// 1. Compute the full DFT using naive_dft
+/// 2. Decompose input into even/odd-1/odd-3 subsequences
+/// 3. Compute sub-DFTs of each
+/// 4. Place in split-radix layout
+/// 5. Apply the split-radix twiddle codelet
+/// 6. Compare against naive_dft of the full input
+fn compute_split_radix_twiddles(n: usize, forward: bool) -> (Vec<Complex<f64>>, Vec<Complex<f64>>) {
+    let sign = if forward { -1.0 } else { 1.0 };
+    let n4 = n / 4;
+    let twiddles: Vec<Complex<f64>> = (0..n4)
+        .map(|k| {
+            let angle = sign * 2.0 * core::f64::consts::PI * (k as f64) / (n as f64);
+            Complex::new(angle.cos(), angle.sin())
+        })
+        .collect();
+    let twiddles3: Vec<Complex<f64>> = (0..n4)
+        .map(|k| {
+            let angle = sign * 2.0 * core::f64::consts::PI * (3 * k) as f64 / (n as f64);
+            Complex::new(angle.cos(), angle.sin())
+        })
+        .collect();
+    (twiddles, twiddles3)
+}
+
+fn prepare_split_radix_data(input: &[Complex<f64>], sign: i32) -> Vec<Complex<f64>> {
+    let n = input.len();
+    let n2 = n / 2;
+    let n4 = n / 4;
+
+    // Decompose into even/odd-1/odd-3 subsequences
+    let even: Vec<Complex<f64>> = (0..n2).map(|i| input[2 * i]).collect();
+    let odd1: Vec<Complex<f64>> = (0..n4).map(|i| input[4 * i + 1]).collect();
+    let odd3: Vec<Complex<f64>> = (0..n4).map(|i| input[4 * i + 3]).collect();
+
+    // Compute sub-DFTs
+    let e_dft = naive_dft(&even, sign);
+    let o1_dft = naive_dft(&odd1, sign);
+    let o3_dft = naive_dft(&odd3, sign);
+
+    // Place in split-radix layout: [E | O1 | O3]
+    let mut data = vec![Complex::new(0.0_f64, 0.0); n];
+    for (i, v) in e_dft.iter().enumerate() {
+        data[i] = *v;
+    }
+    for (i, v) in o1_dft.iter().enumerate() {
+        data[n2 + i] = *v;
+    }
+    for (i, v) in o3_dft.iter().enumerate() {
+        data[n2 + n4 + i] = *v;
+    }
+    data
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_generic_size_8() {
+    let n = 8;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 0.5, f64::from(i as i32).cos()))
+        .collect();
+
+    let expected = naive_dft(&input, -1);
+    let mut data = prepare_split_radix_data(&input, -1);
+    let (twiddles, twiddles3) = compute_split_radix_twiddles(n, true);
+
+    codelet_split_radix_twiddle(&mut data, n, &twiddles, &twiddles3, -1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-10),
+            "split_radix_generic(8) index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_generic_size_16() {
+    let n = 16;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32) * 0.4, f64::from(i as i32) * 0.2 - 1.0))
+        .collect();
+
+    let expected = naive_dft(&input, -1);
+    let mut data = prepare_split_radix_data(&input, -1);
+    let (twiddles, twiddles3) = compute_split_radix_twiddles(n, true);
+
+    codelet_split_radix_twiddle(&mut data, n, &twiddles, &twiddles3, -1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-9),
+            "split_radix_generic(16) index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_generic_size_32() {
+    let n = 32;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos() * 0.3))
+        .collect();
+
+    let expected = naive_dft(&input, -1);
+    let mut data = prepare_split_radix_data(&input, -1);
+    let (twiddles, twiddles3) = compute_split_radix_twiddles(n, true);
+
+    codelet_split_radix_twiddle(&mut data, n, &twiddles, &twiddles3, -1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-8),
+            "split_radix_generic(32) index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_generic_inverse() {
+    let n = 16;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+
+    let expected = naive_dft(&input, 1);
+    let mut data = prepare_split_radix_data(&input, 1);
+    let (twiddles, twiddles3) = compute_split_radix_twiddles(n, false);
+
+    codelet_split_radix_twiddle(&mut data, n, &twiddles, &twiddles3, 1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-9),
+            "split_radix_generic inverse(16) index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Split-radix twiddle codelet tests (specialized N=8)
+// ============================================================================
+
+#[test]
+fn test_codelet_split_radix_twiddle_8_forward() {
+    let n = 8;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 0.5, f64::from(i as i32).cos()))
+        .collect();
+
+    let expected = naive_dft(&input, -1);
+    let mut data = prepare_split_radix_data(&input, -1);
+    let (tw, tw3) = compute_split_radix_twiddles(n, true);
+    let twiddles: [Complex<f64>; 2] = [tw[0], tw[1]];
+    let twiddles3: [Complex<f64>; 2] = [tw3[0], tw3[1]];
+
+    codelet_split_radix_twiddle_8(&mut data, &twiddles, &twiddles3, -1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-10),
+            "split_radix_8 forward index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_8_inverse() {
+    let n = 8;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32) * 0.7, f64::from(i as i32) * 0.3))
+        .collect();
+
+    let expected = naive_dft(&input, 1);
+    let mut data = prepare_split_radix_data(&input, 1);
+    let (tw, tw3) = compute_split_radix_twiddles(n, false);
+    let twiddles: [Complex<f64>; 2] = [tw[0], tw[1]];
+    let twiddles3: [Complex<f64>; 2] = [tw3[0], tw3[1]];
+
+    codelet_split_radix_twiddle_8(&mut data, &twiddles, &twiddles3, 1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-10),
+            "split_radix_8 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_8_matches_generic() {
+    let n = 8;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+
+    let (tw, tw3) = compute_split_radix_twiddles(n, true);
+
+    let mut data_generic = prepare_split_radix_data(&input, -1);
+    codelet_split_radix_twiddle(&mut data_generic, n, &tw, &tw3, -1);
+
+    let mut data_spec = prepare_split_radix_data(&input, -1);
+    let twiddles: [Complex<f64>; 2] = [tw[0], tw[1]];
+    let twiddles3: [Complex<f64>; 2] = [tw3[0], tw3[1]];
+    codelet_split_radix_twiddle_8(&mut data_spec, &twiddles, &twiddles3, -1);
+
+    for (i, (g, s)) in data_generic.iter().zip(data_spec.iter()).enumerate() {
+        assert!(
+            approx_eq(*g, *s, 1e-12),
+            "split_radix_8 generic vs specialized index {i}: {g:?} != {s:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Split-radix twiddle codelet tests (specialized N=16)
+// ============================================================================
+
+#[test]
+fn test_codelet_split_radix_twiddle_16_forward() {
+    let n = 16;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| {
+            Complex::new(
+                f64::from(i as i32) * 0.4 + 0.1,
+                f64::from(i as i32) * 0.2 - 0.5,
+            )
+        })
+        .collect();
+
+    let expected = naive_dft(&input, -1);
+    let mut data = prepare_split_radix_data(&input, -1);
+    let (tw, tw3) = compute_split_radix_twiddles(n, true);
+    let twiddles: [Complex<f64>; 4] = [tw[0], tw[1], tw[2], tw[3]];
+    let twiddles3: [Complex<f64>; 4] = [tw3[0], tw3[1], tw3[2], tw3[3]];
+
+    codelet_split_radix_twiddle_16(&mut data, &twiddles, &twiddles3, -1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-9),
+            "split_radix_16 forward index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_16_inverse() {
+    let n = 16;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+
+    let expected = naive_dft(&input, 1);
+    let mut data = prepare_split_radix_data(&input, 1);
+    let (tw, tw3) = compute_split_radix_twiddles(n, false);
+    let twiddles: [Complex<f64>; 4] = [tw[0], tw[1], tw[2], tw[3]];
+    let twiddles3: [Complex<f64>; 4] = [tw3[0], tw3[1], tw3[2], tw3[3]];
+
+    codelet_split_radix_twiddle_16(&mut data, &twiddles, &twiddles3, 1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-9),
+            "split_radix_16 inverse index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_16_matches_generic() {
+    let n = 16;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin(), f64::from(i as i32).cos()))
+        .collect();
+
+    let (tw, tw3) = compute_split_radix_twiddles(n, true);
+
+    let mut data_generic = prepare_split_radix_data(&input, -1);
+    codelet_split_radix_twiddle(&mut data_generic, n, &tw, &tw3, -1);
+
+    let mut data_spec = prepare_split_radix_data(&input, -1);
+    let twiddles: [Complex<f64>; 4] = [tw[0], tw[1], tw[2], tw[3]];
+    let twiddles3: [Complex<f64>; 4] = [tw3[0], tw3[1], tw3[2], tw3[3]];
+    codelet_split_radix_twiddle_16(&mut data_spec, &twiddles, &twiddles3, -1);
+
+    for (i, (g, s)) in data_generic.iter().zip(data_spec.iter()).enumerate() {
+        assert!(
+            approx_eq(*g, *s, 1e-12),
+            "split_radix_16 generic vs specialized index {i}: {g:?} != {s:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Split-radix inline twiddle tests
+// ============================================================================
+
+#[test]
+fn test_codelet_split_radix_twiddle_inline_size_8() {
+    let n = 8;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 0.5, f64::from(i as i32).cos()))
+        .collect();
+
+    let expected = naive_dft(&input, -1);
+    let mut data = prepare_split_radix_data(&input, -1);
+
+    codelet_split_radix_twiddle_inline(&mut data, n, -1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-10),
+            "split_radix_inline(8) index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+#[test]
+fn test_codelet_split_radix_twiddle_inline_size_16() {
+    let n = 16;
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32) * 0.3, f64::from(i as i32) * 0.5 - 0.7))
+        .collect();
+
+    let expected = naive_dft(&input, -1);
+    let mut data = prepare_split_radix_data(&input, -1);
+
+    codelet_split_radix_twiddle_inline(&mut data, n, -1);
+
+    for (i, (a, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            approx_eq(*a, *e, 1e-9),
+            "split_radix_inline(16) index {i}: {a:?} != {e:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Twiddle-8 inline twiddle computation test
+// ============================================================================
+
+#[test]
+fn test_codelet_twiddle_8_inline_matches_explicit() {
+    let input: Vec<Complex<f64>> = (0..8)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 0.5, f64::from(i as i32).cos()))
+        .collect();
+
+    // Explicit twiddle version
+    let angle_step = -2.0 * core::f64::consts::PI / 8.0; // forward
+    let twiddles: [Complex<f64>; 7] = {
+        let mut arr = [Complex::new(0.0_f64, 0.0); 7];
+        for (k, item) in arr.iter_mut().enumerate() {
+            let angle = angle_step * ((k + 1) as f64);
+            *item = Complex::new(angle.cos(), angle.sin());
+        }
+        arr
+    };
+    let mut explicit = input.clone();
+    codelet_twiddle_8(&mut explicit, &twiddles, -1);
+
+    // Inline twiddle version
+    let mut inline = input;
+    codelet_twiddle_8_inline(&mut inline, angle_step, -1);
+
+    for (i, (e, il)) in explicit.iter().zip(inline.iter()).enumerate() {
+        assert!(
+            approx_eq(*e, *il, 1e-10),
+            "twiddle_8_inline vs explicit index {i}: {e:?} != {il:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Edge case: all-zeros input
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_all_zeros() {
+    for n in [2, 4, 8, 16] {
+        let mut data: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); n];
+        match n {
+            2 => codelet_notw_2(&mut data, -1),
+            4 => codelet_notw_4(&mut data, -1),
+            8 => codelet_notw_8(&mut data, -1),
+            16 => codelet_notw_16(&mut data, -1),
+            _ => {}
+        }
+        for (k, v) in data.iter().enumerate() {
+            assert!(
+                approx_eq(*v, Complex::new(0.0, 0.0), 1e-15),
+                "notw_{n} all-zeros: bin {k} = {v:?} != 0"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Edge case: single non-zero element at various positions
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_8_shifted_impulse() {
+    // Impulse at position 3: X[k] = e^(-2πi·3k/8) (forward)
+    let pos = 3;
+    let n = 8;
+    let mut x: Vec<Complex<f64>> = (0..n)
+        .map(|i| {
+            if i == pos {
+                Complex::new(1.0, 0.0)
+            } else {
+                Complex::new(0.0, 0.0)
+            }
+        })
+        .collect();
+    codelet_notw_8(&mut x, -1);
+
+    for k in 0..n {
+        let angle = -2.0 * core::f64::consts::PI * (pos * k) as f64 / n as f64;
+        let expected = Complex::new(angle.cos(), angle.sin());
+        assert!(
+            approx_eq(x[k], expected, 1e-12),
+            "notw_8 shifted_impulse bin {k}: {:?} != {expected:?}",
+            x[k]
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_16_shifted_impulse() {
+    let pos = 7;
+    let n = 16;
+    let mut x: Vec<Complex<f64>> = (0..n)
+        .map(|i| {
+            if i == pos {
+                Complex::new(1.0, 0.0)
+            } else {
+                Complex::new(0.0, 0.0)
+            }
+        })
+        .collect();
+    codelet_notw_16(&mut x, -1);
+
+    for k in 0..n {
+        let angle = -2.0 * core::f64::consts::PI * (pos * k) as f64 / n as f64;
+        let expected = Complex::new(angle.cos(), angle.sin());
+        assert!(
+            approx_eq(x[k], expected, 1e-11),
+            "notw_16 shifted_impulse bin {k}: {:?} != {expected:?}",
+            x[k]
+        );
+    }
+}
+
+// ============================================================================
+// Conjugate symmetry: real input → X[k] = conj(X[N-k])
+// ============================================================================
+
+#[test]
+fn test_codelet_notw_8_conjugate_symmetry() {
+    let n = 8;
+    // Real-only input
+    let mut x: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin() + 1.0, 0.0))
+        .collect();
+    codelet_notw_8(&mut x, -1);
+    for k in 1..n / 2 {
+        let conj_expected = Complex::new(x[n - k].re, -x[n - k].im);
+        assert!(
+            approx_eq(x[k], conj_expected, 1e-10),
+            "notw_8 conj_sym: X[{k}]={:?} != conj(X[{}])={conj_expected:?}",
+            x[k],
+            n - k,
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_16_conjugate_symmetry() {
+    let n = 16;
+    let mut x: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32) * 0.3 + 0.5, 0.0))
+        .collect();
+    codelet_notw_16(&mut x, -1);
+    for k in 1..n / 2 {
+        let conj_expected = Complex::new(x[n - k].re, -x[n - k].im);
+        assert!(
+            approx_eq(x[k], conj_expected, 1e-9),
+            "notw_16 conj_sym: X[{k}]={:?} != conj(X[{}])={conj_expected:?}",
+            x[k],
+            n - k,
+        );
+    }
+}
+
+#[test]
+fn test_codelet_notw_32_conjugate_symmetry() {
+    let n = 32;
+    let mut x: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new(f64::from(i as i32).sin() * 0.5 + 1.0, 0.0))
+        .collect();
+    codelet_notw_32(&mut x, -1);
+    for k in 1..n / 2 {
+        let conj_expected = Complex::new(x[n - k].re, -x[n - k].im);
+        assert!(
+            approx_eq(x[k], conj_expected, 1e-8),
+            "notw_32 conj_sym: X[{k}]={:?} != conj(X[{}])={conj_expected:?}",
+            x[k],
+            n - k,
+        );
+    }
+}
+
+// ============================================================================
+// SIMD dispatcher tests (AVX-512F / AVX2+FMA / SSE2 / NEON / scalar)
+//
+// Refactored into a separate file to stay within the 2000-line limit.
+// Helper functions used by the submodule are defined here so they are
+// accessible via `super::` from within `simd_codelet_tests`.
+// ============================================================================
+
+/// Absolute-floor relative tolerance check for SIMD f64 numeric comparison.
+pub(super) fn approx_eq_simd_f64(a: Complex<f64>, b: Complex<f64>) -> bool {
+    let abs_diff_re = (a.re - b.re).abs();
+    let abs_diff_im = (a.im - b.im).abs();
+    let rel_floor = 1e-12_f64 * a.re.abs().max(b.re.abs()).max(a.im.abs()).max(b.im.abs());
+    (abs_diff_re <= 1e-10_f64 || abs_diff_re <= rel_floor)
+        && (abs_diff_im <= 1e-10_f64 || abs_diff_im <= rel_floor)
+}
+
+#[path = "../codelets/simd_codelet_tests.rs"]
+mod simd_codelet_tests;

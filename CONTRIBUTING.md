@@ -298,6 +298,29 @@ criterion_group!(benches, benchmark_fft);
 criterion_main!(benches);
 ```
 
+### Cooley-Tukey Scaling Benchmarks and Regression Check
+
+The `cooley_tukey_scaling` bench covers forward transforms from 2^10 to 2^20
+for both f64 and f32.  Run it with reduced sample count to get a quick check:
+
+```bash
+cargo bench -p oxifft --bench cooley_tukey_scaling -- --sample-size 10
+```
+
+To check for regressions against a saved baseline, use the helper script:
+
+```bash
+# Save the current main-branch performance as the reference baseline:
+cargo bench -p oxifft --bench cooley_tukey_scaling -- --save-baseline main
+
+# Later (e.g. in a PR), run the regression check:
+./scripts/bench_check.sh main
+```
+
+Baseline JSON files committed at `benches/baselines/v0.3.0/` serve as
+version-tagged reference points.  Full HTML reports are written to
+`target/criterion/report/index.html`.
+
 ## Tools
 
 ### splitrs

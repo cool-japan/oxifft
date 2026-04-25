@@ -3,10 +3,8 @@
 //! This module provides SIMD-accelerated versions of the small DFT kernels.
 //! The codelets use the architecture-specific SIMD backends when available.
 
-// Items after statements are intentional for precomputed twiddle tables
-#![allow(clippy::items_after_statements)]
-// Large stack arrays are intentional for performance in fixed-size transforms
-#![allow(clippy::large_stack_arrays)]
+#![allow(clippy::items_after_statements)] // reason: precomputed twiddle table structures defined inside functions for SIMD locality
+#![allow(clippy::large_stack_arrays)] // reason: fixed-size SIMD twiddle tables are stack-allocated for cache efficiency
 
 use core::any::TypeId;
 
@@ -35,111 +33,160 @@ pub fn simd_available() -> bool {
 /// Size-2 DFT with automatic SIMD dispatch.
 ///
 /// This function selects the best implementation based on available CPU features
-/// and the float type. For f64, uses SIMD acceleration when available.
+/// and the float type.  For f64, uses SIMD acceleration when available.  For
+/// f32, delegates to the generated codelet which provides SIMD paths on all
+/// supported architectures.
 #[inline]
 pub fn notw_2_dispatch<T: Float>(x: &mut [Complex<T>]) {
-    // Check if T is f64 at runtime
-    if TypeId::of::<T>() == TypeId::of::<f64>() {
-        // Safety: We verified T is f64, so the memory layout is identical
-        let x_f64 = unsafe {
-            core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
-        };
-        notw_2_simd_f64(x_f64);
-        return;
-    }
-    // Fallback to scalar for other types
-    super::notw_2(x);
+    // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
+    // The size-2 butterfly is sign-independent; pass 1 as a no-op placeholder.
+    super::generated_simd::generated_simd_2_dispatch(x);
 }
 
 /// Size-4 DFT with automatic SIMD dispatch.
 ///
 /// This function selects the best implementation based on available CPU features
-/// and the float type. For f64, uses SIMD acceleration when available.
+/// and the float type.  For f64, uses SIMD acceleration when available.  For
+/// f32, delegates to the generated codelet which provides SIMD paths on all
+/// supported architectures.
 #[inline]
 pub fn notw_4_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
-    // Check if T is f64 at runtime
-    if TypeId::of::<T>() == TypeId::of::<f64>() {
-        // Safety: We verified T is f64, so the memory layout is identical
-        let x_f64 = unsafe {
-            core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
-        };
-        notw_4_simd_f64(x_f64, sign);
-        return;
-    }
-    // Fallback to scalar for other types
-    super::notw_4(x, sign);
+    // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
+    super::generated_simd::generated_simd_4_dispatch(x, sign);
 }
 
 /// Size-8 DFT with automatic SIMD dispatch.
 ///
 /// This function selects the best implementation based on available CPU features
-/// and the float type. For f64, uses SIMD acceleration when available.
+/// and the float type.  For f64, uses SIMD acceleration when available.  For
+/// f32, delegates to the generated codelet which provides SIMD paths on all
+/// supported architectures.
 #[inline]
 pub fn notw_8_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
-    // Check if T is f64 at runtime
-    if TypeId::of::<T>() == TypeId::of::<f64>() {
-        // Safety: We verified T is f64, so the memory layout is identical
-        let x_f64 = unsafe {
-            core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
-        };
-        notw_8_simd_f64(x_f64, sign);
-        return;
-    }
-    // Fallback to scalar for other types
-    super::notw_8(x, sign);
+    // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
+    super::generated_simd::generated_simd_8_dispatch(x, sign);
 }
 
 /// Size-16 DFT with automatic SIMD dispatch.
 ///
-/// Uses scalar implementation with twiddle recurrence optimization.
+/// On x86_64 with AVX-512F: uses hand-tuned AVX-512 codelet (f64 and f32).
+/// Otherwise uses scalar optimized codelet.
 #[inline]
 pub fn notw_16_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
-    // Check if T is f64 at runtime
+    // --- x86_64: try hand-tuned AVX-512 first ---
+    #[cfg(target_arch = "x86_64")]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            super::hand_avx512::dispatch_hand_avx512_size16_f64(x_f64, sign);
+            return;
+        }
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            let x_f32 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f32>>(), x.len())
+            };
+            super::hand_avx512::dispatch_hand_avx512_size16_f32(x_f32, sign);
+            return;
+        }
+    }
+    // Fallback to scalar for other types / architectures
+    notw_16_simd_f64_fallback(x, sign);
+}
+
+/// Internal fallback for size-16 on non-AVX-512 / non-x86_64 paths.
+#[inline(always)]
+fn notw_16_simd_f64_fallback<T: Float>(x: &mut [Complex<T>], sign: i32) {
     if TypeId::of::<T>() == TypeId::of::<f64>() {
-        // Safety: We verified T is f64, so the memory layout is identical
         let x_f64 = unsafe {
             core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
         };
         notw_16_simd_f64(x_f64, sign);
         return;
     }
-    // Fallback to scalar for other types
     super::notw_16(x, sign);
 }
 
 /// Size-32 DFT with automatic SIMD dispatch.
 ///
-/// Uses scalar implementation with twiddle recurrence optimization.
+/// On x86_64 with AVX-512F: uses hand-tuned AVX-512 codelet (f64 and f32).
+/// Otherwise uses scalar optimized codelet.
 #[inline]
 pub fn notw_32_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
-    // Check if T is f64 at runtime
+    // --- x86_64: try hand-tuned AVX-512 first ---
+    #[cfg(target_arch = "x86_64")]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            super::hand_avx512::dispatch_hand_avx512_size32_f64(x_f64, sign);
+            return;
+        }
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            let x_f32 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f32>>(), x.len())
+            };
+            super::hand_avx512::dispatch_hand_avx512_size32_f32(x_f32, sign);
+            return;
+        }
+    }
+    // Fallback
+    notw_32_simd_f64_fallback(x, sign);
+}
+
+/// Internal fallback for size-32 on non-AVX-512 / non-x86_64 paths.
+#[inline(always)]
+fn notw_32_simd_f64_fallback<T: Float>(x: &mut [Complex<T>], sign: i32) {
     if TypeId::of::<T>() == TypeId::of::<f64>() {
-        // Safety: We verified T is f64, so the memory layout is identical
         let x_f64 = unsafe {
             core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
         };
         notw_32_simd_f64(x_f64, sign);
         return;
     }
-    // Fallback to scalar for other types
     super::notw_32(x, sign);
 }
 
 /// Size-64 DFT with automatic SIMD dispatch.
 ///
-/// Uses scalar implementation with twiddle recurrence optimization.
+/// On x86_64 with AVX-512F: uses hand-tuned AVX-512 codelet (f64 and f32).
+/// Otherwise uses SIMD or scalar optimized codelet.
 #[inline]
 pub fn notw_64_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
-    // Check if T is f64 at runtime
+    // --- x86_64: try hand-tuned AVX-512 first ---
+    #[cfg(target_arch = "x86_64")]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            super::hand_avx512::dispatch_hand_avx512_size64_f64(x_f64, sign);
+            return;
+        }
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            let x_f32 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f32>>(), x.len())
+            };
+            super::hand_avx512::dispatch_hand_avx512_size64_f32(x_f32, sign);
+            return;
+        }
+    }
+    // Fallback
+    notw_64_simd_f64_fallback(x, sign);
+}
+
+/// Internal fallback for size-64 on non-AVX-512 / non-x86_64 paths.
+#[inline(always)]
+fn notw_64_simd_f64_fallback<T: Float>(x: &mut [Complex<T>], sign: i32) {
     if TypeId::of::<T>() == TypeId::of::<f64>() {
-        // Safety: We verified T is f64, so the memory layout is identical
         let x_f64 = unsafe {
             core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
         };
         notw_64_simd_f64(x_f64, sign);
         return;
     }
-    // Fallback to scalar for other types
     super::notw_64(x, sign);
 }
 

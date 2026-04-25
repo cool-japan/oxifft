@@ -32,21 +32,33 @@ impl SimdVector for Sse2F64 {
         unsafe { Self(_mm_set1_pd(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f64) -> Self {
         unsafe { Self(_mm_load_pd(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f64) -> Self {
         unsafe { Self(_mm_loadu_pd(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f64) {
         unsafe { _mm_store_pd(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f64) {
         unsafe { _mm_storeu_pd(ptr, self.0) }
@@ -226,21 +238,33 @@ impl SimdVector for Sse2F32 {
         unsafe { Self(_mm_set1_ps(value)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f32) -> Self {
         unsafe { Self(_mm_load_ps(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f32) -> Self {
         unsafe { Self(_mm_loadu_ps(ptr)) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f32) {
         unsafe { _mm_store_ps(ptr, self.0) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f32) {
         unsafe { _mm_storeu_ps(ptr, self.0) }

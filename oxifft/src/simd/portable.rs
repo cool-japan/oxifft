@@ -21,12 +21,18 @@ impl SimdVector for PortableF64x2 {
         Self(f64x2::splat(value))
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f64) -> Self {
         // SAFETY: Caller must ensure ptr is aligned and points to valid data
         unsafe { Self(Simd::from_array(*(ptr as *const [f64; 2]))) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f64) -> Self {
         // SAFETY: Caller must ensure ptr points to valid data
@@ -37,6 +43,9 @@ impl SimdVector for PortableF64x2 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f64) {
         // SAFETY: Caller must ensure ptr is aligned and points to valid writable memory
@@ -45,6 +54,9 @@ impl SimdVector for PortableF64x2 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f64) {
         // SAFETY: Caller must ensure ptr points to valid writable memory
@@ -125,12 +137,18 @@ impl SimdVector for PortableF64x4 {
         Self(f64x4::splat(value))
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f64) -> Self {
         // SAFETY: Caller must ensure ptr is aligned and points to valid data
         unsafe { Self(Simd::from_array(*(ptr as *const [f64; 4]))) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f64) -> Self {
         // SAFETY: Caller must ensure ptr points to valid data
@@ -141,6 +159,9 @@ impl SimdVector for PortableF64x4 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f64) {
         // SAFETY: Caller must ensure ptr is aligned and points to valid writable memory
@@ -149,6 +170,9 @@ impl SimdVector for PortableF64x4 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f64) {
         // SAFETY: Caller must ensure ptr points to valid writable memory
@@ -242,12 +266,18 @@ impl SimdVector for PortableF32x4 {
         Self(f32x4::splat(value))
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f32) -> Self {
         // SAFETY: Caller must ensure ptr is aligned and points to valid data
         unsafe { Self(Simd::from_array(*(ptr as *const [f32; 4]))) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f32) -> Self {
         // SAFETY: Caller must ensure ptr points to valid data
@@ -258,6 +288,9 @@ impl SimdVector for PortableF32x4 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f32) {
         // SAFETY: Caller must ensure ptr is aligned and points to valid writable memory
@@ -266,6 +299,9 @@ impl SimdVector for PortableF32x4 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f32) {
         // SAFETY: Caller must ensure ptr points to valid writable memory
@@ -358,12 +394,18 @@ impl SimdVector for PortableF32x8 {
         Self(f32x8::splat(value))
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_aligned`] for the full safety contract.
     #[inline]
     unsafe fn load_aligned(ptr: *const f32) -> Self {
         // SAFETY: Caller must ensure ptr is aligned and points to valid data
         unsafe { Self(Simd::from_array(*(ptr as *const [f32; 8]))) }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::load_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn load_unaligned(ptr: *const f32) -> Self {
         // SAFETY: Caller must ensure ptr points to valid data
@@ -374,6 +416,9 @@ impl SimdVector for PortableF32x8 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_aligned`] for the full safety contract.
     #[inline]
     unsafe fn store_aligned(self, ptr: *mut f32) {
         // SAFETY: Caller must ensure ptr is aligned and points to valid writable memory
@@ -382,6 +427,9 @@ impl SimdVector for PortableF32x8 {
         }
     }
 
+    /// # Safety
+    ///
+    /// See [`SimdVector::store_unaligned`] for the full safety contract.
     #[inline]
     unsafe fn store_unaligned(self, ptr: *mut f32) {
         // SAFETY: Caller must ensure ptr points to valid writable memory

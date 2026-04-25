@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-#![allow(clippy::unreadable_literal)] // Precomputed FFT twiddle factors
+#![allow(clippy::unreadable_literal)] // reason: machine-generated FFT twiddle factor literals
 
 use crate::kernel::{Complex, Float};
 

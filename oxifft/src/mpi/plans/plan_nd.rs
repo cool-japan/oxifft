@@ -14,7 +14,6 @@ use crate::mpi::MpiFlags;
 ///
 /// Generalizes the distributed FFT to arbitrary dimensions using slab decomposition.
 /// The first dimension is distributed across processes.
-#[allow(dead_code)]
 pub struct MpiPlanND<T: Float, C: Communicator> {
     /// Global dimensions.
     dims: Vec<usize>,
@@ -30,8 +29,8 @@ pub struct MpiPlanND<T: Float, C: Communicator> {
     pool: *const MpiPool<C>,
     /// Local plans for each dimension.
     local_plans: Vec<crate::api::Plan<T>>,
-    /// Scratch buffer.
-    scratch: Vec<Complex<T>>,
+    /// Scratch buffer (reserved for future multi-rank transpose implementation).
+    _scratch: Vec<Complex<T>>,
     /// Marker.
     _phantom: core::marker::PhantomData<(T, C)>,
 }
@@ -50,6 +49,11 @@ where
     /// * `direction` - Transform direction
     /// * `flags` - Planning flags
     /// * `pool` - MPI pool
+    ///
+    /// # Errors
+    ///
+    /// Returns `MpiError::InvalidDimension` if `dims` is empty or any
+    /// element is zero.
     pub fn new(
         dims: &[usize],
         direction: Direction,
@@ -105,7 +109,7 @@ where
             flags,
             pool: std::ptr::from_ref(pool),
             local_plans,
-            scratch,
+            _scratch: scratch,
             _phantom: core::marker::PhantomData,
         })
     }
@@ -123,6 +127,16 @@ where
     /// Get local partition info.
     pub fn local_info(&self) -> (usize, usize) {
         (self.local_n0, self.local_0_start)
+    }
+
+    /// Get the transform direction.
+    pub fn direction(&self) -> Direction {
+        self.direction
+    }
+
+    /// Get the planning flags.
+    pub fn flags(&self) -> MpiFlags {
+        self.flags
     }
 
     /// Execute the distributed N-D FFT in-place.
@@ -169,7 +183,7 @@ where
     }
 
     /// Execute FFT along a local dimension (not dimension 0).
-    #[allow(clippy::needless_pass_by_ref_mut)]
+    #[allow(clippy::needless_pass_by_ref_mut)] // reason: &mut self needed for future multi-rank transpose plans; API consistency
     fn fft_along_dimension(&mut self, data: &mut [Complex<T>], dim: usize) -> Result<(), MpiError> {
         let n_dim = self.dims[dim];
         let plan = &self.local_plans[dim];
@@ -208,7 +222,7 @@ where
     }
 
     /// Distributed FFT along dimension 0.
-    #[allow(clippy::needless_pass_by_ref_mut)]
+    #[allow(clippy::needless_pass_by_ref_mut)] // reason: &mut self needed for future multi-rank transpose plans; API consistency
     fn distributed_fft_dim0(
         &mut self,
         data: &mut [Complex<T>],

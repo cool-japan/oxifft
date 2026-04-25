@@ -2,6 +2,7 @@
 
 use crate::kernel::{Float, OpCount, Plan, WakeMode, WakeState};
 
+use super::problem::Sign;
 use super::DftProblem;
 
 /// DFT plan implementation.
@@ -35,9 +36,38 @@ impl<T: Float> DftPlan<T> {
 impl<T: Float> Plan for DftPlan<T> {
     type Problem = DftProblem<T>;
 
-    fn solve(&self, _problem: &Self::Problem) {
-        // This is internal scaffolding. Actual execution goes through api::Plan.
-        // This method exists for trait compliance but is not called in practice.
+    fn solve(&self, problem: &Self::Problem) {
+        use super::codelets::{execute_composite_codelet, has_composite_codelet};
+        use super::solvers::{
+            BluesteinSolver, CooleyTukeySolver, CtVariant, DirectSolver, GenericSolver, NopSolver,
+        };
+
+        let n = problem.transform_size();
+        if n == 0 || problem.input.is_null() || problem.output.is_null() {
+            return;
+        }
+
+        // Safety: caller must guarantee these pointers are valid and non-overlapping
+        // (or overlapping only when doing an in-place transform) for n elements.
+        let input = unsafe { core::slice::from_raw_parts(problem.input as *const _, n) };
+        let output = unsafe { core::slice::from_raw_parts_mut(problem.output, n) };
+        let sign = problem.sign;
+
+        if n <= 1 {
+            NopSolver::new().execute(input, output);
+        } else if CooleyTukeySolver::<T>::applicable(n) {
+            CooleyTukeySolver::new(CtVariant::Dit).execute(input, output, sign);
+        } else if has_composite_codelet(n) {
+            output.copy_from_slice(input);
+            let sign_int = if sign == Sign::Forward { -1 } else { 1 };
+            execute_composite_codelet(output, n, sign_int);
+        } else if n <= 16 {
+            DirectSolver::new().execute(input, output, sign);
+        } else if GenericSolver::<T>::applicable(n) {
+            GenericSolver::new(n).execute(input, output, sign);
+        } else {
+            BluesteinSolver::new(n).execute(input, output, sign);
+        }
     }
 
     fn awake(&mut self, mode: WakeMode) {

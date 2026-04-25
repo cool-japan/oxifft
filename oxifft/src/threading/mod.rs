@@ -167,9 +167,20 @@
 mod serial;
 mod spawn;
 
+mod parallel_config;
+
 #[cfg(feature = "threading")]
 mod rayon_impl;
 
+#[cfg(feature = "threading")]
+pub mod work_stealing;
+
+#[cfg(feature = "threading")]
+pub use work_stealing::WorkStealingContext;
+
+pub use parallel_config::ParallelConfig;
+#[cfg(feature = "std")]
+pub use parallel_config::{global_parallel_config, set_global_parallel_config};
 pub use serial::SerialPool;
 pub use spawn::ThreadPool;
 

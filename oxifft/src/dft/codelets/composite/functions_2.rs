@@ -2,8 +2,8 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-#![allow(clippy::approx_constant)] // Precomputed twiddle factors for FFT
-#![allow(clippy::unreadable_literal)] // Precomputed FFT twiddle factors
+#![allow(clippy::approx_constant)] // reason: twiddle constants are trigonometric values, not approximations of named constants
+#![allow(clippy::unreadable_literal)] // reason: machine-generated FFT twiddle factor literals
 
 use crate::dft::codelets::simd;
 use crate::kernel::{Complex, Float};

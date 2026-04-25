@@ -3,11 +3,12 @@
 //! Provides vectorized butterfly implementations for power-of-2 FFT.
 //! Uses runtime CPU feature detection to select optimal implementation.
 
-// Branch structure is intentional for different unrolling strategies
-#![allow(clippy::branches_sharing_code)]
+#![allow(clippy::branches_sharing_code)] // reason: SIMD unrolling branches share setup code intentionally; merging would obscure the architecture-specific dispatch pattern
 
 use crate::dft::problem::Sign;
 use crate::kernel::Complex;
+#[allow(unused_imports)]
+// reason: prelude glob re-exports are selectively used per feature gate (std vs no_std)
 use crate::prelude::*;
 
 /// Convert a `Vec<[f64; 2]>` of exactly 65535 elements into `Box<[[f64; 2]; 65535]>`
@@ -138,12 +139,14 @@ pub fn get_twiddles_neon() -> &'static PrecomputedTwiddlesNeon {
 ///
 /// Uses precomputed twiddle factors for accuracy and performance.
 /// Special-cases early stages (m <= 16) for twiddle-free or simplified operations.
+/// Fuses stages 0-3 when n >= 16 (all 16 elements processed in-register).
+/// Uses radix-4 stage fusion for remaining stage pairs (halves memory passes).
 ///
 /// # Safety
 /// NEON is always available on aarch64, no runtime detection needed.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-#[allow(clippy::useless_let_if_seq)]
+#[allow(clippy::useless_let_if_seq)] // reason: NEON SIMD stage variables require uninitialized-then-branch pattern for correct register allocation
 unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
     unsafe {
         use core::arch::aarch64::*;
@@ -159,48 +162,318 @@ unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
         let sign_arr = [-1.0_f64, 1.0];
         let sign_pattern = vld1q_f64(sign_arr.as_ptr());
 
+        // Rotation scale for ±i multiply
+        let rot_arr = if forward {
+            [1.0_f64, -1.0] // -i: [im, -re]
+        } else {
+            [-1.0_f64, 1.0] // +i: [-im, re]
+        };
+        let rot_scale = vld1q_f64(rot_arr.as_ptr());
+
         // Get precomputed twiddles
         let twiddles = get_twiddles_neon();
 
         #[allow(clippy::useless_let_if_seq)]
-        let mut stage = 0;
-        let mut m = 2;
+        // reason: NEON SIMD stage variables require uninitialized-then-branch pattern for correct register allocation
+        let mut stage;
+        let mut m;
 
-        // Stage 0: m=2 (no twiddle - just add/sub)
-        if log_n >= 1 {
-            for k in (0..n).step_by(2) {
-                let u = vld1q_f64(ptr.add(k * 2));
-                let v = vld1q_f64(ptr.add((k + 1) * 2));
-                vst1q_f64(ptr.add(k * 2), vaddq_f64(u, v));
-                vst1q_f64(ptr.add((k + 1) * 2), vsubq_f64(u, v));
+        // Fused stages 0-3: process 16 elements in-register (no intermediate memory passes)
+        if log_n >= 4 {
+            let sqrt2_2 = core::f64::consts::FRAC_1_SQRT_2;
+
+            // W8 twiddles for stage 2
+            let tw8_1_arr = [sqrt2_2, sign_f * sqrt2_2];
+            let tw8_3_arr = [-sqrt2_2, sign_f * sqrt2_2];
+            let tw8_1 = vld1q_f64(tw8_1_arr.as_ptr());
+            let tw8_3 = vld1q_f64(tw8_3_arr.as_ptr());
+            let tw8_1_flip = vextq_f64(tw8_1, tw8_1, 1);
+            let tw8_3_flip = vextq_f64(tw8_3, tw8_3, 1);
+
+            // W16 twiddles for stage 3
+            let c16_1 = libm::cos(core::f64::consts::PI / 8.0);
+            let s16_1 = libm::sin(core::f64::consts::PI / 8.0);
+            let c16_3 = libm::cos(3.0 * core::f64::consts::PI / 8.0);
+            let s16_3 = libm::sin(3.0 * core::f64::consts::PI / 8.0);
+
+            // W16^k twiddle vectors (k=1..7, k=0 is identity, k=4 is ±i)
+            let tw16_1_arr = [c16_1, sign_f * s16_1];
+            let tw16_2_arr = [sqrt2_2, sign_f * sqrt2_2];
+            let tw16_3_arr = [c16_3, sign_f * s16_3];
+            let tw16_5_arr = [-c16_3, sign_f * s16_3];
+            let tw16_6_arr = [-sqrt2_2, sign_f * sqrt2_2];
+            let tw16_7_arr = [-c16_1, sign_f * s16_1];
+            let tw16_1 = vld1q_f64(tw16_1_arr.as_ptr());
+            let tw16_2 = vld1q_f64(tw16_2_arr.as_ptr());
+            let tw16_3 = vld1q_f64(tw16_3_arr.as_ptr());
+            let tw16_5 = vld1q_f64(tw16_5_arr.as_ptr());
+            let tw16_6 = vld1q_f64(tw16_6_arr.as_ptr());
+            let tw16_7 = vld1q_f64(tw16_7_arr.as_ptr());
+
+            for k in (0..n).step_by(16) {
+                // Load all 16 complex values into NEON registers
+                let mut v = [vdupq_n_f64(0.0); 16];
+                for i in 0..16 {
+                    v[i] = vld1q_f64(ptr.add((k + i) * 2));
+                }
+
+                // Stage 0 (m=2): 8 butterflies, no twiddles
+                for i in (0..16).step_by(2) {
+                    let sum = vaddq_f64(v[i], v[i + 1]);
+                    let diff = vsubq_f64(v[i], v[i + 1]);
+                    v[i] = sum;
+                    v[i + 1] = diff;
+                }
+
+                // Stage 1 (m=4): ±i twiddle on every 4th element (offset 3)
+                for i in (0..16).step_by(4) {
+                    let u0 = v[i];
+                    let u1 = v[i + 1];
+                    let w0 = v[i + 2];
+                    let w1 = v[i + 3];
+                    let t1 = vmulq_f64(vextq_f64(w1, w1, 1), rot_scale);
+                    v[i] = vaddq_f64(u0, w0);
+                    v[i + 1] = vaddq_f64(u1, t1);
+                    v[i + 2] = vsubq_f64(u0, w0);
+                    v[i + 3] = vsubq_f64(u1, t1);
+                }
+
+                // Stage 2 (m=8): W8 twiddles
+                for base in [0, 8] {
+                    let u0 = v[base];
+                    let u1 = v[base + 1];
+                    let u2 = v[base + 2];
+                    let u3 = v[base + 3];
+                    let w0 = v[base + 4]; // W8^0 = 1
+                    let w1_v = v[base + 5]; // gets W8^1
+                    let w2_v = v[base + 6]; // gets W8^2 = ±i
+                    let w3_v = v[base + 7]; // gets W8^3
+
+                    let t1 = neon_cmul_inline(w1_v, tw8_1, tw8_1_flip, sign_pattern);
+                    let t2 = vmulq_f64(vextq_f64(w2_v, w2_v, 1), rot_scale);
+                    let t3 = neon_cmul_inline(w3_v, tw8_3, tw8_3_flip, sign_pattern);
+
+                    v[base] = vaddq_f64(u0, w0);
+                    v[base + 1] = vaddq_f64(u1, t1);
+                    v[base + 2] = vaddq_f64(u2, t2);
+                    v[base + 3] = vaddq_f64(u3, t3);
+                    v[base + 4] = vsubq_f64(u0, w0);
+                    v[base + 5] = vsubq_f64(u1, t1);
+                    v[base + 6] = vsubq_f64(u2, t2);
+                    v[base + 7] = vsubq_f64(u3, t3);
+                }
+
+                // Stage 3 (m=16): W16 twiddles on v[8..16]
+                let t0 = v[8]; // W16^0 = 1
+                let t1 = neon_cmul_inline(v[9], tw16_1, vextq_f64(tw16_1, tw16_1, 1), sign_pattern);
+                let t2 =
+                    neon_cmul_inline(v[10], tw16_2, vextq_f64(tw16_2, tw16_2, 1), sign_pattern);
+                let t3 =
+                    neon_cmul_inline(v[11], tw16_3, vextq_f64(tw16_3, tw16_3, 1), sign_pattern);
+                let t4 = vmulq_f64(vextq_f64(v[12], v[12], 1), rot_scale); // W16^4 = ±i
+                let t5 =
+                    neon_cmul_inline(v[13], tw16_5, vextq_f64(tw16_5, tw16_5, 1), sign_pattern);
+                let t6 =
+                    neon_cmul_inline(v[14], tw16_6, vextq_f64(tw16_6, tw16_6, 1), sign_pattern);
+                let t7 =
+                    neon_cmul_inline(v[15], tw16_7, vextq_f64(tw16_7, tw16_7, 1), sign_pattern);
+
+                // Store v[0..8] ± t[0..8]
+                vst1q_f64(ptr.add((k) * 2), vaddq_f64(v[0], t0));
+                vst1q_f64(ptr.add((k + 1) * 2), vaddq_f64(v[1], t1));
+                vst1q_f64(ptr.add((k + 2) * 2), vaddq_f64(v[2], t2));
+                vst1q_f64(ptr.add((k + 3) * 2), vaddq_f64(v[3], t3));
+                vst1q_f64(ptr.add((k + 4) * 2), vaddq_f64(v[4], t4));
+                vst1q_f64(ptr.add((k + 5) * 2), vaddq_f64(v[5], t5));
+                vst1q_f64(ptr.add((k + 6) * 2), vaddq_f64(v[6], t6));
+                vst1q_f64(ptr.add((k + 7) * 2), vaddq_f64(v[7], t7));
+                vst1q_f64(ptr.add((k + 8) * 2), vsubq_f64(v[0], t0));
+                vst1q_f64(ptr.add((k + 9) * 2), vsubq_f64(v[1], t1));
+                vst1q_f64(ptr.add((k + 10) * 2), vsubq_f64(v[2], t2));
+                vst1q_f64(ptr.add((k + 11) * 2), vsubq_f64(v[3], t3));
+                vst1q_f64(ptr.add((k + 12) * 2), vsubq_f64(v[4], t4));
+                vst1q_f64(ptr.add((k + 13) * 2), vsubq_f64(v[5], t5));
+                vst1q_f64(ptr.add((k + 14) * 2), vsubq_f64(v[6], t6));
+                vst1q_f64(ptr.add((k + 15) * 2), vsubq_f64(v[7], t7));
             }
-            stage = 1;
-            m = 4;
+            stage = 4;
+            m = 32;
+        } else {
+            // For n < 16: stage-by-stage approach
+            stage = 0;
+            m = 2;
+
+            // Stage 0: m=2 (no twiddle)
+            if log_n >= 1 {
+                for k in (0..n).step_by(2) {
+                    let u = vld1q_f64(ptr.add(k * 2));
+                    let v = vld1q_f64(ptr.add((k + 1) * 2));
+                    vst1q_f64(ptr.add(k * 2), vaddq_f64(u, v));
+                    vst1q_f64(ptr.add((k + 1) * 2), vsubq_f64(u, v));
+                }
+                stage = 1;
+                m = 4;
+            }
+
+            // Stage 1: m=4 (twiddle is ±i for j=1)
+            if log_n >= 2 {
+                for k in (0..n).step_by(4) {
+                    let u0 = vld1q_f64(ptr.add(k * 2));
+                    let u1 = vld1q_f64(ptr.add((k + 1) * 2));
+                    let v0 = vld1q_f64(ptr.add((k + 2) * 2));
+                    let v1 = vld1q_f64(ptr.add((k + 3) * 2));
+                    let t1 = vmulq_f64(vextq_f64(v1, v1, 1), rot_scale);
+                    vst1q_f64(ptr.add(k * 2), vaddq_f64(u0, v0));
+                    vst1q_f64(ptr.add((k + 1) * 2), vaddq_f64(u1, t1));
+                    vst1q_f64(ptr.add((k + 2) * 2), vsubq_f64(u0, v0));
+                    vst1q_f64(ptr.add((k + 3) * 2), vsubq_f64(u1, t1));
+                }
+                stage = 2;
+                m = 8;
+            }
+
+            // Stage 2: m=8 (W8 twiddles)
+            if log_n >= 3 {
+                let sqrt2_2 = core::f64::consts::FRAC_1_SQRT_2;
+                let tw1_arr = [sqrt2_2, sign_f * sqrt2_2];
+                let tw3_arr = [-sqrt2_2, sign_f * sqrt2_2];
+                let tw1 = vld1q_f64(tw1_arr.as_ptr());
+                let tw3 = vld1q_f64(tw3_arr.as_ptr());
+                let tw1_flip = vextq_f64(tw1, tw1, 1);
+                let tw3_flip = vextq_f64(tw3, tw3, 1);
+
+                for k in (0..n).step_by(8) {
+                    let u0 = vld1q_f64(ptr.add(k * 2));
+                    let u1 = vld1q_f64(ptr.add((k + 1) * 2));
+                    let u2 = vld1q_f64(ptr.add((k + 2) * 2));
+                    let u3 = vld1q_f64(ptr.add((k + 3) * 2));
+                    let w0 = vld1q_f64(ptr.add((k + 4) * 2));
+                    let w1 = vld1q_f64(ptr.add((k + 5) * 2));
+                    let w2 = vld1q_f64(ptr.add((k + 6) * 2));
+                    let w3 = vld1q_f64(ptr.add((k + 7) * 2));
+
+                    let t1 = neon_cmul_inline(w1, tw1, tw1_flip, sign_pattern);
+                    let t2 = vmulq_f64(vextq_f64(w2, w2, 1), rot_scale);
+                    let t3 = neon_cmul_inline(w3, tw3, tw3_flip, sign_pattern);
+
+                    vst1q_f64(ptr.add(k * 2), vaddq_f64(u0, w0));
+                    vst1q_f64(ptr.add((k + 1) * 2), vaddq_f64(u1, t1));
+                    vst1q_f64(ptr.add((k + 2) * 2), vaddq_f64(u2, t2));
+                    vst1q_f64(ptr.add((k + 3) * 2), vaddq_f64(u3, t3));
+                    vst1q_f64(ptr.add((k + 4) * 2), vsubq_f64(u0, w0));
+                    vst1q_f64(ptr.add((k + 5) * 2), vsubq_f64(u1, t1));
+                    vst1q_f64(ptr.add((k + 6) * 2), vsubq_f64(u2, t2));
+                    vst1q_f64(ptr.add((k + 7) * 2), vsubq_f64(u3, t3));
+                }
+                stage = 3;
+                m = 16;
+            }
         }
 
-        // Stage 1: m=4 (twiddle is ±i for j=1)
-        if log_n >= 2 {
-            for k in (0..n).step_by(4) {
-                let u0 = vld1q_f64(ptr.add(k * 2));
-                let u1 = vld1q_f64(ptr.add((k + 1) * 2));
-                let v0 = vld1q_f64(ptr.add((k + 2) * 2));
-                let v1 = vld1q_f64(ptr.add((k + 3) * 2));
+        // Radix-4 fused stages: combine pairs of stages to halve memory passes
+        while stage + 1 < log_n {
+            let half_m1 = m / 2;
+            let m2 = m * 2;
+            let half_m2 = m;
 
-                // w0 = 1, w1 = ±i → v1 * ±i = (-sign_f * im, sign_f * re)
-                let v1_swapped = vextq_f64(v1, v1, 1);
-                let scale = vld1q_f64([-sign_f, sign_f].as_ptr());
-                let t1 = vmulq_f64(v1_swapped, scale);
+            let tw1_base = if forward {
+                twiddles.forward[twiddles.offsets[stage]..].as_ptr()
+            } else {
+                twiddles.inverse[twiddles.offsets[stage]..].as_ptr()
+            };
+            let tw2_base = if forward {
+                twiddles.forward[twiddles.offsets[stage + 1]..].as_ptr()
+            } else {
+                twiddles.inverse[twiddles.offsets[stage + 1]..].as_ptr()
+            };
 
-                vst1q_f64(ptr.add(k * 2), vaddq_f64(u0, v0));
-                vst1q_f64(ptr.add((k + 1) * 2), vaddq_f64(u1, t1));
-                vst1q_f64(ptr.add((k + 2) * 2), vsubq_f64(u0, v0));
-                vst1q_f64(ptr.add((k + 3) * 2), vsubq_f64(u1, t1));
+            for k in (0..n).step_by(m2) {
+                let mut j = 0;
+
+                // 2x unrolled radix-4 butterflies for ILP
+                while j + 2 <= half_m1 {
+                    for off in 0..2 {
+                        let jj = j + off;
+                        let i0 = k + jj;
+                        let i1 = i0 + half_m1;
+                        let i2 = i0 + half_m2;
+                        let i3 = i2 + half_m1;
+
+                        let x0 = vld1q_f64(ptr.add(i0 * 2));
+                        let x1 = vld1q_f64(ptr.add(i1 * 2));
+                        let x2 = vld1q_f64(ptr.add(i2 * 2));
+                        let x3 = vld1q_f64(ptr.add(i3 * 2));
+
+                        // First stage twiddle: t1 = x1 * tw1, t3 = x3 * tw1
+                        let tw = vld1q_f64(tw1_base.add(jj) as *const f64);
+                        let tw_flip = vextq_f64(tw, tw, 1);
+                        let t1 = neon_cmul_inline(x1, tw, tw_flip, sign_pattern);
+                        let t3 = neon_cmul_inline(x3, tw, tw_flip, sign_pattern);
+
+                        let a0 = vaddq_f64(x0, t1);
+                        let a1 = vsubq_f64(x0, t1);
+                        let a2 = vaddq_f64(x2, t3);
+                        let a3 = vsubq_f64(x2, t3);
+
+                        // Second stage twiddles
+                        let tw2a = vld1q_f64(tw2_base.add(jj) as *const f64);
+                        let tw2a_flip = vextq_f64(tw2a, tw2a, 1);
+                        let tw2b = vld1q_f64(tw2_base.add(jj + half_m1) as *const f64);
+                        let tw2b_flip = vextq_f64(tw2b, tw2b, 1);
+                        let t2a = neon_cmul_inline(a2, tw2a, tw2a_flip, sign_pattern);
+                        let t2b = neon_cmul_inline(a3, tw2b, tw2b_flip, sign_pattern);
+
+                        vst1q_f64(ptr.add(i0 * 2), vaddq_f64(a0, t2a));
+                        vst1q_f64(ptr.add(i2 * 2), vsubq_f64(a0, t2a));
+                        vst1q_f64(ptr.add(i1 * 2), vaddq_f64(a1, t2b));
+                        vst1q_f64(ptr.add(i3 * 2), vsubq_f64(a1, t2b));
+                    }
+                    j += 2;
+                }
+
+                // Handle remaining single butterfly
+                while j < half_m1 {
+                    let i0 = k + j;
+                    let i1 = i0 + half_m1;
+                    let i2 = i0 + half_m2;
+                    let i3 = i2 + half_m1;
+
+                    let x0 = vld1q_f64(ptr.add(i0 * 2));
+                    let x1 = vld1q_f64(ptr.add(i1 * 2));
+                    let x2 = vld1q_f64(ptr.add(i2 * 2));
+                    let x3 = vld1q_f64(ptr.add(i3 * 2));
+
+                    let tw = vld1q_f64(tw1_base.add(j) as *const f64);
+                    let tw_flip = vextq_f64(tw, tw, 1);
+                    let t1 = neon_cmul_inline(x1, tw, tw_flip, sign_pattern);
+                    let t3 = neon_cmul_inline(x3, tw, tw_flip, sign_pattern);
+
+                    let a0 = vaddq_f64(x0, t1);
+                    let a1 = vsubq_f64(x0, t1);
+                    let a2 = vaddq_f64(x2, t3);
+                    let a3 = vsubq_f64(x2, t3);
+
+                    let tw2a = vld1q_f64(tw2_base.add(j) as *const f64);
+                    let tw2a_flip = vextq_f64(tw2a, tw2a, 1);
+                    let tw2b = vld1q_f64(tw2_base.add(j + half_m1) as *const f64);
+                    let tw2b_flip = vextq_f64(tw2b, tw2b, 1);
+                    let t2a = neon_cmul_inline(a2, tw2a, tw2a_flip, sign_pattern);
+                    let t2b = neon_cmul_inline(a3, tw2b, tw2b_flip, sign_pattern);
+
+                    vst1q_f64(ptr.add(i0 * 2), vaddq_f64(a0, t2a));
+                    vst1q_f64(ptr.add(i2 * 2), vsubq_f64(a0, t2a));
+                    vst1q_f64(ptr.add(i1 * 2), vaddq_f64(a1, t2b));
+                    vst1q_f64(ptr.add(i3 * 2), vsubq_f64(a1, t2b));
+
+                    j += 1;
+                }
             }
-            stage = 2;
-            m = 8;
+
+            stage += 2;
+            m *= 4;
         }
 
-        // Remaining stages with precomputed twiddles
+        // Handle remaining single stage if log_n is odd
         while stage < log_n {
             let half_m = m / 2;
             let tw_base = if forward {
@@ -212,7 +485,7 @@ unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
             for k in (0..n).step_by(m) {
                 let mut j = 0;
 
-                // Unrolled loop: process 4 butterflies at a time
+                // 4x unrolled butterflies
                 while j + 4 <= half_m {
                     for offset in 0..4 {
                         let idx = j + offset;
@@ -222,16 +495,9 @@ unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
                         let u = vld1q_f64(ptr.add(u_idx * 2));
                         let v = vld1q_f64(ptr.add(v_idx * 2));
 
-                        // Load precomputed twiddle
                         let tw = vld1q_f64(tw_base.add(idx) as *const f64);
                         let tw_flip = vextq_f64(tw, tw, 1);
-
-                        // Complex multiply: t = v * tw
-                        let v_re = vdupq_laneq_f64::<0>(v);
-                        let v_im = vdupq_laneq_f64::<1>(v);
-                        let prod1 = vmulq_f64(v_re, tw);
-                        let prod2 = vmulq_f64(v_im, tw_flip);
-                        let t = vfmaq_f64(prod1, prod2, sign_pattern);
+                        let t = neon_cmul_inline(v, tw, tw_flip, sign_pattern);
 
                         vst1q_f64(ptr.add(u_idx * 2), vaddq_f64(u, t));
                         vst1q_f64(ptr.add(v_idx * 2), vsubq_f64(u, t));
@@ -239,7 +505,6 @@ unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
                     j += 4;
                 }
 
-                // Handle remaining butterflies
                 while j < half_m {
                     let u_idx = k + j;
                     let v_idx = u_idx + half_m;
@@ -249,12 +514,7 @@ unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
 
                     let tw = vld1q_f64(tw_base.add(j) as *const f64);
                     let tw_flip = vextq_f64(tw, tw, 1);
-
-                    let v_re = vdupq_laneq_f64::<0>(v);
-                    let v_im = vdupq_laneq_f64::<1>(v);
-                    let prod1 = vmulq_f64(v_re, tw);
-                    let prod2 = vmulq_f64(v_im, tw_flip);
-                    let t = vfmaq_f64(prod1, prod2, sign_pattern);
+                    let t = neon_cmul_inline(v, tw, tw_flip, sign_pattern);
 
                     vst1q_f64(ptr.add(u_idx * 2), vaddq_f64(u, t));
                     vst1q_f64(ptr.add(v_idx * 2), vsubq_f64(u, t));
@@ -268,12 +528,32 @@ unsafe fn dit_butterflies_neon(data: &mut [Complex<f64>], sign: Sign) {
     }
 }
 
+/// NEON complex multiply helper: (a + bi) * (c + di) using FMA.
+///
+/// `tw_flip` must be `vextq_f64(tw, tw, 1)` (lane-swapped twiddle).
+/// `sign_pattern` must be `[-1.0, 1.0]`.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn neon_cmul_inline(
+    v: core::arch::aarch64::float64x2_t,
+    tw: core::arch::aarch64::float64x2_t,
+    tw_flip: core::arch::aarch64::float64x2_t,
+    sign_pattern: core::arch::aarch64::float64x2_t,
+) -> core::arch::aarch64::float64x2_t {
+    unsafe {
+        use core::arch::aarch64::*;
+        let v_re = vdupq_laneq_f64::<0>(v);
+        let v_im = vdupq_laneq_f64::<1>(v);
+        vfmaq_f64(vmulq_f64(v_re, tw), vmulq_f64(v_im, tw_flip), sign_pattern)
+    }
+}
+
 /// Scalar DIT butterfly implementation with twiddle recurrence.
 ///
 /// Uses the recurrence relation w_{j+1} = w_j * w_step to avoid
 /// expensive sin/cos calls for each butterfly.
 #[inline]
-#[allow(dead_code)] // Used as fallback on non-x86/non-aarch64 platforms and in tests
+#[allow(dead_code)] // reason: scalar fallback used on non-x86/non-aarch64 platforms and in tests
 pub fn dit_butterflies_scalar(data: &mut [Complex<f64>], sign: Sign) {
     let n = data.len();
     let log_n = n.trailing_zeros() as usize;

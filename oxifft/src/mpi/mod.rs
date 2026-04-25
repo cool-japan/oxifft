@@ -43,10 +43,10 @@ mod transpose;
 
 pub use distribution::{Distribution, LocalPartition};
 pub use error::MpiError;
-pub use local_size::{local_size_2d, local_size_3d, local_size_nd};
-pub use plans::{MpiPlan2D, MpiPlan3D, MpiPlanND};
+pub use local_size::{local_size_2d, local_size_2d_transposed, local_size_3d, local_size_nd};
+pub use plans::{MpiPlan2D, MpiPlan3D, MpiPlanND, PencilGrid, PencilPlan3D};
 pub use pool::{MpiFloat, MpiPool};
-pub use transpose::distributed_transpose;
+pub use transpose::{distributed_transpose, distributed_transpose_inplace};
 
 use crate::api::Flags;
 

@@ -1,5 +1,6 @@
 //! Public type definitions for the OxiFFT API.
 
+use core::fmt;
 use core::ops::BitOr;
 
 /// Transform direction.
@@ -14,6 +15,10 @@ pub enum Direction {
 
 impl Direction {
     /// Get the sign for the exponential: -1 for forward, +1 for backward.
+    ///
+    /// This matches the FFTW convention where the forward (analysis) transform
+    /// uses a negative exponent and the backward (synthesis) transform uses a
+    /// positive exponent.
     #[must_use]
     pub const fn sign(self) -> i32 {
         match self {
@@ -22,6 +27,58 @@ impl Direction {
         }
     }
 }
+
+impl TryFrom<i32> for Direction {
+    type Error = InvalidDirection;
+
+    /// Construct a `Direction` from its FFTW-style sign convention:
+    /// `-1` means [`Direction::Forward`] (negative exponent) and
+    /// `+1` means [`Direction::Backward`] (positive exponent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidDirection`] if `value` is not `-1` or `1`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use oxifft::Direction;
+    ///
+    /// let fwd = Direction::try_from(-1_i32).expect("forward");
+    /// assert_eq!(fwd, Direction::Forward);
+    ///
+    /// let bwd = Direction::try_from(1_i32).expect("backward");
+    /// assert_eq!(bwd, Direction::Backward);
+    ///
+    /// assert!(Direction::try_from(0_i32).is_err());
+    /// ```
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            -1 => Ok(Self::Forward),
+            1 => Ok(Self::Backward),
+            n => Err(InvalidDirection(n)),
+        }
+    }
+}
+
+/// Error returned when an integer cannot be converted to a [`Direction`].
+///
+/// Valid values are `-1` (forward, negative exponent) and `1` (backward, positive exponent),
+/// following the FFTW sign convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidDirection(pub i32);
+
+impl fmt::Display for InvalidDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid direction value {}: expected -1 (forward) or 1 (backward)",
+            self.0
+        )
+    }
+}
+
+impl core::error::Error for InvalidDirection {}
 
 /// Planning flags that control algorithm selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

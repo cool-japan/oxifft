@@ -52,7 +52,6 @@
 #![allow(clippy::cast_possible_truncation)] // deliberate truncation
 #![allow(clippy::ptr_cast_constness)] // pointer const casting common in FFT
 #![allow(clippy::significant_drop_tightening)] // locking patterns are intentional
-#![allow(clippy::missing_errors_doc)] // FFT error handling is self-explanatory
 #![allow(clippy::type_complexity)] // complex return types are needed for FFT APIs
 #![allow(clippy::duplicate_mod)] // conditional compilation requires this
 #![allow(clippy::suspicious_operation_groupings)] // FFT math has specific operator groupings
@@ -98,15 +97,23 @@
 #![allow(clippy::checked_conversions)] // explicit conversion checks preferred
 #![allow(clippy::semicolon_if_nothing_returned)] // statement style
 #![allow(clippy::ref_as_ptr)] // ref as pointer for low-level FFT
-#![allow(clippy::ptr_eq)] // raw pointer comparison
+#![allow(clippy::ptr_eq)]
+// raw pointer comparison
+
+// Compiler-enforced invariant: every unsafe fn must have a `# Safety` section.
+#![warn(clippy::missing_safety_doc)]
+// Compiler-enforced invariant: every fallible public fn must have a `# Errors` section.
+#![warn(clippy::missing_errors_doc)]
 #![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(feature = "portable_simd", feature(portable_simd))]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
 // Internal prelude for no_std compatibility
 pub(crate) mod prelude;
+
+// Compile-time Send+Sync assertions for all public plan types.
+mod assertions;
 
 pub mod api;
 #[cfg(feature = "fftw-compat")]
@@ -140,6 +147,7 @@ pub mod autodiff;
 pub mod conv;
 #[cfg(feature = "std")]
 pub mod frft;
+pub mod ntt;
 #[cfg(feature = "std")]
 pub mod nufft;
 
@@ -148,8 +156,9 @@ pub use api::{
     fft, fft2d, fft2d_split, fft3d_split, fft_batch, fft_nd, fft_nd_split, fft_split, ifft, ifft2d,
     ifft2d_split, ifft3d_split, ifft_batch, ifft_nd, ifft_nd_split, ifft_split, irfft, irfft2d,
     irfft3d, irfft_batch, irfft_nd, rfft, rfft2d, rfft3d, rfft_batch, rfft_nd, Direction, Flags,
-    GuruPlan, Plan, Plan2D, Plan3D, PlanND, R2rKind, R2rPlan, RealPlan, RealPlan2D, RealPlan3D,
-    RealPlanKind, RealPlanND, SplitPlan, SplitPlan2D, SplitPlan3D, SplitPlanND,
+    GuruPlan, InvalidDirection, Plan, Plan2D, Plan3D, PlanND, R2rKind, R2rPlan, RealPlan,
+    RealPlan2D, RealPlan3D, RealPlanKind, RealPlanND, SplitPlan, SplitPlan2D, SplitPlan3D,
+    SplitPlanND,
 };
 pub use kernel::{Complex, Float, IoDim, Tensor};
 
@@ -180,7 +189,8 @@ pub use wasm::{fft_f32, fft_f64, ifft_f32, ifft_f64, rfft_f64, WasmFft, WasmSimd
 pub use streaming::{
     blackman, build_mel_filterbank, cola_normalization, hamming, hann, istft, istft_overlap_save,
     kaiser, magnitude_spectrogram, mel_spectrogram, mfcc, phase_spectrogram, power_spectrogram,
-    rectangular, stft, stft_overlap_save, MelConfig, RingBuffer, StreamingFft, WindowFunction,
+    rectangular, single_bin_tracker, sliding_dft, stft, stft_overlap_save, MelConfig,
+    ModulatedSdft, RingBuffer, SingleBinTracker, SlidingDft, StreamingFft, WindowFunction,
 };
 
 // Re-export compile-time FFT when const-fft feature is enabled
@@ -193,8 +203,8 @@ pub use const_fft::{
 // Re-export GPU FFT when gpu/cuda/metal feature is enabled
 #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 pub use gpu::{
-    best_backend, is_gpu_available, query_capabilities, GpuBackend, GpuBuffer, GpuCapabilities,
-    GpuDirection, GpuError, GpuFft, GpuFftEngine, GpuPlan, GpuResult,
+    best_backend, is_gpu_available, query_capabilities, GpuBackend, GpuBatchFft, GpuBuffer,
+    GpuCapabilities, GpuDirection, GpuError, GpuFft, GpuFftEngine, GpuPlan, GpuResult,
 };
 
 // Re-export low-level DFT functions for advanced users
@@ -231,6 +241,12 @@ pub use conv::{
     convolve, convolve_circular, convolve_complex, convolve_complex_mode, convolve_mode,
     convolve_with_mode, correlate, correlate_complex, correlate_complex_mode, correlate_mode,
     polynomial_multiply, polynomial_multiply_complex, polynomial_power, ConvMode,
+};
+
+// Re-export NTT (Number Theoretic Transform) functions
+pub use ntt::{
+    intt, ntt, ntt_convolve, ntt_convolve_default, NttError, NttPlan, NTT_PRIME_998244353,
+    NTT_PRIME_MOD1, NTT_PRIME_MOD2,
 };
 
 // Re-export Automatic Differentiation

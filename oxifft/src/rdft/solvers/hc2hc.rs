@@ -6,6 +6,7 @@
 
 use crate::kernel::Float;
 #[allow(unused_imports)]
+// reason: prelude glob re-exports are selectively used per feature gate (std vs no_std)
 use crate::prelude::*;
 
 /// Half-Complex to Half-Complex solver.

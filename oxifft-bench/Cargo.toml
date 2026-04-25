@@ -13,9 +13,14 @@ oxifft = { path = "../oxifft" }
 num-complex.workspace = true
 criterion.workspace = true
 rustfft.workspace = true
-
 # FFTW is optional and feature-gated
 fftw = { workspace = true, optional = true }
+num-traits.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+oxifft-codegen = { path = "../oxifft-codegen" }
 
 [features]
 default = []
@@ -29,6 +34,32 @@ workspace = true
 name = "fft_comparison"
 harness = false
 
+[[bench]]
+name = "codelet_perf"
+harness = false
+
+[[bench]]
+name = "dct_dst"
+harness = false
+
+[[bench]]
+name = "r2c_c2r"
+harness = false
+
+[[bench]]
+name = "fftw_parity_gates"
+harness = false
+required-features = ["fftw-compare"]
+
+[[bin]]
+name = "fftw_ratio_report"
+path = "src/bin/fftw_ratio_report.rs"
+required-features = ["fftw-compare"]
+
 [[test]]
 name = "fftw_comparison"
+required-features = ["fftw-compare"]
+
+[[test]]
+name = "fftw_parity_smoke"
 required-features = ["fftw-compare"]

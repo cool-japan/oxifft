@@ -112,9 +112,6 @@ mod detect;
 mod scalar;
 mod traits;
 
-#[cfg(feature = "portable_simd")]
-mod portable;
-
 #[cfg(target_arch = "x86_64")]
 mod avx;
 #[cfg(target_arch = "x86_64")]
@@ -130,12 +127,13 @@ mod neon;
 #[cfg(feature = "sve")]
 mod sve;
 
+#[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "sve"))]
+pub use detect::has_sve_runtime;
 pub use detect::{detect_simd_level, SimdLevel};
+#[cfg(target_arch = "x86_64")]
+pub use detect::{has_avx, has_avx2, has_avx512};
 pub use scalar::Scalar;
 pub use traits::{SimdComplex, SimdVector};
-
-#[cfg(feature = "portable_simd")]
-pub use portable::{PortableF32x4, PortableF32x8, PortableF64x2, PortableF64x4};
 
 #[cfg(target_arch = "x86_64")]
 pub use sse2::{Sse2F32, Sse2F64};
@@ -144,10 +142,10 @@ pub use sse2::{Sse2F32, Sse2F64};
 pub use avx::{AvxF32, AvxF64};
 
 #[cfg(target_arch = "x86_64")]
-pub use avx2::{Avx2F32, Avx2F64};
+pub use avx2::{has_avx2_fma, Avx2F32, Avx2F64};
 
 #[cfg(target_arch = "x86_64")]
-pub use avx512::{Avx512F32, Avx512F64};
+pub use avx512::{has_avx512f, Avx512F32, Avx512F64};
 
 #[cfg(target_arch = "aarch64")]
 pub use neon::{NeonF32, NeonF64};

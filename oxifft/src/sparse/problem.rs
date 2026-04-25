@@ -2,6 +2,7 @@
 
 use crate::api::Direction;
 use crate::kernel::Float;
+use crate::prelude::*;
 
 /// Sparse FFT problem specification.
 ///
@@ -74,7 +75,7 @@ impl<T: Float> SparseProblem<T> {
     pub fn optimal_repetitions(&self) -> usize {
         // O(log(n/k)) repetitions for high probability success
         let ratio = (self.n as f64) / (self.k as f64);
-        let reps = (ratio.ln() / 2.0_f64.ln()).ceil() as usize;
+        let reps = libm::ceil(libm::log(ratio) / libm::log(2.0)) as usize;
         reps.max(1).min(10)
     }
 

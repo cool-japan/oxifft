@@ -1,0 +1,69 @@
+{
+  "date": "2026-04-20",
+  "git_sha": "6a6c7a4",
+  "cpu": "Apple M3",
+  "rustc": "rustc 1.96.0-nightly (1e2183119 2026-03-15)",
+  "gates": [
+    {
+      "id": "1d_cplx_2e10",
+      "oxifft_ns": 4740.442513397994,
+      "fftw_ns": 5837.502371165499,
+      "ratio": 0.8120669101247029,
+      "target_ratio": 2.0,
+      "pass": true
+    },
+    {
+      "id": "1d_cplx_2e20",
+      "oxifft_ns": 86999761.80823413,
+      "fftw_ns": 23727987.69074405,
+      "ratio": 3.666546145511172,
+      "target_ratio": 2.0,
+      "pass": false
+    },
+    {
+      "id": "1d_real_2e10",
+      "oxifft_ns": 7294.8574412668095,
+      "fftw_ns": 1846.4397544589497,
+      "ratio": 3.9507692702404875,
+      "target_ratio": 2.0,
+      "pass": false
+    },
+    {
+      "id": "2d_cplx_1024",
+      "oxifft_ns": 12478390.938412698,
+      "fftw_ns": 41669269.09029101,
+      "ratio": 0.2994626786319172,
+      "target_ratio": 2.0,
+      "pass": true
+    },
+    {
+      "id": "batch_1000x256",
+      "oxifft_ns": 1021486.5392185516,
+      "fftw_ns": 891402.4557449315,
+      "ratio": 1.1459319330289603,
+      "target_ratio": 2.0,
+      "pass": true
+    },
+    {
+      "id": "prime_2017",
+      "oxifft_ns": 59789.80891228906,
+      "fftw_ns": 53850.97433947174,
+      "ratio": 1.1102827691729298,
+      "target_ratio": 3.0,
+      "pass": true
+    },
+    {
+      "id": "dct2_1024",
+      "oxifft_ns": 28139.557389337097,
+      "fftw_ns": 7212.824941363449,
+      "ratio": 3.9013226604135274,
+      "target_ratio": 3.0,
+      "pass": false
+    }
+  ],
+  "summary": {
+    "gates_passing": 4,
+    "gates_failing": 3,
+    "geomean_ratio": 1.5049614525313195
+  }
+}

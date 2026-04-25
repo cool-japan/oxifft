@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 use oxicuda_driver::Context;
 use oxicuda_fft::{FftHandle, FftPlan, FftType};
-// Alias to avoid conflict with GpuDirection
-use oxicuda_fft::FftDirection as OxiFftDirection;
 
 use super::buffer::GpuBuffer;
 use super::error::{GpuError, GpuResult};
@@ -34,6 +32,11 @@ pub fn is_available() -> bool {
 }
 
 /// Query CUDA device capabilities using the real driver API.
+///
+/// # Errors
+///
+/// Returns `GpuError::NoBackendAvailable` if no CUDA device is present, or
+/// `GpuError::InitializationFailed` if the driver fails to return device info.
 pub fn query_capabilities() -> GpuResult<GpuCapabilities> {
     if !is_available() {
         return Err(GpuError::NoBackendAvailable);
@@ -60,6 +63,12 @@ pub fn query_capabilities() -> GpuResult<GpuCapabilities> {
 }
 
 /// Synchronize CUDA device (no-op until GPU stream sync is active).
+///
+/// # Errors
+///
+/// This function currently cannot return an error; the `Result` signature is
+/// retained for API symmetry with backends that perform real GPU stream
+/// synchronisation (once `oxicuda-launch` integration lands).
 pub fn synchronize() -> GpuResult<()> {
     // GPU stream sync will be needed when the GPU execution path is active.
     Ok(())
@@ -74,8 +83,8 @@ pub struct CudaFftPlan {
     size: usize,
     /// Batch size.
     batch_size: usize,
-    /// CUDA context (shared ownership).
-    context: Arc<Context>,
+    /// CUDA context (held for RAII — keeps the Context alive for the FFT handle lifetime).
+    _context: Arc<Context>,
     /// oxicuda-fft executor handle (owns a CUDA Stream).
     fft_handle: FftHandle,
     /// oxicuda-fft plan (size, type, batch).
@@ -98,6 +107,12 @@ impl CudaFftPlan {
     ///
     /// `FftPlan::new_1d` accepts any non-zero size (not only powers of two),
     /// so arbitrary factorisation is supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::NoBackendAvailable` if no CUDA device is present,
+    /// `GpuError::InvalidSize` if `size` is zero, or
+    /// `GpuError::InitializationFailed` if driver/context/plan allocation fails.
     pub fn new(size: usize, batch_size: usize) -> GpuResult<Self> {
         if !is_available() {
             return Err(GpuError::NoBackendAvailable);
@@ -124,7 +139,7 @@ impl CudaFftPlan {
         Ok(Self {
             size,
             batch_size,
-            context,
+            _context: context,
             fft_handle,
             fft_plan,
         })
@@ -134,6 +149,11 @@ impl CudaFftPlan {
     ///
     /// GPU kernel execution is pending oxicuda-launch integration.
     /// CPU FFT is used as the computation engine until then.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::SizeMismatch` if buffer sizes do not match the plan,
+    /// or `GpuError::ExecutionFailed` if the CPU fallback plan cannot be created.
     pub fn execute<T: Float>(
         &self,
         input: &GpuBuffer<T>,
@@ -200,19 +220,137 @@ impl CudaFftPlan {
         Ok(())
     }
 
-    /// Returns the context associated with this plan.
-    #[allow(dead_code)]
-    pub fn context(&self) -> &Arc<Context> {
-        &self.context
+    /// Execute a real-to-complex forward FFT.
+    ///
+    /// // KNOWN LIMITATION: CUDA R2C/C2R runs on CPU until oxicuda-launch kernel dispatch is integrated
+    ///
+    /// Wraps the existing CPU-fallback path.  An `eprintln!` warning is
+    /// emitted to notify callers of the CPU path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::SizeMismatch` if `input` or `output` lengths are
+    /// inconsistent, or `GpuError::ExecutionFailed` if the CPU fallback plan
+    /// cannot be created.
+    pub fn forward_r2c(
+        &self,
+        input: &[f32],
+        output: &mut [num_complex::Complex<f32>],
+    ) -> GpuResult<()> {
+        let n = self.size;
+        let half = n / 2 + 1;
+
+        if input.len() != n {
+            return Err(GpuError::SizeMismatch {
+                expected: n,
+                got: input.len(),
+            });
+        }
+        if output.len() != half {
+            return Err(GpuError::SizeMismatch {
+                expected: half,
+                got: output.len(),
+            });
+        }
+
+        eprintln!(
+            "CUDA R2C/C2R: using CPU fallback (known limitation \
+             — GPU path pending oxicuda-launch kernel dispatch integration)"
+        );
+
+        use crate::api::{Direction, Flags, Plan};
+
+        // Zero-extend real input → complex.
+        let input_f64: Vec<Complex<f64>> = input
+            .iter()
+            .map(|&x| Complex::new(x as f64, 0.0_f64))
+            .collect();
+        let mut output_f64 = vec![Complex::<f64>::zero(); n];
+
+        let plan = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE).ok_or_else(|| {
+            GpuError::ExecutionFailed("Failed to create CPU fallback plan for R2C".into())
+        })?;
+        plan.execute(&input_f64, &mut output_f64);
+
+        for (i, c) in output_f64[..half].iter().enumerate() {
+            output[i] = num_complex::Complex::new(c.re as f32, c.im as f32);
+        }
+        Ok(())
     }
 
-    /// Returns the FFT direction alias for use with the oxicuda-fft handle.
-    #[allow(dead_code)]
-    fn oxi_direction(direction: GpuDirection) -> OxiFftDirection {
-        match direction {
-            GpuDirection::Forward => OxiFftDirection::Forward,
-            GpuDirection::Inverse => OxiFftDirection::Inverse,
+    /// Execute a complex-to-real inverse FFT.
+    ///
+    /// // KNOWN LIMITATION: CUDA R2C/C2R runs on CPU until oxicuda-launch kernel dispatch is integrated
+    ///
+    /// Wraps the existing CPU-fallback path.  An `eprintln!` warning is
+    /// emitted to notify callers of the CPU path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::SizeMismatch` if `input` or `output` lengths are
+    /// inconsistent, or `GpuError::ExecutionFailed` if the CPU fallback plan
+    /// cannot be created.
+    pub fn inverse_c2r(
+        &self,
+        input: &[num_complex::Complex<f32>],
+        output: &mut [f32],
+    ) -> GpuResult<()> {
+        let n = self.size;
+        let half = n / 2 + 1;
+
+        if input.len() != half {
+            return Err(GpuError::SizeMismatch {
+                expected: half,
+                got: input.len(),
+            });
         }
+        if output.len() != n {
+            return Err(GpuError::SizeMismatch {
+                expected: n,
+                got: output.len(),
+            });
+        }
+
+        eprintln!(
+            "CUDA R2C/C2R: using CPU fallback (known limitation \
+             — GPU path pending oxicuda-launch kernel dispatch integration)"
+        );
+
+        use crate::api::{Direction, Flags, Plan};
+
+        // Reconstruct conjugate-symmetric full spectrum.
+        let mut full_f64 = vec![Complex::<f64>::zero(); n];
+        for (k, c) in input.iter().enumerate() {
+            full_f64[k] = Complex::new(c.re as f64, c.im as f64);
+        }
+        for k in 1..n / 2 {
+            full_f64[n - k] = full_f64[k].conj();
+        }
+
+        let mut time_f64 = vec![Complex::<f64>::zero(); n];
+        let plan = Plan::dft_1d(n, Direction::Backward, Flags::ESTIMATE).ok_or_else(|| {
+            GpuError::ExecutionFailed("Failed to create CPU fallback plan for C2R".into())
+        })?;
+        plan.execute(&full_f64, &mut time_f64);
+
+        // Normalise by 1/n (IFFT convention) and take real parts.
+        let norm = 1.0_f64 / n as f64;
+        for (i, c) in time_f64.iter().enumerate() {
+            output[i] = (c.re * norm) as f32;
+        }
+        Ok(())
+    }
+
+    /// Return the transform size this plan was created for.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Return the batch size this plan was created for.
+    #[must_use]
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
     }
 }
 
@@ -223,16 +361,32 @@ impl Drop for CudaFftPlan {
 }
 
 /// Upload buffer to CUDA device (no-op; GPU memory managed in execute).
+///
+/// # Errors
+///
+/// This function currently cannot return an error; the `Result` signature is
+/// retained for API symmetry with backends that perform real device transfers.
 pub fn upload_buffer<T: Float>(_buffer: &mut GpuBuffer<T>) -> GpuResult<()> {
     Ok(())
 }
 
 /// Download buffer from CUDA device (no-op; GPU memory managed in execute).
+///
+/// # Errors
+///
+/// This function currently cannot return an error; the `Result` signature is
+/// retained for API symmetry with backends that perform real device transfers.
 pub fn download_buffer<T: Float>(_buffer: &mut GpuBuffer<T>) -> GpuResult<()> {
     Ok(())
 }
 
 /// Free CUDA buffer (no-op; GPU memory managed in execute).
+///
+/// # Errors
+///
+/// This function currently cannot return an error; the `Result` signature is
+/// retained for API symmetry with backends that perform real GPU memory
+/// deallocation.
 pub fn free_buffer(_ptr: *mut core::ffi::c_void) -> GpuResult<()> {
     Ok(())
 }

@@ -113,7 +113,6 @@ pub fn local_size_nd<C: Communicator>(dims: &[usize], pool: &MpiPool<C>) -> (usi
 ///
 /// Returns `(local_n0, local_0_start, local_n1, local_1_start)`.
 /// Useful when working with TRANSPOSED_OUT/TRANSPOSED_IN flags.
-#[allow(dead_code)]
 pub fn local_size_2d_transposed<C: Communicator>(
     n0: usize,
     n1: usize,
