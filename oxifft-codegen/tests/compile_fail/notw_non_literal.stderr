@@ -1,0 +1,5 @@
+error: expected integer literal
+ --> tests/compile_fail/notw_non_literal.rs:3:19
+  |
+3 | gen_notw_codelet!(foo);
+  |                   ^^^

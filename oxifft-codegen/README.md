@@ -1,6 +1,6 @@
 # oxifft-codegen
 
-**Version:** 0.3.0  
+**Version:** 0.3.1  
 **Status:** ✅ Stable — codelet generation complete for all supported sizes
 
 Procedural macro crate for OxiFFT codelet generation.
@@ -21,6 +21,7 @@ This crate replaces FFTW's OCaml-based `genfft` code generator with Rust procedu
 - `gen_twiddle_codelet!(radix)` — Twiddle-factor codelets for multi-radix FFT
 - `gen_simd_codelet!(size)` — SIMD-optimized codelets (infrastructure, generation pending)
 - `gen_dft_codelet!(size)` — Convenience wrapper (aliases `gen_notw_codelet!`)
+- `gen_any_codelet!(N)` — Universal dispatcher: routes any size N to the best emitter
 
 ## Codelet Types
 
@@ -66,6 +67,28 @@ use oxifft_codegen::gen_dft_codelet;
 gen_dft_codelet!(8);
 ```
 
+### Universal Dispatcher
+
+`gen_any_codelet!(N)` selects the optimal implementation path at compile time:
+
+- **N ∈ {2,3,4,5,7,8,11,13,16,32,64}**: direct hardcoded NOTW/Rader codelets
+- **N smooth-7 composite**: MixedRadix runtime wrapper
+- **N prime ≤ 1021**: Rader runtime path
+- **Otherwise**: Bluestein runtime wrapper
+
+```rust
+use oxifft_codegen::gen_any_codelet;
+
+// Routes size 13 to the hardcoded Rader codelet
+gen_any_codelet!(13);
+
+// Routes size 100 through the MixedRadix path (4×5×5, smooth-7 composite)
+gen_any_codelet!(100);
+
+// Routes a large prime through the Bluestein path
+gen_any_codelet!(997);
+```
+
 ## Supported Sizes
 
 | Size | Non-Twiddle | Twiddle | SIMD |
@@ -94,7 +117,7 @@ The codelet generator follows FFTW's approach:
 - Generated code is generic over the `Float` trait (f32/f64)
 - Follows FFTW's codelet naming conventions for compatibility
 - All sizes 2–64 have generation infrastructure, with 2–16 fully implemented
-- 8 tests passing
+- 56 tests passing
 
 ## License
 

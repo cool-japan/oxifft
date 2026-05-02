@@ -317,8 +317,10 @@ fn test_rader_eligible_primes() {
 
 #[test]
 fn test_mixed_radix_sizes() {
-    // Sizes that require mixed-radix decomposition
+    // Sizes that require mixed-radix decomposition — expressible with radices
+    // from {2, 3, 4, 5, 7, 8, 16}.
     let sizes = [
+        // Original smooth-7 sizes
         45,   // 3² × 5
         75,   // 3 × 5²
         105,  // 3 × 5 × 7
@@ -330,9 +332,210 @@ fn test_mixed_radix_sizes() {
         675,  // 3³ × 5²
         945,  // 3³ × 5 × 7
         1125, // 3² × 5³
+        // Additional sizes from the e2e requirements (not covered by other algorithms)
+        6,   // 3 × 2
+        10,  // 5 × 2
+        14,  // 7 × 2
+        18,  // 3² × 2 — also has Composite codelet but verifying correctness
+        20,  // 5 × 4
+        28,  // 7 × 4
+        40,  // 5 × 8
+        42,  // 7 × 3 × 2
+        56,  // 7 × 8
+        80,  // 5 × 16
+        84,  // 7 × 3 × 4
+        112, // 7 × 16
+        120, // 5 × 3 × 8
+        168, // 7 × 3 × 8
+        240, // 5 × 3 × 16
+        // Large smooth-7 sizes
+        1680, // 5 × 7 × 48 = 5 × 7 × 3 × 16
+        2520, // 7 × 5 × 8 × 9 = 7 × 5 × 8 × 3 × 3
     ];
     for &n in &sizes {
         test_fft_size(n);
+    }
+}
+
+/// Test that `MixedRadix` algorithm is selected for smooth-7 composite sizes
+/// not covered by other specialized algorithms (Composite codelets, `WinogradPfa`, etc.).
+///
+/// This test validates the dispatch chain:
+///   Nop → `CooleyTukey` → Winograd → `WinogradPfa` → Composite → `MixedRadix` → Direct → Generic → Bluestein
+///
+/// Excluded from dispatch assertions (they have higher-priority algorithms):
+///   - Powers of 2: `CooleyTukey`
+///   - 3, 5, 7, 9, 11, 13: Winograd
+///   - 15, 21, 35: `WinogradPfa`
+///   - 12, 15, 18, 20, 24, 30, 36, 45, 48, 50, 60, 72, 80, 96, 100: Composite codelet
+#[test]
+fn test_mixed_radix_dispatch_assertion() {
+    // Sizes that should route to MixedRadix — smooth-7 composites with
+    // radices from {2,3,4,5,7,8,16}, not covered by Composite/Winograd/PFA/CT.
+    // Composite codelet sizes (12,15,18,20,24,30,36,45,48,50,60,72,80,96,100) are excluded.
+    let mixed_radix_sizes = [
+        (6, "3×2"),
+        (10, "5×2"),
+        (14, "7×2"),
+        (28, "7×4"),
+        (40, "5×8"),
+        (42, "7×3×2"),
+        (56, "7×8"),
+        (70, "5×7×2"),
+        (75, "3×5²"),
+        (84, "7×3×4"),
+        (98, "7²×2"),
+        (105, "3×5×7"),
+        (112, "7×16"),
+        (120, "5×3×8"),
+        (168, "7×3×8"),
+        (175, "5²×7"),
+        (240, "5×3×16"),
+        (336, "7×3×16"),
+        (490, "5×7²×2"),
+        (1260, "5×7×4×9"),
+    ];
+
+    for (n, desc) in &mixed_radix_sizes {
+        let plan = Plan::<f64>::dft_1d(*n, Direction::Forward, Flags::ESTIMATE)
+            .unwrap_or_else(|| panic!("plan creation failed for n={n} ({desc})"));
+        assert_eq!(
+            plan.algorithm_name(),
+            "MixedRadix",
+            "n={n} ({desc}): expected MixedRadix, got {}",
+            plan.algorithm_name()
+        );
+    }
+}
+
+/// Correctness test: forward FFT followed by inverse FFT recovers original signal,
+/// specifically for sizes handled by `MixedRadix`.
+#[test]
+fn test_mixed_radix_roundtrip_fwd_inv() {
+    let sizes = [
+        6, 10, 14, 20, 28, 40, 42, 45, 56, 70, 75, 80, 84, 98, 105, 112, 120, 168, 240,
+    ];
+
+    for &n in &sizes {
+        test_roundtrip_size(n);
+    }
+}
+
+// ============================================================================
+// f32 MixedRadix correctness tests
+// ============================================================================
+
+/// Verify f32 Plan correctness for `MixedRadix` sizes.
+///
+/// The executor generates twiddles in f64, converts to f32 via `T::from_f64`, and applies
+/// the butterfly.  This test ensures the resulting f32 output is close to the exact DFT
+/// (computed at f64 precision) within an f32-appropriate tolerance.
+///
+/// Tolerance: 1e-4 relative error (f32 has ~7 significant decimal digits; each stage adds
+/// rounding errors on the order of eps×log2(n) ≈ 1.2e-7×17 ≈ 2e-6, well below 1e-4).
+#[test]
+#[allow(clippy::cast_possible_truncation)] // reason: intentional f64→f32 for comparison tolerance
+fn test_mixed_radix_f32_correctness() {
+    // Sizes that route to MixedRadix and span several factorizations.
+    // Include 1680 to confirm precision at a large smooth-7 size.
+    let sizes: &[usize] = &[6, 10, 14, 28, 42, 56, 70, 105, 120, 168, 240, 1680];
+
+    for &n in sizes {
+        // Build f32 plan (ESTIMATE so no benchmarking overhead)
+        let plan_f32 =
+            Plan::<f32>::dft_1d(n, Direction::Forward, Flags::ESTIMATE).unwrap_or_else(|| {
+                panic!("f32 plan failed for n={n}");
+            });
+
+        // Input: same deterministic signal as the f64 helpers but in f32.
+        let input_f32: Vec<oxifft::Complex<f32>> = (0..n)
+            .map(|i| {
+                let t = 2.0_f32 * std::f32::consts::PI * (i as f32) / (n as f32);
+                oxifft::Complex::new(t.cos(), t.sin())
+            })
+            .collect();
+
+        let mut output_f32 = vec![oxifft::Complex::<f32>::new(0.0, 0.0); n];
+        plan_f32.execute(&input_f32, &mut output_f32);
+
+        // Reference: exact DFT at f64 precision, then downcast for comparison.
+        let input_f64: Vec<Complex<f64>> = input_f32
+            .iter()
+            .map(|c| Complex::new(f64::from(c.re), f64::from(c.im)))
+            .collect();
+        let ref_f64 = dft_direct(&input_f64);
+
+        // Relative error tolerance appropriate for f32 accumulation.
+        // Scale loosely with log2(n) to account for multi-stage error growth.
+        let tol = 1e-4_f32 * (n as f32).log2().max(1.0);
+
+        for (k, (got, exp_f64)) in output_f32.iter().zip(ref_f64.iter()).enumerate() {
+            let got_re_f64 = f64::from(got.re);
+            let got_im_f64 = f64::from(got.im);
+            let diff = ((got_re_f64 - exp_f64.re).hypot(got_im_f64 - exp_f64.im)) as f32;
+            let mag = (exp_f64.re.hypot(exp_f64.im) as f32).max(1.0);
+            let rel = diff / mag;
+            assert!(
+                rel <= tol,
+                "f32 MixedRadix mismatch at n={n}, k={k}: got ({}, {}), ref ({:.6}, {:.6}), rel_err={rel:.2e}, tol={tol:.2e}",
+                got.re,
+                got.im,
+                exp_f64.re,
+                exp_f64.im,
+            );
+        }
+    }
+}
+
+/// f32 forward/inverse roundtrip for `MixedRadix` sizes.
+///
+/// Verifies that `ifft(fft(x)) / n ≈ x` in f32 arithmetic.
+/// Tolerance is relaxed to 1e-5 to accommodate f32 precision limits.
+#[test]
+fn test_mixed_radix_f32_roundtrip() {
+    let sizes: &[usize] = &[6, 10, 14, 28, 42, 56, 70, 105, 120, 168, 240];
+
+    for &n in sizes {
+        let fwd_plan =
+            Plan::<f32>::dft_1d(n, Direction::Forward, Flags::ESTIMATE).unwrap_or_else(|| {
+                panic!("f32 fwd plan failed for n={n}");
+            });
+        let inv_plan =
+            Plan::<f32>::dft_1d(n, Direction::Backward, Flags::ESTIMATE).unwrap_or_else(|| {
+                panic!("f32 inv plan failed for n={n}");
+            });
+
+        let input: Vec<oxifft::Complex<f32>> = (0..n)
+            .map(|i| {
+                let t = 2.0_f32 * std::f32::consts::PI * (i as f32) / (n as f32);
+                oxifft::Complex::new(t.cos(), t.sin())
+            })
+            .collect();
+
+        let mut freq = vec![oxifft::Complex::<f32>::new(0.0, 0.0); n];
+        let mut recovered = vec![oxifft::Complex::<f32>::new(0.0, 0.0); n];
+
+        fwd_plan.execute(&input, &mut freq);
+        inv_plan.execute(&freq, &mut recovered);
+
+        let scale = 1.0_f32 / (n as f32);
+        for c in &mut recovered {
+            c.re *= scale;
+            c.im *= scale;
+        }
+
+        let tol = 1e-5_f32 * (n as f32).log2().max(1.0);
+        for i in 0..n {
+            let diff = (recovered[i].re - input[i].re).hypot(recovered[i].im - input[i].im);
+            assert!(
+                diff <= tol,
+                "f32 roundtrip mismatch at n={n}, i={i}: got ({}, {}), expected ({}, {}), diff={diff:.2e}, tol={tol:.2e}",
+                recovered[i].re,
+                recovered[i].im,
+                input[i].re,
+                input[i].im,
+            );
+        }
     }
 }
 

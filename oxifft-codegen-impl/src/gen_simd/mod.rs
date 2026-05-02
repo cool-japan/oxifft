@@ -27,6 +27,9 @@ mod neon;
 mod scalar;
 mod sse2;
 
+pub mod multi_transform;
+pub mod runtime_dispatch;
+
 /// Generate a SIMD-optimized codelet for the given FFT size.
 ///
 /// Supports sizes 2, 4, 8 for all ISAs and size 16 (f32 only, AVX-512F or scalar).

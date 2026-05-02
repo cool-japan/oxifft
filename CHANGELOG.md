@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.3.1] - 2026-05-02
+
+### Added
+- **Mixed-radix Cooley-Tukey FFT** for smooth-7 sizes factoring into {2, 3, 4, 5, 7, 8, 16}
+  (6, 10, 12, 14, 24, 28, 40, 56, 80, 96, 112, 240, …). Uses Winograd minimum-multiply
+  radix-3/5/7 DIT butterflies; replaces Bluestein for these sizes with a proper cost model.
+- **Auto-tuning** (`Flags::MEASURE` / `Flags::PATIENT`): runtime profiling of candidate
+  algorithms via `auto_tune::tune_size<T>` / `tune_range<T>`. Binary wisdom format
+  (30-byte packed LE entries). Build-time profiling opt-in via `OXIFFT_TUNE=1`.
+  New `oxifft_tune` CLI binary for offline profiling.
+- **`gen_any_codelet!` proc-macro** and `CodeletBuilder` API in `oxifft-codegen`:
+  dispatches to direct codelets / Rader / MixedRadix / Bluestein for any user-specified N.
+- **Wisdom format v2**: S-expression format with `(mixed-radix-R1-R2-...)` encoding;
+  backward-compatible with v1 files.
+
+### Changed
+- 325 new tests; total workspace: **1 554 passing** (up from 1 229 in v0.3.0).
+- `oxifft-codegen` now has 11 proc-macros (added `gen_any_codelet!`).
+
 ## [0.3.0] - 2026-04-25
 
 ### Performance
@@ -488,7 +507,8 @@ _No unreleased changes._
 - wasm-bindgen 0.2 (WebAssembly bindings)
 - js-sys 0.3 (JavaScript interop)
 
-[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/cool-japan/oxifft/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/cool-japan/oxifft/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cool-japan/oxifft/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/cool-japan/oxifft/compare/v0.1.3...v0.1.4

@@ -1,0 +1,5 @@
+error: gen_rader_codelet: unsupported prime 7 (expected one of 11, 13)
+ --> tests/compile_fail/gen_rader_unknown_prime.rs:3:20
+  |
+3 | gen_rader_codelet!(7);
+  |                    ^

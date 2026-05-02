@@ -184,12 +184,23 @@
 
 💡 Aspirational features for mature releases
 
-- [ ] Support for odd sizes (3, 5, 7, etc.)
-- [ ] Prime-size direct codelets (Rader's algorithm codegen)
-- [ ] Vectorized multi-transform codelets (batch processing)
-- [ ] Custom codelet generation API for user-defined sizes
-- [ ] Runtime codelet selection based on CPU features
-- [ ] Mixed-radix optimization strategies
+- [x] Support for odd sizes (3, 5, 7, etc.)
+- [x] Prime-size direct codelets (Rader's algorithm codegen)
+- [x] Vectorized multi-transform codelets (batch processing)
+- [x] Custom codelet generation API for user-defined sizes (planned 2026-05-01)
+  - **Goal:** New gen_any_codelet!(N, ty=f32|f64, dir=Forward|Backward) proc-macro + CodeletBuilder Rust API; dispatches to best emitter for arbitrary N: notw for {2,3,4,5,7,8,11,13,16,32,64}, MixedRadix for smooth-7 composites, Rader for primes ≤ 1021, Bluestein wrapper otherwise.
+  - **Design:** classify(n) → NotwSmall|WinogradOdd|RaderPrime|MixedRadix(facs)|Bluestein; CodeletBuilder::new(N).precision(F32).direction(Forward).build() → Result<TokenStream,CodegenError>; Bluestein wrapper emits chirp pre/post tables as static const arrays at codegen time.
+  - **Files:** gen_any.rs (extend stub, ~500 LoC), oxifft-codegen/src/lib.rs (add gen_any_codelet!), oxifft-codegen-impl/src/lib.rs (pub use gen_any::CodeletBuilder)
+  - **Prerequisites:** Mixed-radix item done (gen_mixed_radix::generate_for exists for composite N).
+  - **Tests:** generate(8) → notw; generate(15) → MixedRadix [5,3]; generate(11) → Rader; generate(2003) → Bluestein; end-to-end correctness vs naive DFT for n ∈ {6,10,11,13,15,23,31,60,100,256}; CodeletBuilder::new(0).build() → Err.
+  - **Risk:** n=0/n=1 edge cases → Err(InvalidSize); Bluestein chirp tables >1MB → codegen-time warning.
+- [x] Runtime codelet selection based on CPU features
+- [x] Mixed-radix optimization strategies (planned 2026-05-01)
+  - **Goal:** True mixed-radix Cooley-Tukey for sizes factoring into {2,3,4,5,7,8,16} (smooth-7 family: 6,10,12,14,24,28,40,56,80,96,112,240,…) — get hand-tuned codelet path instead of Bluestein.
+  - **Design:** Radix-3/5/7 DIT twiddle emitters in gen_twiddle.rs using Winograd min-multiply; runtime wrappers in twiddle_odd.rs; twiddles_mixed_radix<T> generator; Algorithm::MixedRadix executor with mixed-radix digit reversal + per-stage DIT butterfly; planner cost model (n·log₂(n)·per-radix-mul-ratio); wisdom format v1→v2 (backward-compat S-expr; v1 files load fine — just lack MixedRadix entries). Greedy radix peel from largest: n=240 → [16,5,3].
+  - **Files:** gen_twiddle.rs (+400 LoC), gen_mixed_radix.rs (new ~250 LoC), twiddle_odd.rs (new ~350 LoC), types.rs (MixedRadix execute arm + select_algorithm branch), planner.rs (MixedRadix arm in SolverChoice + estimate_cost + wisdom S-expr encode/decode), twiddle.rs (twiddles_mixed_radix), wisdom.rs (WISDOM_FORMAT_VERSION 1→2 + compat read)
+  - **Tests:** Radix-{3,5,7} butterfly DIT vs naive for blocks ∈ {1,4,16}, stride ∈ {1,r,4r}; end-to-end N ∈ {6,10,12,14,15,21,24,28,30,35,40,42,48,56,60,80,84,96,112,120,168,240} parity vs Bluestein ≤1e-10; Plan::dft_1d(40).algorithm_name()=="MixedRadix"; wisdom v1↔v2 round-trip.
+  - **Risk:** Twiddle ordering subtlety (validate small sizes {6,10,14} first); planner.rs may hit ~1860 lines (split in item 4 if >1900).
 
 ---
 

@@ -1,5 +1,6 @@
 //! Auto-generated module structure
 
+pub mod auto_tune;
 mod debug_impls;
 pub mod functions;
 pub mod functions_2;

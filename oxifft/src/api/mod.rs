@@ -17,3 +17,7 @@ pub use parallel::*;
 pub use plan::*;
 pub use types::*;
 pub use wisdom::*;
+
+// Re-export auto_tune module items for CLI access.
+#[cfg(feature = "std")]
+pub use plan::auto_tune::{tune_range, tune_size, TuneResult};

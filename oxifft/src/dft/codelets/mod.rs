@@ -16,6 +16,10 @@ pub(crate) mod hand_avx512_twiddles;
 mod notw;
 pub mod simd;
 mod twiddle;
+pub(crate) mod twiddle_odd;
+pub mod winograd;
+pub(crate) mod winograd_constants;
+pub(crate) mod winograd_pfa;
 
 pub use composite::{
     execute_composite_codelet, has_composite_codelet, notw_100, notw_12, notw_15, notw_18, notw_20,
