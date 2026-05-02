@@ -13,13 +13,14 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 
 ### Core FFT Functionality
 - **Pure Rust by default**: No C dependencies, no FFI, no bindgen with default features (Pure Rust Policy compliant). The optional `mpi` and `sve` features link against system libraries — see [MPI notes](#mpi).
-- **Full Algorithm Support**: Cooley-Tukey, Rader, Bluestein, Direct O(n²)
+- **Full Algorithm Support**: Cooley-Tukey (radix-2/4, mixed-radix for smooth-7 composites), Rader, Bluestein, Direct O(n²); `Algorithm::MixedRadix` handles sizes such as 6, 10, 12, 14, 24, 28, 40, 56, 80, 96, 112, 240, …
 - **Transform Types**: Complex DFT, Real FFT (R2C/C2R), DCT/DST variants, DHT
 - **Multi-Dimensional**: 1D, 2D, 3D, and N-D transforms
 - **Batch Processing**: Efficient vector-rank handling for multiple transforms
 - **SIMD Optimization**: SSE2, AVX, AVX2, AVX-512, ARM NEON, ARM SVE, WebAssembly SIMD
 - **Threading**: Rayon integration for parallel execution
 - **Wisdom System**: Plan caching and persistence for repeated transforms
+- **Auto-tuning**: `Flags::MEASURE` and `Flags::PATIENT` are fully wired; the `oxifft_tune` binary benchmarks candidate plans and writes wisdom automatically
 - **Precision Support**: f16, f32, f64, and f128 floating-point types
 
 ### Advanced Features (Beyond FFTW)
@@ -39,7 +40,7 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 ## Project Status
 
 ✅ **Core FFT functionality is COMPLETE**
-✅ **1365 tests passing** (all features, stress tests validated)
+✅ **1554 tests passing** (all features, stress tests validated)
 ✅ **Zero clippy warnings** (all features)
 ✅ **Performance optimized** (9/15 composite sizes faster than RustFFT)
 ✅ **1544 public API items** documented and tested
@@ -239,7 +240,7 @@ oxifft/
 │   ├── gpu/               # GPU acceleration (CUDA, Metal backends)
 │   ├── mpi/               # MPI distributed computing
 │   └── wasm/              # WebAssembly bindings and WASM SIMD
-├── oxifft-codegen/        # Proc-macro crate for codelet generation
+├── oxifft-codegen/        # Proc-macro crate for codelet generation (11 macros, incl. gen_any_codelet!)
 ├── oxifft-bench/          # Benchmarks (including FFTW comparison)
 ├── benches/               # Additional benchmarks (beyond_fftw.rs)
 ├── examples/              # Usage examples
@@ -270,6 +271,7 @@ OxiFFT provides many features beyond RustFFT:
 | Feature | OxiFFT | RustFFT |
 |---------|--------|---------|
 | **Basic FFT** | ✅ | ✅ |
+| **Mixed-radix (smooth-7 composites)** | ✅ `Algorithm::MixedRadix` | partial |
 | **Real FFT (R2C/C2R)** | ✅ | ✅ |
 | **DCT/DST (8 types)** | ✅ | ❌ |
 | **2D/3D/N-D FFT** | ✅ | ❌ (manual) |
