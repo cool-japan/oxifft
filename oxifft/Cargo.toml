@@ -44,10 +44,11 @@ rayon = { workspace = true, optional = true }
 mpi = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-oxifft-codegen = { version = "0.3.0", path = "../oxifft-codegen" }
+oxifft-codegen = { version = "0.3.1", path = "../oxifft-codegen" }
 oxicuda-driver = { workspace = true, optional = true }
 oxicuda-fft = { workspace = true, optional = true }
 oxicuda-metal = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
@@ -90,6 +91,8 @@ gpu = ["cuda", "metal"]
 signal = ["std"]
 # FFTW-compatible API surface (thin wrappers with FFTW-style names)
 fftw-compat = []
+# ndarray integration — FFT extension traits for ndarray arrays
+ndarray = ["dep:ndarray"]
 
 [lints]
 workspace = true
@@ -97,6 +100,11 @@ workspace = true
 [package.metadata.cargo-udeps.ignore]
 normal = ["oxifft-codegen", "spin"]
 development = ["approx", "proptest"]
+
+[[bin]]
+name = "oxifft_tune"
+path = "src/bin/oxifft_tune.rs"
+required-features = ["std"]
 
 [[bench]]
 name = "dft_1d"

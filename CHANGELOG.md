@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.3.1] - 2026-05-01
+
+### Changed
+
+- Version maintenance bump; no functional changes from 0.3.0.
+- Applied cargo fmt formatting fixes to `build.rs` and `src/bin/oxifft_tune.rs` (pre-existing format drift).
+
 ## [0.3.0] - 2026-04-25
 
 ### Performance

@@ -47,6 +47,7 @@ pub use twiddle::{
     clear_twiddle_cache, get_twiddle_table_f32, get_twiddle_table_f64, get_twiddle_table_soa_f32,
     get_twiddle_table_soa_f64, twiddle_mul_scalar_f32, twiddle_mul_scalar_f64,
     twiddle_mul_simd_f32, twiddle_mul_simd_f64, twiddle_mul_soa_scalar_f32,
-    twiddle_mul_soa_scalar_f64, twiddle_mul_soa_simd_f32, twiddle_mul_soa_simd_f64, TwiddleCache,
-    TwiddleDirection, TwiddleKey, TwiddleTable, TwiddleTableSoA,
+    twiddle_mul_soa_scalar_f64, twiddle_mul_soa_simd_f32, twiddle_mul_soa_simd_f64,
+    twiddles_mixed_radix, twiddles_mixed_radix_f32, TwiddleCache, TwiddleDirection, TwiddleKey,
+    TwiddleTable, TwiddleTableSoA,
 };

@@ -1233,441 +1233,138 @@ unsafe fn twiddle_mul_neon_f32(data: &mut [Complex<f32>], twiddles: &[Complex<f3
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    /// Serialise cache-modifying tests to prevent interference.
-    static CACHE_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn test_twiddle_w4() {
-        // W_4^0 = 1
-        let w0: Complex<f64> = twiddle(4, 0);
-        assert!((w0.re - 1.0).abs() < 1e-10);
-        assert!(w0.im.abs() < 1e-10);
-
-        // W_4^1 = -i
-        let w1: Complex<f64> = twiddle(4, 1);
-        assert!(w1.re.abs() < 1e-10);
-        assert!((w1.im - (-1.0)).abs() < 1e-10);
-
-        // W_4^2 = -1
-        let w2: Complex<f64> = twiddle(4, 2);
-        assert!((w2.re - (-1.0)).abs() < 1e-10);
-        assert!(w2.im.abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_compute_twiddles() {
-        let tw: Vec<Complex<f64>> = compute_twiddles(8, 4);
-        assert_eq!(tw.len(), 4);
-
-        // W_8^0 = 1
-        assert!((tw[0].re - 1.0).abs() < 1e-10);
-        assert!(tw[0].im.abs() < 1e-10);
-    }
-
-    // -------------------------------------------------------------------------
-    // SIMD vs scalar parity tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn simd_vs_scalar_parity_f64() {
-        let size = 256;
-        let twiddles: Vec<Complex<f64>> = (0..size)
-            .map(|k| {
-                let angle = -2.0 * core::f64::consts::PI * k as f64 / size as f64;
-                Complex::new(angle.cos(), angle.sin())
-            })
-            .collect();
-        let input: Vec<Complex<f64>> = (0..size)
-            .map(|k| Complex::new(k as f64, -(k as f64)))
-            .collect();
-
-        let mut simd_data = input.clone();
-        let mut scalar_data = input;
-
-        twiddle_mul_simd_f64(&mut simd_data, &twiddles);
-        twiddle_mul_scalar_f64(&mut scalar_data, &twiddles);
-
-        for (s, r) in simd_data.iter().zip(scalar_data.iter()) {
-            let diff = (s.re - r.re).abs().max((s.im - r.im).abs());
-            assert!(
-                diff <= 1e-10 || diff <= 1e-12 * r.norm(),
-                "SIMD/scalar f64 mismatch at element: simd={s:?} scalar={r:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn simd_vs_scalar_parity_f32() {
-        let size = 256;
-        let twiddles: Vec<Complex<f32>> = (0..size)
-            .map(|k| {
-                let angle = -2.0 * core::f32::consts::PI * k as f32 / size as f32;
-                Complex::new(angle.cos(), angle.sin())
-            })
-            .collect();
-        let input: Vec<Complex<f32>> = (0..size)
-            .map(|k| Complex::new(k as f32, -(k as f32)))
-            .collect();
-
-        let mut simd_data = input.clone();
-        let mut scalar_data = input;
-
-        twiddle_mul_simd_f32(&mut simd_data, &twiddles);
-        twiddle_mul_scalar_f32(&mut scalar_data, &twiddles);
-
-        for (s, r) in simd_data.iter().zip(scalar_data.iter()) {
-            let diff = (s.re - r.re).abs().max((s.im - r.im).abs());
-            assert!(
-                diff <= 1e-5_f32 || diff <= 1e-6_f32 * r.norm(),
-                "SIMD/scalar f32 mismatch: simd={s:?} scalar={r:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn simd_vs_scalar_parity_f64_odd_length() {
-        // Verify the remainder path (non-multiple-of-chunk-size)
-        let size = 7;
-        let twiddles: Vec<Complex<f64>> = (0..size)
-            .map(|k| {
-                let angle = -2.0 * core::f64::consts::PI * k as f64 / size as f64;
-                Complex::new(angle.cos(), angle.sin())
-            })
-            .collect();
-        let input: Vec<Complex<f64>> = (0..size)
-            .map(|k| Complex::new(k as f64 + 1.0, -(k as f64) - 0.5))
-            .collect();
-
-        let mut simd_data = input.clone();
-        let mut scalar_data = input;
-
-        twiddle_mul_simd_f64(&mut simd_data, &twiddles);
-        twiddle_mul_scalar_f64(&mut scalar_data, &twiddles);
-
-        for (s, r) in simd_data.iter().zip(scalar_data.iter()) {
-            let diff = (s.re - r.re).abs().max((s.im - r.im).abs());
-            assert!(
-                diff <= 1e-10,
-                "SIMD/scalar f64 odd-length mismatch: simd={s:?} scalar={r:?}",
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // TwiddleCache tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn twiddle_cache_hit_f64() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let t1 = get_twiddle_table_f64(256, TwiddleDirection::Forward);
-        let t2 = get_twiddle_table_f64(256, TwiddleDirection::Forward);
-        assert!(
-            Arc::ptr_eq(&t1, &t2),
-            "second call should return the cached Arc"
-        );
-    }
-
-    #[test]
-    fn twiddle_cache_direction_separation() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let fwd = get_twiddle_table_f64(64, TwiddleDirection::Forward);
-        let inv = get_twiddle_table_f64(64, TwiddleDirection::Inverse);
-        assert!(
-            !Arc::ptr_eq(&fwd, &inv),
-            "forward and inverse tables should be distinct"
-        );
-        // Verify forward[1] and inverse[1] are complex conjugates
-        if fwd.factors.len() > 1 && inv.factors.len() > 1 {
-            let f = fwd.factors[1];
-            let i = inv.factors[1];
-            assert!(
-                (f.re - i.re).abs() < 1e-14,
-                "real parts should match: {} vs {}",
-                f.re,
-                i.re
-            );
-            assert!(
-                (f.im + i.im).abs() < 1e-14,
-                "imag parts should be negated: {} vs {}",
-                f.im,
-                i.im
-            );
-        }
-    }
-
-    #[test]
-    fn twiddle_cache_invalidate_f64() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-
-        let t1 = get_twiddle_table_f64(512, TwiddleDirection::Forward);
-        clear_twiddle_cache();
-        let t2 = get_twiddle_table_f64(512, TwiddleDirection::Forward);
-        assert!(
-            !Arc::ptr_eq(&t1, &t2),
-            "after clear, should allocate a new table"
-        );
-    }
-
-    #[test]
-    fn twiddle_cache_hit_f32() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let t1 = get_twiddle_table_f32(128, TwiddleDirection::Forward);
-        let t2 = get_twiddle_table_f32(128, TwiddleDirection::Forward);
-        assert!(
-            Arc::ptr_eq(&t1, &t2),
-            "second call should return the cached Arc (f32)"
-        );
-    }
-
-    #[test]
-    fn twiddle_cache_f32_f64_separation() {
-        // f32 and f64 tables must not be ptr_eq (they are different types)
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let _f64 = get_twiddle_table_f64(32, TwiddleDirection::Forward);
-        let _f32 = get_twiddle_table_f32(32, TwiddleDirection::Forward);
-        // Just verifying both calls succeed; their types preclude ptr_eq comparison.
-    }
-
-    #[test]
-    fn twiddle_table_correctness_f64() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let n = 8;
-        let table = get_twiddle_table_f64(n, TwiddleDirection::Forward);
-        assert_eq!(table.factors.len(), n);
-
-        // W_8^0 = 1
-        assert!((table.factors[0].re - 1.0).abs() < 1e-14);
-        assert!(table.factors[0].im.abs() < 1e-14);
-
-        // Each factor should lie on the unit circle
-        for (k, w) in table.factors.iter().enumerate() {
-            let mag_sq = w.re * w.re + w.im * w.im;
-            assert!(
-                (mag_sq - 1.0).abs() < 1e-13,
-                "W_{n}^{k} should be on unit circle, |w|²={mag_sq}"
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // SoA vs AoS correctness tests
-    // -------------------------------------------------------------------------
-
-    /// Helper: compute max ULP distance between two f64 values.
-    fn ulp_distance_f64(a: f64, b: f64) -> u64 {
-        let ai = a.to_bits();
-        let bi = b.to_bits();
-        ai.abs_diff(bi)
-    }
-
-    /// For a given size, verify that applying AoS and SoA twiddle multiplication
-    /// to the same input produces results within 4 ULP of each other (f64).
-    fn check_soa_vs_aos_f64(size: usize) {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let input: Vec<Complex<f64>> = (0..size)
-            .map(|k| Complex::new((k as f64).sin(), (k as f64).cos()))
-            .collect();
-
-        // AoS path
-        let aos_table = get_twiddle_table_f64(size, TwiddleDirection::Forward);
-        let mut aos_data = input.clone();
-        twiddle_mul_simd_f64(&mut aos_data, &aos_table.factors);
-
-        // SoA path
-        let soa_table = get_twiddle_table_soa_f64(size, TwiddleDirection::Forward);
-        let mut soa_data = input;
-        twiddle_mul_soa_simd_f64(&mut soa_data, &soa_table.re, &soa_table.im);
-
-        for (idx, (a, s)) in aos_data.iter().zip(soa_data.iter()).enumerate() {
-            let re_ulp = ulp_distance_f64(a.re, s.re);
-            let im_ulp = ulp_distance_f64(a.im, s.im);
-            assert!(
-                re_ulp <= 4,
-                "SoA vs AoS f64 re mismatch at idx={idx} size={size}: \
-                 AoS={}, SoA={}, ULP={re_ulp}",
-                a.re,
-                s.re
-            );
-            assert!(
-                im_ulp <= 4,
-                "SoA vs AoS f64 im mismatch at idx={idx} size={size}: \
-                 AoS={}, SoA={}, ULP={im_ulp}",
-                a.im,
-                s.im
-            );
-        }
-    }
-
-    /// Helper: compute max ULP distance between two f32 values.
-    fn ulp_distance_f32(a: f32, b: f32) -> u32 {
-        let ai = a.to_bits();
-        let bi = b.to_bits();
-        ai.abs_diff(bi)
-    }
-
-    /// For a given size, verify SoA vs AoS within 4 ULP (f32).
-    fn check_soa_vs_aos_f32(size: usize) {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let input: Vec<Complex<f32>> = (0..size)
-            .map(|k| Complex::new((k as f32).sin(), (k as f32).cos()))
-            .collect();
-
-        let aos_table = get_twiddle_table_f32(size, TwiddleDirection::Forward);
-        let mut aos_data = input.clone();
-        twiddle_mul_simd_f32(&mut aos_data, &aos_table.factors);
-
-        let soa_table = get_twiddle_table_soa_f32(size, TwiddleDirection::Forward);
-        let mut soa_data = input;
-        twiddle_mul_soa_simd_f32(&mut soa_data, &soa_table.re, &soa_table.im);
-
-        for (idx, (a, s)) in aos_data.iter().zip(soa_data.iter()).enumerate() {
-            let re_ulp = ulp_distance_f32(a.re, s.re);
-            let im_ulp = ulp_distance_f32(a.im, s.im);
-            assert!(
-                re_ulp <= 4,
-                "SoA vs AoS f32 re mismatch at idx={idx} size={size}: \
-                 AoS={}, SoA={}, ULP={re_ulp}",
-                a.re,
-                s.re
-            );
-            assert!(
-                im_ulp <= 4,
-                "SoA vs AoS f32 im mismatch at idx={idx} size={size}: \
-                 AoS={}, SoA={}, ULP={im_ulp}",
-                a.im,
-                s.im
-            );
-        }
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f64_1024() {
-        check_soa_vs_aos_f64(1024);
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f64_4096() {
-        check_soa_vs_aos_f64(4096);
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f64_16384() {
-        check_soa_vs_aos_f64(16384);
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f64_65536() {
-        check_soa_vs_aos_f64(65536);
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f32_1024() {
-        check_soa_vs_aos_f32(1024);
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f32_4096() {
-        check_soa_vs_aos_f32(4096);
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f32_16384() {
-        check_soa_vs_aos_f32(16384);
-    }
-
-    #[test]
-    fn soa_vs_aos_correctness_f32_65536() {
-        check_soa_vs_aos_f32(65536);
-    }
-
-    // -------------------------------------------------------------------------
-    // SoA cache tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn soa_cache_hit_f64() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let t1 = get_twiddle_table_soa_f64(1024, TwiddleDirection::Forward);
-        let t2 = get_twiddle_table_soa_f64(1024, TwiddleDirection::Forward);
-        assert!(
-            Arc::ptr_eq(&t1, &t2),
-            "second SoA f64 call should return the cached Arc"
-        );
-    }
-
-    #[test]
-    fn soa_cache_hit_f32() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let t1 = get_twiddle_table_soa_f32(512, TwiddleDirection::Forward);
-        let t2 = get_twiddle_table_soa_f32(512, TwiddleDirection::Forward);
-        assert!(
-            Arc::ptr_eq(&t1, &t2),
-            "second SoA f32 call should return the cached Arc"
-        );
-    }
-
-    #[test]
-    fn soa_table_correctness_f64() {
-        let _lock = CACHE_LOCK.lock().expect("cache lock");
-        clear_twiddle_cache();
-
-        let n = 16usize;
-        let soa = get_twiddle_table_soa_f64(n, TwiddleDirection::Forward);
-        assert_eq!(soa.re.len(), n);
-        assert_eq!(soa.im.len(), n);
-
-        // W_n^0 = (1, 0)
-        assert!((soa.re[0] - 1.0_f64).abs() < 1e-14);
-        assert!(soa.im[0].abs() < 1e-14);
-
-        // Each factor should lie on the unit circle
-        for k in 0..n {
-            let mag_sq = soa.re[k] * soa.re[k] + soa.im[k] * soa.im[k];
-            assert!(
-                (mag_sq - 1.0_f64).abs() < 1e-13,
-                "SoA W_{n}^{k} not on unit circle: |w|²={mag_sq}"
-            );
+// ============================================================================
+// Mixed-radix twiddle factor generation
+// ============================================================================
+
+/// Generate per-stage twiddle factor tables for a mixed-radix DIT FFT.
+///
+/// # Arguments
+///
+/// * `n` - Total transform size.
+/// * `factors` - Ordered list of radices, innermost (smallest sub-problem) first.
+///   The product of all factors must equal `n`.
+/// * `direction` - `Forward` produces W_n^k = exp(-2πi k/n);
+///   `Inverse` produces conjugates W_n^(-k) = exp(+2πi k/n).
+///
+/// # Returns
+///
+/// A `Vec` of per-stage twiddle tables, one entry per stage.  For stage `t`
+/// with radix `r_t`, current partial size `current_n = r_0 * … * r_t`, and
+/// stride `stride = current_n / r_t`:
+///
+/// ```text
+/// table.len() == (r_t - 1) * stride
+/// table[(j - 1) * stride + s] = W_{current_n}^{j * s}
+///   for j in 1..r_t, s in 0..stride
+/// ```
+///
+/// Stage 0 (innermost) always has `stride = 1`, so all twiddles equal 1 and
+/// the table is a `Vec` of `(r_0 - 1)` ones.
+///
+/// # Panics
+///
+/// Panics if `factors` is empty or if `factors.iter().product::<u16>() as usize != n`.
+#[must_use]
+pub fn twiddles_mixed_radix(
+    n: usize,
+    factors: &[u16],
+    direction: TwiddleDirection,
+) -> Vec<Vec<Complex<f64>>> {
+    assert!(
+        !factors.is_empty(),
+        "twiddles_mixed_radix: factors must be non-empty"
+    );
+    let product: usize = factors.iter().map(|&r| r as usize).product();
+    assert_eq!(
+        product, n,
+        "twiddles_mixed_radix: product of factors ({product}) must equal n ({n})"
+    );
+
+    let sign = match direction {
+        TwiddleDirection::Forward => -1.0_f64,
+        TwiddleDirection::Inverse => 1.0_f64,
+    };
+
+    let mut tables: Vec<Vec<Complex<f64>>> = Vec::with_capacity(factors.len());
+    let mut current_n: usize = 1;
+
+    for &r_u16 in factors {
+        let r = r_u16 as usize;
+        // After processing this radix, the current partial DFT size becomes r * current_n.
+        // But for the twiddle generation, the base is the NEW current_n after this radix.
+        current_n *= r;
+        // stride = current_n / r  (elements per "column" in the current DIT stage)
+        let stride = current_n / r;
+        // Table size: (r - 1) * stride entries
+        let table_len = (r - 1) * stride;
+        let mut table = Vec::with_capacity(table_len);
+
+        // twiddles[(j-1)*stride + s] = exp(sign * 2πi * j * s / current_n)
+        //   for j in 1..r, s in 0..stride
+        for j in 1..r {
+            for s in 0..stride {
+                let angle = sign * 2.0 * core::f64::consts::PI * (j * s) as f64 / current_n as f64;
+                table.push(Complex::new(angle.cos(), angle.sin()));
+            }
         }
 
-        // SoA values should match the AoS table
-        let aos = get_twiddle_table_f64(n, TwiddleDirection::Forward);
-        for k in 0..n {
-            assert!(
-                (soa.re[k] - aos.factors[k].re).abs() < 1e-14,
-                "SoA re[{k}]={} != AoS re={}",
-                soa.re[k],
-                aos.factors[k].re
-            );
-            assert!(
-                (soa.im[k] - aos.factors[k].im).abs() < 1e-14,
-                "SoA im[{k}]={} != AoS im={}",
-                soa.im[k],
-                aos.factors[k].im
-            );
-        }
+        tables.push(table);
     }
+
+    tables
 }
+
+/// Generate per-stage twiddle factor tables for a mixed-radix DIT FFT (f32 variant).
+///
+/// Identical semantics to [`twiddles_mixed_radix`] but returns `f32` tables.
+///
+/// # Panics
+///
+/// Panics if `factors` is empty or if `factors.iter().product::<u16>() as usize != n`.
+#[must_use]
+pub fn twiddles_mixed_radix_f32(
+    n: usize,
+    factors: &[u16],
+    direction: TwiddleDirection,
+) -> Vec<Vec<Complex<f32>>> {
+    assert!(
+        !factors.is_empty(),
+        "twiddles_mixed_radix_f32: factors must be non-empty"
+    );
+    let product: usize = factors.iter().map(|&r| r as usize).product();
+    assert_eq!(
+        product, n,
+        "twiddles_mixed_radix_f32: product of factors ({product}) must equal n ({n})"
+    );
+
+    let sign = match direction {
+        TwiddleDirection::Forward => -1.0_f32,
+        TwiddleDirection::Inverse => 1.0_f32,
+    };
+
+    let mut tables: Vec<Vec<Complex<f32>>> = Vec::with_capacity(factors.len());
+    let mut current_n: usize = 1;
+
+    for &r_u16 in factors {
+        let r = r_u16 as usize;
+        current_n *= r;
+        let stride = current_n / r;
+        let table_len = (r - 1) * stride;
+        let mut table = Vec::with_capacity(table_len);
+
+        for j in 1..r {
+            for s in 0..stride {
+                let angle = sign * 2.0 * core::f32::consts::PI * (j * s) as f32 / current_n as f32;
+                table.push(Complex::new(angle.cos(), angle.sin()));
+            }
+        }
+
+        tables.push(table);
+    }
+
+    tables
+}
+
+#[cfg(test)]
+mod twiddle_tests;

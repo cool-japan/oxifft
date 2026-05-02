@@ -58,7 +58,12 @@ const WISDOM_LEGACY_HEADER: &str = "oxifft-wisdom-1.0";
 ///
 /// Increment this constant when the serialisation format changes in a
 /// backwards-incompatible way.
-pub const WISDOM_FORMAT_VERSION: u32 = 1;
+///
+/// Version history:
+/// - 1: Initial format. MixedRadix solver stored as literal `"MixedRadix"` (stub, unimplemented).
+/// - 2: MixedRadix encoded as `"mixed-radix-R1-R2-..."` (innermost-first factor sequence).
+///   The planner now selects MixedRadix for smooth-7 composite sizes.
+pub const WISDOM_FORMAT_VERSION: u32 = 2;
 
 // ─── Result types ────────────────────────────────────────────────────────────
 
@@ -803,6 +808,219 @@ impl std::error::Error for WisdomError {}
 impl From<std::io::Error> for WisdomError {
     fn from(e: std::io::Error) -> Self {
         Self::IoError(e)
+    }
+}
+
+// ─── Binary wisdom format ─────────────────────────────────────────────────────
+
+/// Magic bytes that identify an OxiFFT binary wisdom file.
+const BINARY_MAGIC: &[u8; 8] = b"OXIWISDM";
+
+/// Binary format version (separate from the S-expr `WISDOM_FORMAT_VERSION`).
+const BINARY_FORMAT_VERSION: u16 = 1;
+
+/// Binary entry size in bytes.
+/// Layout: u64 size_key + u8 algo_tag + u8 factors_len + [u16; 6] factors + u64 elapsed_ns
+/// = 8 + 1 + 1 + 12 + 8 = 30 bytes
+const BINARY_ENTRY_SIZE: usize = 30;
+
+/// Algorithm tag discriminants for the binary format (stable across versions).
+/// 0=CooleyTukey  1=SplitRadix  2=Stockham  3=Bluestein  4=Rader
+/// 5=MixedRadix   6=Winograd    7=Direct    8=Generic    9=Composite
+/// 10=Nop         255=Unknown
+const ALGO_TAG_COOLEY_TUKEY: u8 = 0;
+const ALGO_TAG_SPLIT_RADIX: u8 = 1;
+const ALGO_TAG_STOCKHAM: u8 = 2;
+const ALGO_TAG_BLUESTEIN: u8 = 3;
+const ALGO_TAG_RADER: u8 = 4;
+const ALGO_TAG_MIXED_RADIX: u8 = 5;
+const ALGO_TAG_WINOGRAD: u8 = 6;
+const ALGO_TAG_DIRECT: u8 = 7;
+const ALGO_TAG_GENERIC: u8 = 8;
+const ALGO_TAG_COMPOSITE: u8 = 9;
+const ALGO_TAG_NOP: u8 = 10;
+const ALGO_TAG_UNKNOWN: u8 = 255;
+
+/// Derive an algorithm tag byte from a solver name string.
+fn algo_tag_from_solver_name(name: &str) -> (u8, [u16; 6], u8) {
+    if let Some(suffix) = name.strip_prefix("mixed-radix-") {
+        // Parse factors from "mixed-radix-R1-R2-..."
+        let mut factors = [0u16; 6];
+        let mut count = 0u8;
+        for (i, part) in suffix.split('-').enumerate() {
+            if i >= 6 {
+                break;
+            }
+            if let Ok(r) = part.parse::<u16>() {
+                factors[i] = r;
+                count += 1;
+            }
+        }
+        return (ALGO_TAG_MIXED_RADIX, factors, count);
+    }
+    let tag = match name {
+        "ct-dit" | "ct-dif" | "ct-radix4" | "ct-radix8" => ALGO_TAG_COOLEY_TUKEY,
+        "ct-splitradix" => ALGO_TAG_SPLIT_RADIX,
+        "stockham" => ALGO_TAG_STOCKHAM,
+        "bluestein" => ALGO_TAG_BLUESTEIN,
+        "rader" => ALGO_TAG_RADER,
+        "winograd" | "winograd-pfa" => ALGO_TAG_WINOGRAD,
+        "direct" => ALGO_TAG_DIRECT,
+        "generic" | "cache-oblivious" => ALGO_TAG_GENERIC,
+        "composite" => ALGO_TAG_COMPOSITE,
+        "nop" => ALGO_TAG_NOP,
+        // CooleyTukey variants that include parentheses in name
+        n if n.starts_with("CooleyTukey") => ALGO_TAG_COOLEY_TUKEY,
+        n if n.starts_with("Winograd") => ALGO_TAG_WINOGRAD,
+        _ => ALGO_TAG_UNKNOWN,
+    };
+    (tag, [0u16; 6], 0)
+}
+
+/// Recover a solver name from an algorithm tag and factors.
+fn solver_name_from_algo_tag(tag: u8, factors: &[u16; 6], factors_len: u8) -> String {
+    match tag {
+        ALGO_TAG_COOLEY_TUKEY => "ct-dit".to_string(),
+        ALGO_TAG_SPLIT_RADIX => "ct-splitradix".to_string(),
+        ALGO_TAG_STOCKHAM => "stockham".to_string(),
+        ALGO_TAG_BLUESTEIN => "bluestein".to_string(),
+        ALGO_TAG_RADER => "rader".to_string(),
+        ALGO_TAG_MIXED_RADIX => {
+            let count = (factors_len as usize).min(6);
+            let parts: Vec<String> = factors[..count].iter().map(|r| r.to_string()).collect();
+            format!("mixed-radix-{}", parts.join("-"))
+        }
+        ALGO_TAG_WINOGRAD => "winograd".to_string(),
+        ALGO_TAG_DIRECT => "direct".to_string(),
+        ALGO_TAG_GENERIC => "generic".to_string(),
+        ALGO_TAG_COMPOSITE => "composite".to_string(),
+        ALGO_TAG_NOP => "nop".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+impl WisdomCache {
+    /// Serialize the wisdom cache to a compact binary blob.
+    ///
+    /// Binary header (16 bytes):
+    /// - `OXIWISDM` magic (8 bytes)
+    /// - format_version: u16 LE = 1
+    /// - entry_count: u16 LE
+    /// - reserved: u32 LE = 0
+    ///
+    /// Each entry is exactly 30 bytes (all LE):
+    /// - size_key: u64 (= problem_hash, which encodes the transform size)
+    /// - algo_tag: u8
+    /// - factors_len: u8
+    /// - factors: [u16; 6]
+    /// - elapsed_ns: u64 (= cost cast to u64)
+    #[must_use]
+    pub fn to_binary(&self) -> Vec<u8> {
+        let entry_count = self.entries.len().min(u16::MAX as usize);
+        let mut buf = Vec::with_capacity(16 + entry_count * BINARY_ENTRY_SIZE);
+
+        // Header
+        buf.extend_from_slice(BINARY_MAGIC);
+        buf.extend_from_slice(&BINARY_FORMAT_VERSION.to_le_bytes());
+        buf.extend_from_slice(&(entry_count as u16).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
+
+        // Entries
+        for entry in self.entries.values().take(entry_count) {
+            let (tag, factors, factors_len) = algo_tag_from_solver_name(&entry.solver_name);
+            let elapsed_ns = entry.cost as u64;
+
+            buf.extend_from_slice(&entry.problem_hash.to_le_bytes());
+            buf.push(tag);
+            buf.push(factors_len);
+            for f in &factors {
+                buf.extend_from_slice(&f.to_le_bytes());
+            }
+            buf.extend_from_slice(&elapsed_ns.to_le_bytes());
+        }
+
+        buf
+    }
+
+    /// Deserialize wisdom from a binary blob produced by `to_binary`.
+    ///
+    /// Returns `None` if the magic bytes or format version do not match,
+    /// or if the data is truncated.
+    #[must_use]
+    pub fn from_binary(data: &[u8]) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+
+        // Validate magic
+        if &data[..8] != BINARY_MAGIC {
+            return None;
+        }
+
+        let version = u16::from_le_bytes([data[8], data[9]]);
+        if version != BINARY_FORMAT_VERSION {
+            return None;
+        }
+
+        let entry_count = u16::from_le_bytes([data[10], data[11]]) as usize;
+        // bytes 12..16 are reserved
+
+        let expected_len = 16 + entry_count * BINARY_ENTRY_SIZE;
+        if data.len() < expected_len {
+            return None;
+        }
+
+        let mut cache = WisdomCache::new();
+        for i in 0..entry_count {
+            let offset = 16 + i * BINARY_ENTRY_SIZE;
+            let entry_bytes = &data[offset..offset + BINARY_ENTRY_SIZE];
+
+            let size_key = u64::from_le_bytes([
+                entry_bytes[0],
+                entry_bytes[1],
+                entry_bytes[2],
+                entry_bytes[3],
+                entry_bytes[4],
+                entry_bytes[5],
+                entry_bytes[6],
+                entry_bytes[7],
+            ]);
+            let algo_tag = entry_bytes[8];
+            let factors_len = entry_bytes[9];
+            let factors: [u16; 6] = [
+                u16::from_le_bytes([entry_bytes[10], entry_bytes[11]]),
+                u16::from_le_bytes([entry_bytes[12], entry_bytes[13]]),
+                u16::from_le_bytes([entry_bytes[14], entry_bytes[15]]),
+                u16::from_le_bytes([entry_bytes[16], entry_bytes[17]]),
+                u16::from_le_bytes([entry_bytes[18], entry_bytes[19]]),
+                u16::from_le_bytes([entry_bytes[20], entry_bytes[21]]),
+            ];
+            let elapsed_ns = u64::from_le_bytes([
+                entry_bytes[22],
+                entry_bytes[23],
+                entry_bytes[24],
+                entry_bytes[25],
+                entry_bytes[26],
+                entry_bytes[27],
+                entry_bytes[28],
+                entry_bytes[29],
+            ]);
+
+            let solver_name = solver_name_from_algo_tag(algo_tag, &factors, factors_len);
+            cache.store(WisdomEntry {
+                problem_hash: size_key,
+                solver_name,
+                cost: elapsed_ns as f64,
+            });
+        }
+
+        Some(cache)
+    }
+
+    /// Return the number of entries (alias for `len` — used by CLI tooling).
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 }
 

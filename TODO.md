@@ -1003,7 +1003,12 @@ None. This is the stable release.
 ### Performance (v1.1+)
 - [x] Match FFTW performance (1.0×) for power-of-2 sizes via deeper codelet tuning
 - [x] Exceed FFTW for composite sizes via Rust-specific optimizations
-- [ ] Implement auto-tuning (runtime codelet selection profiled at build time)
+- [x] Implement auto-tuning (runtime codelet selection profiled at build time) (planned 2026-05-01)
+  - **Goal:** Build-time + runtime auto-tuning profiling candidate algorithms (CT-Dit, SplitRadix, Stockham, MixedRadix, Bluestein, Winograd, Direct) for sizes 2..=4096; picks fastest per size on host; persists to WisdomCache. Wires Flags::MEASURE and Flags::PATIENT into Plan::select_algorithm (currently ignored).
+  - **Design:** Two-tier: (1) static tuning via build.rs opt-in (OXIFFT_TUNE=1), binary wisdom_baseline.bin in OUT_DIR; (2) dynamic tuning at runtime when Flags::MEASURE. Core in auto_tune.rs: tune_size<T>(n, max_iters) → WisdomEntry, tune_range<T>(min_n, max_n, on_progress) → WisdomCache. Binary format: header (magic + u16 version + u16 count + u32 reserved) + 30-byte repr(packed) entries (u64 hash_key, u8 algo_tag, u8 factors_len, [u16;6] factors, u64 elapsed_ns), explicit LE bytes, no bincode.
+  - **Files:** auto_tune.rs (~600 LoC), types.rs (Flags plumbing + wisdom lookup), wisdom.rs (binary to_le_bytes/from_le_bytes), build.rs (extend stub ~200 LoC), oxifft_tune.rs (extend stub ~150 LoC)
+  - **Tests:** tune_size(64) returns valid WisdomEntry in candidate set; tune_range(2..=32) covers 31 sizes; binary round-trip; ESTIMATE vs MEASURE behavior; OXIFFT_SKIP_TUNE=1 sentinel path.
+  - **Risk:** Build-script compile time (mitigated: default OFF, OXIFFT_TUNE env gate); cross-compile (mitigated: CARGO_CFG_TARGET_ARCH != HOST_ARCH sentinel); wisdom cache thread safety (OnceLock + RwLock).
 - [ ] AVX-512 BF16 support for ML workloads
 
 ### GPU (v1.2+)
@@ -1016,14 +1021,14 @@ None. This is the stable release.
 ### Algorithms (v1.3+)
 - [x] Sliding DFT for real-time streaming (SlidingDft, ModulatedSdft, SingleBinTracker in streaming/sdft.rs)
 - [x] Number Theoretic Transform (NTT) for exact integer arithmetic (ntt/ module with 3 primes, polynomial convolution)
-- [ ] Winograd FFT for minimum-multiplication small sizes
-- [ ] Partial FFT (compute only selected output frequencies)
-- [ ] Chirp Z-Transform generalization for arbitrary frequency grids
+- [x] Winograd FFT for minimum-multiplication small sizes
+- [x] Partial FFT (compute only selected output frequencies)
+- [x] Chirp Z-Transform generalization for arbitrary frequency grids
 
 ### Ecosystem (v1.x+)
 - [ ] C API (`oxifft-sys`) for use from C/C++/Python/Julia
 - [ ] Python bindings (`oxifft-python`) via PyO3
-- [ ] ndarray integration (`compute FFT of ndarray::Array directly`)
+- [x] ndarray integration (`compute FFT of ndarray::Array directly`)
 - [ ] Apache Arrow columnar data FFT
 - [ ] ONNX operator implementation for ML frameworks
 

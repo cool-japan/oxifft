@@ -11,8 +11,15 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+pub use gen_any::{classify, CodegenError, CodeletBuilder, SizeClass};
+
+pub mod gen_any;
+pub mod gen_mixed_radix;
 pub mod gen_notw;
+pub mod gen_odd;
+pub mod gen_rader;
 pub mod gen_rdft;
 pub mod gen_simd;
 pub mod gen_twiddle;
 pub mod symbolic;
+pub mod winograd_constants;

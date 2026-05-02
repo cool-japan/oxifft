@@ -34,7 +34,7 @@ pub struct WisdomEntry {
 }
 
 /// Solver selection strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SolverChoice {
     /// No-op for size 0 or 1
@@ -63,10 +63,18 @@ pub enum SolverChoice {
     Rader,
     /// Cache-oblivious four-step FFT for large power-of-2 sizes
     CacheOblivious,
+    /// Mixed-radix DIT FFT for smooth-7 composite sizes.
+    ///
+    /// `factors` is ordered innermost-first; the product equals the transform size.
+    MixedRadix { factors: Vec<u16> },
 }
 
 impl SolverChoice {
-    /// Get solver name for wisdom storage.
+    /// Short, static solver identifier (used for display and non-wisdom purposes).
+    ///
+    /// For `MixedRadix`, returns the generic tag `"mixed-radix"`.
+    /// Use [`SolverChoice::wisdom_name`] when encoding to wisdom strings,
+    /// since that method includes the factor sequence.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
@@ -83,6 +91,22 @@ impl SolverChoice {
             Self::Bluestein => "bluestein",
             Self::Rader => "rader",
             Self::CacheOblivious => "cache-oblivious",
+            Self::MixedRadix { .. } => "mixed-radix",
+        }
+    }
+
+    /// Wisdom-safe solver name that encodes all solver parameters.
+    ///
+    /// For `MixedRadix { factors: [3, 2] }` this returns `"mixed-radix-3-2"`.
+    /// For all other variants, identical to [`Self::name`].
+    #[must_use]
+    pub fn wisdom_name(&self) -> String {
+        match self {
+            Self::MixedRadix { factors } => {
+                let suffix: Vec<String> = factors.iter().map(|r| r.to_string()).collect();
+                format!("mixed-radix-{}", suffix.join("-"))
+            }
+            other => other.name().to_string(),
         }
     }
 }
@@ -165,14 +189,14 @@ impl<T: Float> Planner<T> {
         }
 
         if candidates.len() == 1 {
-            return candidates[0];
+            return candidates.into_iter().next().unwrap_or(SolverChoice::Nop);
         }
 
         // Benchmark each candidate and find the fastest
         let (best_solver, best_time) = self.benchmark_solvers(n, &candidates);
 
         // Store in wisdom
-        self.remember(n, best_solver, best_time);
+        self.remember(n, best_solver.clone(), best_time);
 
         best_solver
     }
@@ -238,7 +262,10 @@ impl<T: Float> Planner<T> {
         if candidates.len() == 1 {
             let elapsed = start.elapsed();
             let remaining = time_limit.saturating_sub(elapsed);
-            return (candidates[0], remaining);
+            return (
+                candidates.into_iter().next().unwrap_or(SolverChoice::Nop),
+                remaining,
+            );
         }
 
         // Benchmark with time limit
@@ -250,7 +277,7 @@ impl<T: Float> Planner<T> {
 
         // Store in wisdom if we benchmarked at least one solver
         if benchmarked_count > 0 {
-            self.remember(n, best_solver, best_time);
+            self.remember(n, best_solver.clone(), best_time);
         }
 
         let elapsed = start.elapsed();
@@ -273,7 +300,7 @@ impl<T: Float> Planner<T> {
         use std::time::Instant;
 
         let start = Instant::now();
-        let mut best_solver = candidates[0];
+        let mut best_solver = candidates[0].clone();
         let mut best_time = f64::MAX;
         let mut benchmarked_count = 0;
 
@@ -295,13 +322,14 @@ impl<T: Float> Planner<T> {
             .collect();
         let mut output = vec![Complex::<T>::zero(); n];
 
-        for &solver in candidates {
+        for solver in candidates.iter().cloned() {
             // Check if time limit exceeded
             if start.elapsed() >= time_limit {
                 break;
             }
 
-            let time = self.benchmark_single_solver(n, solver, &input, &mut output, iterations);
+            let time =
+                self.benchmark_single_solver(n, solver.clone(), &input, &mut output, iterations);
             benchmarked_count += 1;
 
             if time < best_time {
@@ -378,8 +406,13 @@ impl<T: Float> Planner<T> {
             candidates.push(SolverChoice::Direct);
         }
 
-        // Composite (smooth) sizes: try generic mixed-radix
+        // Composite (smooth) sizes: try generic mixed-radix and the new MixedRadix engine.
+        // For smooth-7 sizes that the MixedRadix DIT engine can handle, push both
+        // candidates so MEASURE/PATIENT/EXHAUSTIVE modes actually compare them.
         if is_smooth(n, 7) {
+            if let Some(factors) = try_factor_mixed_radix_heuristic(n) {
+                candidates.push(SolverChoice::MixedRadix { factors });
+            }
             candidates.push(SolverChoice::Generic);
         } else if patient_or_exhaustive && is_smooth(n, 13) {
             // PATIENT mode: consider slightly larger prime factors
@@ -406,7 +439,7 @@ impl<T: Float> Planner<T> {
     /// Benchmark all candidate solvers and return the fastest.
     #[cfg(feature = "std")]
     fn benchmark_solvers(&self, n: usize, candidates: &[SolverChoice]) -> (SolverChoice, f64) {
-        let mut best_solver = candidates[0];
+        let mut best_solver = candidates[0].clone();
         let mut best_time = f64::MAX;
 
         // Number of benchmark iterations depends on planning mode and size
@@ -435,8 +468,9 @@ impl<T: Float> Planner<T> {
             .collect();
         let mut output = vec![Complex::<T>::zero(); n];
 
-        for &solver in candidates {
-            let time = self.benchmark_single_solver(n, solver, &input, &mut output, iterations);
+        for solver in candidates.iter().cloned() {
+            let time =
+                self.benchmark_single_solver(n, solver.clone(), &input, &mut output, iterations);
             if time < best_time {
                 best_time = time;
                 best_solver = solver;
@@ -459,12 +493,12 @@ impl<T: Float> Planner<T> {
         use std::time::Instant;
 
         // Warm up
-        self.execute_solver(n, solver, input, output);
+        self.execute_solver(n, &solver, input, output);
 
         // Measure
         let start = Instant::now();
         for _ in 0..iterations {
-            self.execute_solver(n, solver, input, output);
+            self.execute_solver(n, &solver, input, output);
         }
         let elapsed = start.elapsed();
 
@@ -476,7 +510,7 @@ impl<T: Float> Planner<T> {
     fn execute_solver(
         &self,
         n: usize,
-        solver: SolverChoice,
+        solver: &SolverChoice,
         input: &[Complex<T>],
         output: &mut [Complex<T>],
     ) {
@@ -540,6 +574,20 @@ impl<T: Float> Planner<T> {
                 let s = CacheObliviousSolver::<T>::new();
                 s.execute(input, output, Sign::Forward);
             }
+            SolverChoice::MixedRadix { factors } => {
+                // Delegate to the types.rs executor via the public Plan API.
+                // This path is used only in benchmark/measure mode, so the
+                // allocation overhead is acceptable.
+                use crate::api::{Direction, Flags, Plan};
+                if let Some(plan) = Plan::<T>::dft_1d(n, Direction::Forward, Flags::ESTIMATE) {
+                    plan.execute(input, output);
+                    let _ = factors; // factors already encoded in the plan
+                } else {
+                    // Fallback (should never happen for valid n)
+                    let s = BluesteinSolver::<T>::new(n);
+                    s.execute(input, output, Sign::Forward);
+                }
+            }
         }
     }
 
@@ -572,7 +620,14 @@ impl<T: Float> Planner<T> {
             return SolverChoice::Direct;
         }
 
-        // Check if n has small prime factors (composite)
+        // Mixed-radix DIT for smooth-7 sizes expressible with radices {2,3,4,5,7,8,16}.
+        // Checked before Generic because MixedRadix has lower constant than GenericSolver.
+        if let Some(factors) = try_factor_mixed_radix_heuristic(n) {
+            return SolverChoice::MixedRadix { factors };
+        }
+
+        // Generic mixed-radix for remaining composite sizes (smooth-7 that require
+        // prime-factoring into {2,3,5,7} but don't map to supported-radix groups).
         if is_smooth(n, 7) {
             return SolverChoice::Generic;
         }
@@ -592,7 +647,7 @@ impl<T: Float> Planner<T> {
     /// Estimate the cost (operation count) for a solver on size n.
     #[cfg(feature = "std")]
     #[must_use]
-    pub fn estimate_cost(&self, n: usize, solver: SolverChoice) -> f64 {
+    pub fn estimate_cost(&self, n: usize, solver: &SolverChoice) -> f64 {
         match solver {
             SolverChoice::Nop => 0.0,
             SolverChoice::Direct => (n * n) as f64 * 4.0, // 4 ops per element pair
@@ -650,6 +705,20 @@ impl<T: Float> Planner<T> {
                 let log_n = (n as f64).log2();
                 n as f64 * log_n * 4.8 + n as f64 * 2.0 // +2n for transpose
             }
+            SolverChoice::MixedRadix { factors } => {
+                // Mixed-radix DIT: O(n log n) with constant slightly lower than Generic,
+                // because the twiddle butterflies are unrolled for each radix.
+                // Cost model: ~5.5 * n * log2(n) amortized across all stages.
+                if factors.is_empty() {
+                    return f64::INFINITY;
+                }
+                let stages = factors.len() as f64;
+                // n * average_ops_per_stage; each stage is O(r_i) ops per element.
+                // Use geometric-mean radix as a proxy for per-stage cost.
+                let geom_radix: f64 =
+                    factors.iter().map(|&r| (r as f64).ln()).sum::<f64>() / stages;
+                n as f64 * geom_radix.exp() * stages * 1.2
+            }
         }
     }
 
@@ -668,7 +737,7 @@ impl<T: Float> Planner<T> {
     pub fn remember(&mut self, n: usize, solver: SolverChoice, cost: f64) {
         let entry = WisdomEntry {
             problem_hash: hash_size(n),
-            solver_name: solver.name().to_string(),
+            solver_name: solver.wisdom_name(),
             cost,
         };
         self.wisdom_store(entry);
@@ -831,6 +900,34 @@ fn hash_size(n: usize) -> u64 {
     h
 }
 
+/// Supported radices for the mixed-radix DIT engine (largest first for greedy factoring).
+const MIXED_RADIX_SUPPORTED: &[u16] = &[16, 8, 7, 5, 4, 3, 2];
+
+/// Try to factor `n` as a product of radices in `MIXED_RADIX_SUPPORTED`.
+///
+/// Returns `Some(factors)` ordered innermost-first, or `None` if not possible.
+fn try_factor_mixed_radix_heuristic(n: usize) -> Option<Vec<u16>> {
+    if n <= 1 {
+        return None;
+    }
+    let mut remaining = n;
+    let mut factors: Vec<u16> = Vec::new();
+
+    'outer: while remaining > 1 {
+        for &r in MIXED_RADIX_SUPPORTED {
+            if remaining % r as usize == 0 {
+                factors.push(r);
+                remaining /= r as usize;
+                continue 'outer;
+            }
+        }
+        return None;
+    }
+
+    factors.reverse(); // innermost-first
+    Some(factors)
+}
+
 /// Check if n only has prime factors <= max_factor.
 fn is_smooth(n: usize, max_factor: usize) -> bool {
     let mut n = n;
@@ -882,7 +979,18 @@ fn solver_from_name(name: &str) -> SolverChoice {
         "bluestein" => SolverChoice::Bluestein,
         "rader" => SolverChoice::Rader,
         "cache-oblivious" => SolverChoice::CacheOblivious,
-        _ => SolverChoice::Bluestein, // Safe fallback
+        _ if name.starts_with("mixed-radix-") => {
+            // Parse "mixed-radix-3-2" → factors = [3, 2]
+            let suffix = &name["mixed-radix-".len()..];
+            let factors: Option<Vec<u16>> =
+                suffix.split('-').map(|s| s.parse::<u16>().ok()).collect();
+            match factors {
+                Some(f) if !f.is_empty() => SolverChoice::MixedRadix { factors: f },
+                _ => SolverChoice::Bluestein, // malformed wisdom entry → safe fallback
+            }
+        }
+        // Legacy/unknown names → Bluestein as safe fallback
+        _ => SolverChoice::Bluestein,
     }
 }
 
@@ -959,8 +1067,8 @@ impl<T: Float> Planner<T> {
         // Determine the best batch execution strategy
         let strategy = self.select_batch_strategy(n, howmany, istride, idist);
 
-        // Estimate the total cost
-        let base_cost = self.estimate_cost(n, solver);
+        // Estimate the total cost (borrow solver to avoid move-before-struct-literal)
+        let base_cost = self.estimate_cost(n, &solver);
         let batch_cost = self.estimate_batch_cost(n, howmany, istride, idist, strategy);
         let cost = base_cost * howmany as f64 + batch_cost;
 
@@ -1104,8 +1212,14 @@ mod tests {
         assert_eq!(planner.select_solver(18), SolverChoice::Composite); // 2*3² (has codelet)
         assert_eq!(planner.select_solver(60), SolverChoice::Composite); // 2²*3*5 (has codelet)
         assert_eq!(planner.select_solver(100), SolverChoice::Composite); // 2²*5² (has codelet)
-                                                                         // Sizes without codelets fall back to Generic
-        assert_eq!(planner.select_solver(27), SolverChoice::Generic); // 3³ (no codelet)
+                                                                         // Sizes without codelets: MixedRadix handles smooth-7 sizes expressible
+                                                                         // with radices {2,3,4,5,7,8,16}; Generic handles the rest.
+        assert_eq!(
+            planner.select_solver(27),
+            SolverChoice::MixedRadix {
+                factors: vec![3, 3, 3]
+            }
+        ); // 3³ = MixedRadix [3,3,3]
     }
 
     #[test]
@@ -1150,15 +1264,15 @@ mod tests {
         let planner = Planner::<f64>::new();
 
         // Nop should be zero cost
-        assert_eq!(planner.estimate_cost(1, SolverChoice::Nop), 0.0);
+        assert_eq!(planner.estimate_cost(1, &SolverChoice::Nop), 0.0);
 
         // Direct should be O(n²)
-        let direct_cost = planner.estimate_cost(100, SolverChoice::Direct);
+        let direct_cost = planner.estimate_cost(100, &SolverChoice::Direct);
         assert!(direct_cost > 10000.0); // n² = 10000
 
         // CT should be O(n log n), much less than O(n²)
-        let ct_cost = planner.estimate_cost(1024, SolverChoice::CooleyTukeyDit);
-        let direct_large = planner.estimate_cost(1024, SolverChoice::Direct);
+        let ct_cost = planner.estimate_cost(1024, &SolverChoice::CooleyTukeyDit);
+        let direct_large = planner.estimate_cost(1024, &SolverChoice::Direct);
         assert!(ct_cost < direct_large / 10.0); // Should be much faster
     }
 
@@ -1285,11 +1399,14 @@ mod tests {
     fn test_measure_mode_composite() {
         let mut planner = Planner::<f64>::with_flags(PlannerFlags::MEASURE);
 
-        // For smooth composite, should benchmark Generic and Bluestein
+        // For smooth composite (60 = 2²×3×5), should benchmark MixedRadix, Generic, and Bluestein.
+        // MixedRadix is now in the candidate set for smooth-7 sizes and may win the benchmark.
         let solver = planner.select_solver_measured(60); // 2^2 * 3 * 5
         assert!(
-            solver == SolverChoice::Generic || solver == SolverChoice::Bluestein,
-            "Expected Generic or Bluestein, got {solver:?}"
+            solver == SolverChoice::Generic
+                || solver == SolverChoice::Bluestein
+                || matches!(solver, SolverChoice::MixedRadix { .. }),
+            "Expected Generic, Bluestein, or MixedRadix, got {solver:?}"
         );
 
         assert_eq!(planner.wisdom_count(), 1);
@@ -1457,6 +1574,34 @@ mod tests {
             let name = choice.name();
             let recovered = solver_from_name(name);
             assert_eq!(*choice, recovered, "Failed roundtrip for {choice:?}");
+        }
+    }
+
+    #[test]
+    fn test_mixed_radix_wisdom_name_roundtrip() {
+        // MixedRadix uses wisdom_name() (not name()) for wisdom storage.
+        // Verify the round-trip: wisdom_name() → solver_from_name() recovers the original.
+        let cases = [
+            (vec![3u16, 2], "mixed-radix-3-2"),
+            (vec![3, 3, 3], "mixed-radix-3-3-3"),
+            (vec![2, 5, 7], "mixed-radix-2-5-7"),
+            (vec![16, 3], "mixed-radix-16-3"),
+        ];
+
+        for (factors, expected_wisdom_name) in &cases {
+            let choice = SolverChoice::MixedRadix {
+                factors: factors.clone(),
+            };
+            let wname = choice.wisdom_name();
+            assert_eq!(
+                wname, *expected_wisdom_name,
+                "wisdom_name mismatch for factors {factors:?}"
+            );
+            let recovered = solver_from_name(&wname);
+            assert_eq!(
+                recovered, choice,
+                "solver_from_name round-trip failed for {expected_wisdom_name}"
+            );
         }
     }
 

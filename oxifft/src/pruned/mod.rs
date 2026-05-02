@@ -33,10 +33,14 @@
 
 mod input_pruned;
 mod output_pruned;
+pub mod partial;
+#[cfg(test)]
+mod partial_tests;
 mod plan;
 
 pub use input_pruned::fft_pruned_input;
 pub use output_pruned::fft_pruned_output;
+pub use partial::{PartialFft, PartialStrategy};
 pub use plan::{PrunedPlan, PruningMode};
 
 use crate::kernel::{Complex, Float};

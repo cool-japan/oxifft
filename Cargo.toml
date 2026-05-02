@@ -4,7 +4,7 @@ members = ["oxifft", "oxifft-codegen", "oxifft-codegen-impl", "oxifft-bench"]
 exclude = ["oxifft/fuzz"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["COOLJAPAN OU (Team KitaSan)"]
 license = "Apache-2.0"
@@ -45,7 +45,7 @@ quote = "1.0"
 syn = { version = "2.0", features = ["full", "parsing"] }
 
 # Internal codegen logic (not proc-macro)
-oxifft-codegen-impl = { version = "0.3.0", path = "oxifft-codegen-impl" }
+oxifft-codegen-impl = { version = "0.3.1", path = "oxifft-codegen-impl" }
 
 # Testing
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -64,6 +64,9 @@ js-sys = "0.3"
 oxicuda-driver = { version = "0.1.4" }
 oxicuda-fft = { version = "0.1.4" }
 oxicuda-metal = { version = "0.1.4" }
+
+# ndarray integration (opt-in via ndarray feature)
+ndarray = "0.17.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

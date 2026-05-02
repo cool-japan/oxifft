@@ -142,8 +142,13 @@ pub mod threading;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+// ndarray integration (opt-in via `ndarray` cargo feature)
+#[cfg(feature = "ndarray")]
+pub mod integrations;
+
 // Advanced FFT transforms
 pub mod autodiff;
+pub mod chirp_z;
 pub mod conv;
 #[cfg(feature = "std")]
 pub mod frft;
@@ -253,6 +258,9 @@ pub use ntt::{
 pub use autodiff::{
     fft_dual, fft_jacobian, grad_fft, grad_ifft, jvp_fft, vjp_fft, DiffFftPlan, Dual, DualComplex,
 };
+
+// Re-export Chirp-Z Transform
+pub use chirp_z::{CztError, CztPlan, CztResult};
 
 // Re-export signal processing when signal feature is enabled
 #[cfg(feature = "signal")]

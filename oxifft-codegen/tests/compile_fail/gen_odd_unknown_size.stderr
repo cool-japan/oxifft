@@ -1,0 +1,5 @@
+error: gen_odd_codelet: unsupported size 99 (expected one of 3, 5, 7)
+ --> tests/compile_fail/gen_odd_unknown_size.rs:3:18
+  |
+3 | gen_odd_codelet!(99);
+  |                  ^^

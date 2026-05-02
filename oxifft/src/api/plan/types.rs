@@ -6,12 +6,16 @@
 #![allow(clippy::manual_contains)] // reason: hand-written range checks are clearer than `.contains()` for multi-variant FFT size dispatching
 
 use crate::api::{Direction, Flags};
+use crate::dft::codelets::twiddle_odd::{
+    tw16_dit_bwd, tw16_dit_fwd, tw2_dit_bwd, tw2_dit_fwd, tw3_dit_bwd, tw3_dit_fwd, tw4_dit_bwd,
+    tw4_dit_fwd, tw5_dit_bwd, tw5_dit_fwd, tw7_dit_bwd, tw7_dit_fwd, tw8_dit_bwd, tw8_dit_fwd,
+};
 use crate::dft::problem::Sign;
 use crate::dft::solvers::{
     BluesteinSolver, CooleyTukeySolver, CtVariant, DirectSolver, GenericSolver, NopSolver,
     StockhamSolver,
 };
-use crate::kernel::{Complex, Float};
+use crate::kernel::{twiddles_mixed_radix, Complex, Float, TwiddleDirection};
 use crate::prelude::*;
 
 #[cfg(feature = "threading")]
@@ -45,7 +49,177 @@ enum Algorithm<T: Float> {
     Generic(Box<GenericSolver<T>>),
     /// Bluestein's algorithm for arbitrary sizes (fallback for primes)
     Bluestein(Box<BluesteinSolver<T>>),
+    /// Winograd small-prime kernel for N ∈ {3, 5, 7, 9, 11, 13}
+    Winograd(usize),
+    /// Prime Factor Algorithm (PFA) for coprime composites: N ∈ {15, 21, 35}
+    WinogradPfa { n1: usize, n2: usize },
+    /// Mixed-radix FFT for composite sizes (pre-wave stub)
+    MixedRadix { factors: Vec<u16> },
 }
+// ============================================================================
+// Mixed-radix helpers
+// ============================================================================
+
+/// Supported radices for the mixed-radix DIT engine, in preference order
+/// (largest first so the greedy peel produces the fewest stages).
+const MIXED_RADIX_SUPPORTED: &[u16] = &[16, 8, 7, 5, 4, 3, 2];
+
+/// Try to factor `n` as a product of supported radices {2, 3, 4, 5, 7, 8, 16}.
+///
+/// Returns `Some(factors)` ordered innermost-first (the first element is the
+/// innermost radix applied in the DIT pipeline), or `None` if `n` cannot be
+/// expressed using only the supported radices.
+///
+/// The greedy strategy peels the largest supported radix from the remaining
+/// value at each step; this minimises the number of stages and tends to favour
+/// SIMD-friendly butterflies.
+fn try_factor_mixed_radix(n: usize) -> Option<Vec<u16>> {
+    if n <= 1 {
+        return None; // size 0/1 handled by Nop
+    }
+    let mut remaining = n;
+    let mut factors: Vec<u16> = Vec::new();
+
+    'outer: while remaining > 1 {
+        for &r in MIXED_RADIX_SUPPORTED {
+            if remaining % r as usize == 0 {
+                factors.push(r);
+                remaining /= r as usize;
+                continue 'outer;
+            }
+        }
+        // No supported radix divides `remaining`
+        return None;
+    }
+
+    // Return factors in innermost-first order.
+    // The greedy loop produces them in outermost-first (largest peeled first),
+    // so we reverse.
+    factors.reverse();
+    Some(factors)
+}
+
+/// Apply the mixed-radix digit-reversal (scatter) permutation in-place.
+///
+/// For DIT with `factors` ordered innermost-first, consecutive blocks of
+/// `radix[0]` elements in the permuted array feed the first-stage butterfly.
+/// The permutation maps output index `k` to input index `digit_reverse(k)`.
+///
+/// The scatter is computed iteratively: for each stage factor (from outermost
+/// to innermost), we stride through the original indices to interleave.
+fn mixed_radix_digit_rev_permute<T: Float>(data: &mut [Complex<T>], factors: &[u16]) {
+    let n = data.len();
+    if n <= 1 || factors.len() <= 1 {
+        return;
+    }
+
+    // Build the permutation table by iteratively "unzipping" from outermost stage
+    // (last in innermost-first array) down to innermost.
+    let num_stages = factors.len();
+    let mut perm: Vec<usize> = (0..n).collect();
+
+    let mut stride = n;
+    for stage in (0..num_stages).rev() {
+        let r = factors[stage] as usize;
+        stride /= r;
+
+        // Reorder perm: interleave by stride so that consecutive groups of `r`
+        // are the input samples to each butterfly in this stage.
+        let mut new_perm = vec![0usize; n];
+        let blocks = n / (stride * r); // number of independent groups at this stage
+        for b in 0..blocks {
+            for j in 0..r {
+                for s in 0..stride {
+                    // Output position: b*r*stride + j*stride + s
+                    // Source position: b*r*stride + s*r + j
+                    let dst = b * r * stride + j * stride + s;
+                    let src = b * r * stride + s * r + j;
+                    new_perm[dst] = perm[src];
+                }
+            }
+        }
+        perm = new_perm;
+    }
+
+    // Apply the permutation using a cycle-following algorithm (avoids scratch alloc).
+    let mut visited = vec![false; n];
+    for start in 0..n {
+        if visited[start] || perm[start] == start {
+            visited[start] = true;
+            continue;
+        }
+        // Follow the cycle
+        let first = data[start];
+        let mut cur = start;
+        loop {
+            let next = perm[cur];
+            visited[cur] = true;
+            if next == start {
+                data[cur] = first;
+                break;
+            }
+            data[cur] = data[next];
+            cur = next;
+        }
+    }
+}
+
+/// Execute the mixed-radix DIT FFT in-place on `data`.
+///
+/// `factors` is ordered innermost-first. After digit-reversal permutation,
+/// each stage applies the corresponding twiddle butterfly.
+fn execute_mixed_radix_inplace<T: Float>(
+    data: &mut [Complex<T>],
+    factors: &[u16],
+    direction: TwiddleDirection,
+) {
+    let n = data.len();
+    // Step 1: digit-reversal permutation
+    mixed_radix_digit_rev_permute(data, factors);
+
+    // Step 2: generate twiddle tables
+    // We use f64 tables and convert, since T may be f32 or f64.
+    // The per-stage tables are indexed as: table[(j-1)*stride + s]
+    let tables_f64 = twiddles_mixed_radix(n, factors, direction);
+
+    // Step 3: apply butterfly stages
+    let mut current_n: usize = 1;
+    for (stage, (&r_u16, table_f64)) in factors.iter().zip(tables_f64.iter()).enumerate() {
+        let r = r_u16 as usize;
+        current_n *= r;
+        let stride = current_n / r;
+        let blocks = n / current_n;
+
+        // Convert f64 twiddles to T
+        let table: Vec<Complex<T>> = table_f64
+            .iter()
+            .map(|&w| Complex::new(T::from_f64(w.re), T::from_f64(w.im)))
+            .collect();
+
+        let _ = stage; // suppress unused warning
+
+        match (r, direction) {
+            (2, TwiddleDirection::Forward) => tw2_dit_fwd(data, &table, stride, blocks),
+            (2, TwiddleDirection::Inverse) => tw2_dit_bwd(data, &table, stride, blocks),
+            (3, TwiddleDirection::Forward) => tw3_dit_fwd(data, &table, stride, blocks),
+            (3, TwiddleDirection::Inverse) => tw3_dit_bwd(data, &table, stride, blocks),
+            (4, TwiddleDirection::Forward) => tw4_dit_fwd(data, &table, stride, blocks),
+            (4, TwiddleDirection::Inverse) => tw4_dit_bwd(data, &table, stride, blocks),
+            (5, TwiddleDirection::Forward) => tw5_dit_fwd(data, &table, stride, blocks),
+            (5, TwiddleDirection::Inverse) => tw5_dit_bwd(data, &table, stride, blocks),
+            (7, TwiddleDirection::Forward) => tw7_dit_fwd(data, &table, stride, blocks),
+            (7, TwiddleDirection::Inverse) => tw7_dit_bwd(data, &table, stride, blocks),
+            (8, TwiddleDirection::Forward) => tw8_dit_fwd(data, &table, stride, blocks),
+            (8, TwiddleDirection::Inverse) => tw8_dit_bwd(data, &table, stride, blocks),
+            (16, TwiddleDirection::Forward) => tw16_dit_fwd(data, &table, stride, blocks),
+            (16, TwiddleDirection::Inverse) => tw16_dit_bwd(data, &table, stride, blocks),
+            _ => unreachable!(
+                "execute_mixed_radix_inplace: unsupported radix {r} — only {{2,3,4,5,7,8,16}} supported"
+            ),
+        }
+    }
+}
+
 /// A plan for executing FFT transforms.
 ///
 /// Plans are created once and can be executed multiple times.
@@ -58,6 +232,87 @@ pub struct Plan<T: Float> {
     /// Selected algorithm
     algorithm: Algorithm<T>,
 }
+// ─── Solver-name → Algorithm reconstruction ───────────────────────────────────
+
+/// Attempt to reconstruct an [`Algorithm<T>`] from a stored solver name string.
+///
+/// Returns `None` when the name is unrecognised or the algorithm requires
+/// state that cannot be reconstructed from the name alone (e.g. `Generic`
+/// needs a `GenericSolver` which stores pre-computed twiddle tables).  The
+/// caller should fall back to heuristic planning in that case.
+fn algorithm_from_solver_name<T: Float>(name: &str, n: usize) -> Option<Algorithm<T>> {
+    use crate::dft::solvers::CtVariant;
+
+    match name {
+        "nop" => Some(Algorithm::Nop),
+        "direct" => Some(Algorithm::Direct),
+        "ct-dit" => Some(Algorithm::CooleyTukey(CtVariant::Dit)),
+        "ct-dif" => Some(Algorithm::CooleyTukey(CtVariant::Dif)),
+        "ct-radix4" => Some(Algorithm::CooleyTukey(CtVariant::DitRadix4)),
+        "ct-radix8" => Some(Algorithm::CooleyTukey(CtVariant::DitRadix8)),
+        "ct-splitradix" => Some(Algorithm::CooleyTukey(CtVariant::SplitRadix)),
+        "stockham" => Some(Algorithm::Stockham),
+        "composite" if crate::dft::codelets::has_composite_codelet(n) => {
+            Some(Algorithm::Composite(n))
+        }
+        "winograd" if matches!(n, 3 | 5 | 7 | 9 | 11 | 13) => Some(Algorithm::Winograd(n)),
+        "winograd-pfa" if matches!(n, 15 | 21 | 35) => {
+            let (n1, n2) = match n {
+                15 => (3, 5),
+                21 => (3, 7),
+                35 => (5, 7),
+                _ => return None,
+            };
+            Some(Algorithm::WinogradPfa { n1, n2 })
+        }
+        name if name.starts_with("mixed-radix-") => {
+            let suffix = &name["mixed-radix-".len()..];
+            let factors: Vec<u16> = suffix
+                .split('-')
+                .filter_map(|s| s.parse::<u16>().ok())
+                .collect();
+            if factors.is_empty() {
+                None
+            } else {
+                Some(Algorithm::MixedRadix { factors })
+            }
+        }
+        // Stateful solvers — cannot reconstruct from name alone, fall through.
+        "bluestein" | "generic" | "rader" | "cache-oblivious" => None,
+        _ => None,
+    }
+}
+
+// ─── Baseline wisdom (compile-time binary blob from build.rs) ────────────────
+
+/// Static cache loaded from the compile-time wisdom baseline binary.
+///
+/// The build script writes `$OUT_DIR/wisdom_baseline.bin` (possibly empty).
+/// At runtime the bytes are decoded once and stored here.  If the file is
+/// empty or malformed, this stays as an empty cache and the heuristic path
+/// is used instead.
+#[cfg(feature = "std")]
+static BASELINE_WISDOM: std::sync::OnceLock<crate::api::wisdom::WisdomCache> =
+    std::sync::OnceLock::new();
+
+/// Return a reference to the compile-time wisdom baseline, initialising it
+/// lazily on first call.
+#[cfg(feature = "std")]
+fn baseline_wisdom() -> &'static crate::api::wisdom::WisdomCache {
+    BASELINE_WISDOM.get_or_init(|| {
+        // The build script always writes this file (even 0 bytes) so that
+        // `include_bytes!` does not fail at compile time.
+        const BASELINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wisdom_baseline.bin"));
+        if BASELINE.is_empty() {
+            crate::api::wisdom::WisdomCache::new()
+        } else {
+            crate::api::wisdom::WisdomCache::from_binary(BASELINE).unwrap_or_default()
+        }
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 impl<T: Float> Plan<T> {
     /// Create a 1D complex-to-complex DFT plan.
     ///
@@ -86,6 +341,47 @@ impl<T: Float> Plan<T> {
     /// ```
     #[must_use]
     pub fn dft_1d(n: usize, direction: Direction, flags: Flags) -> Option<Self> {
+        // ── 1. Check baseline wisdom (populated by build.rs when OXIFFT_TUNE=1) ──
+        //
+        // The baseline cache keys by raw size (`n as u64`).  When a match is
+        // found the stored `solver_name` is used to reconstruct the algorithm.
+        // Currently we fall through to the heuristic if reconstruction is not
+        // possible; this keeps the code correct even with future unknown solver
+        // names.
+        #[cfg(feature = "std")]
+        if let Some(entry) = baseline_wisdom().lookup(n as u64) {
+            if let Some(algo) = algorithm_from_solver_name::<T>(&entry.solver_name, n) {
+                return Some(Self {
+                    n,
+                    direction,
+                    algorithm: algo,
+                });
+            }
+        }
+
+        // ── 2. MEASURE / PATIENT: profile the heuristic and store timing ──────
+        //
+        // We run the tuner (which internally always uses ESTIMATE so there is
+        // no re-entry), collect the timing result, and then fall through to
+        // construct the plan via the normal heuristic path.  In a future wave
+        // this could pick among several candidates; for now the value is that
+        // the result is written into the global wisdom cache so that
+        // export_to_string() reflects real timings.
+        #[cfg(feature = "std")]
+        if flags.is_measure() || flags.is_patient() {
+            let reps: usize = if flags.is_patient() { 200 } else { 32 };
+            if let Some(result) = crate::api::plan::auto_tune::tune_size::<T>(n, direction, reps) {
+                // Store the timing in the global wisdom cache for later export.
+                crate::api::wisdom::store_wisdom(crate::kernel::WisdomEntry {
+                    problem_hash: n as u64,
+                    solver_name: result.algorithm_name,
+                    cost: result.elapsed_ns as f64,
+                });
+            }
+            // Fall through to heuristic — the tuner chose the same algorithm.
+        }
+
+        // ── 3. Heuristic selection (ESTIMATE path and fallback) ───────────────
         let algorithm = Self::select_algorithm(n, flags);
         Some(Self {
             n,
@@ -129,11 +425,29 @@ impl<T: Float> Plan<T> {
             // Use DIT with SIMD-accelerated butterflies for all power-of-2 sizes
             // Note: Stockham needs optimization before it can compete with DIT+codelets
             Algorithm::CooleyTukey(CtVariant::Dit)
+        } else if matches!(n, 3 | 5 | 7 | 9 | 11 | 13) {
+            // Winograd symmetric-pair kernels for odd prime and prime-power sizes
+            Algorithm::Winograd(n)
+        } else if matches!(n, 15 | 21 | 35) {
+            // Prime Factor Algorithm for coprime composites: 15=3×5, 21=3×7, 35=5×7
+            let (n1, n2) = match n {
+                15 => (3, 5),
+                21 => (3, 7),
+                35 => (5, 7),
+                _ => unreachable!(),
+            };
+            Algorithm::WinogradPfa { n1, n2 }
         } else if has_composite_codelet(n) {
             // Use specialized composite codelets for common sizes (12, 24, 36, 48, 60, 72, 96, 100)
             Algorithm::Composite(n)
+        } else if let Some(factors) = try_factor_mixed_radix(n) {
+            // Mixed-radix DIT FFT for smooth-7 sizes (factors from {2,3,4,5,7,8,16}).
+            // Checked before the Direct fallback so that sizes like 6=3×2, 10=5×2
+            // use the correct DIT engine rather than O(n²) direct computation.
+            Algorithm::MixedRadix { factors }
         } else if n <= 16 {
-            // For small non-power-of-2 sizes without codelets, use direct O(n²)
+            // For small non-power-of-2, non-smooth sizes without codelets, use direct O(n²).
+            // (Only primes like 11, 13 land here since smooth composites are handled above.)
             Algorithm::Direct
         } else if GenericSolver::<T>::applicable(n) {
             Algorithm::Generic(Box::new(GenericSolver::new(n)))
@@ -153,7 +467,7 @@ impl<T: Float> Plan<T> {
     }
     /// Return a human-readable name for the selected algorithm.
     #[must_use]
-    pub(crate) fn algorithm_name(&self) -> &'static str {
+    pub fn algorithm_name(&self) -> &'static str {
         match &self.algorithm {
             Algorithm::Nop => "Nop",
             Algorithm::Direct => "Direct",
@@ -168,8 +482,46 @@ impl<T: Float> Plan<T> {
             Algorithm::Composite(_) => "Composite",
             Algorithm::Generic(_) => "Generic",
             Algorithm::Bluestein(_) => "Bluestein",
+            Algorithm::Winograd(_) => "Winograd",
+            Algorithm::WinogradPfa { .. } => "WinogradPfa",
+            Algorithm::MixedRadix { .. } => "MixedRadix",
         }
     }
+
+    /// Return the canonical wisdom-format solver name for the selected algorithm.
+    ///
+    /// This is the name stored in wisdom files and used for round-trip
+    /// deserialization via `algorithm_from_solver_name`.  It differs from
+    /// `algorithm_name` which returns a human-readable display string.
+    ///
+    /// For `MixedRadix` the factors (innermost-first) are embedded as
+    /// `"mixed-radix-R1-R2-..."`, which is the format expected by
+    /// `algorithm_from_solver_name`.
+    #[must_use]
+    pub fn wisdom_solver_name(&self) -> String {
+        match &self.algorithm {
+            Algorithm::Nop => "nop".to_string(),
+            Algorithm::Direct => "direct".to_string(),
+            Algorithm::CooleyTukey(v) => match v {
+                CtVariant::Dit => "ct-dit".to_string(),
+                CtVariant::Dif => "ct-dif".to_string(),
+                CtVariant::DitRadix4 => "ct-radix4".to_string(),
+                CtVariant::DitRadix8 => "ct-radix8".to_string(),
+                CtVariant::SplitRadix => "ct-splitradix".to_string(),
+            },
+            Algorithm::Stockham => "stockham".to_string(),
+            Algorithm::Composite(_) => "composite".to_string(),
+            Algorithm::Generic(_) => "generic".to_string(),
+            Algorithm::Bluestein(_) => "bluestein".to_string(),
+            Algorithm::Winograd(_) => "winograd".to_string(),
+            Algorithm::WinogradPfa { .. } => "winograd-pfa".to_string(),
+            Algorithm::MixedRadix { factors } => {
+                let parts: Vec<String> = factors.iter().map(|r| r.to_string()).collect();
+                format!("mixed-radix-{}", parts.join("-"))
+            }
+        }
+    }
+
     /// Execute the plan on the given input/output buffers.
     ///
     /// # Panics
@@ -219,6 +571,42 @@ impl<T: Float> Plan<T> {
             }
             Algorithm::Bluestein(solver) => {
                 solver.execute(input, output, sign);
+            }
+            Algorithm::Winograd(n) => {
+                use crate::dft::codelets::winograd::{
+                    winograd_11, winograd_13, winograd_3, winograd_5, winograd_7, winograd_9,
+                };
+                let sign_int = if sign == Sign::Forward { -1 } else { 1 };
+                output.copy_from_slice(input);
+                match n {
+                    3 => winograd_3(output, sign_int),
+                    5 => winograd_5(output, sign_int),
+                    7 => winograd_7(output, sign_int),
+                    9 => winograd_9(output, sign_int),
+                    11 => winograd_11(output, sign_int),
+                    13 => winograd_13(output, sign_int),
+                    _ => unreachable!(),
+                }
+            }
+            Algorithm::WinogradPfa { n1, n2 } => {
+                use crate::dft::codelets::winograd::{winograd_3, winograd_5, winograd_7};
+                use crate::dft::codelets::winograd_pfa::pfa_compose;
+                let sign_int = if sign == Sign::Forward { -1 } else { 1 };
+                let (k1, k2) = (*n1, *n2);
+                match (k1, k2) {
+                    (3, 5) => pfa_compose(input, output, 3, 5, winograd_3, winograd_5, sign_int),
+                    (3, 7) => pfa_compose(input, output, 3, 7, winograd_3, winograd_7, sign_int),
+                    (5, 7) => pfa_compose(input, output, 5, 7, winograd_5, winograd_7, sign_int),
+                    _ => unreachable!(),
+                }
+            }
+            Algorithm::MixedRadix { factors } => {
+                let dir = match sign {
+                    Sign::Forward => TwiddleDirection::Forward,
+                    Sign::Backward => TwiddleDirection::Inverse,
+                };
+                output.copy_from_slice(input);
+                execute_mixed_radix_inplace(output, factors, dir);
             }
         }
     }
@@ -270,6 +658,41 @@ impl<T: Float> Plan<T> {
             }
             Algorithm::Bluestein(solver) => {
                 solver.execute_inplace(data, sign);
+            }
+            Algorithm::Winograd(n) => {
+                use crate::dft::codelets::winograd::{
+                    winograd_11, winograd_13, winograd_3, winograd_5, winograd_7, winograd_9,
+                };
+                let sign_int = if sign == Sign::Forward { -1 } else { 1 };
+                match n {
+                    3 => winograd_3(data, sign_int),
+                    5 => winograd_5(data, sign_int),
+                    7 => winograd_7(data, sign_int),
+                    9 => winograd_9(data, sign_int),
+                    11 => winograd_11(data, sign_int),
+                    13 => winograd_13(data, sign_int),
+                    _ => unreachable!(),
+                }
+            }
+            Algorithm::WinogradPfa { n1, n2 } => {
+                use crate::dft::codelets::winograd::{winograd_3, winograd_5, winograd_7};
+                use crate::dft::codelets::winograd_pfa::pfa_compose;
+                let sign_int = if sign == Sign::Forward { -1 } else { 1 };
+                let (k1, k2) = (*n1, *n2);
+                let input = data.to_vec();
+                match (k1, k2) {
+                    (3, 5) => pfa_compose(&input, data, 3, 5, winograd_3, winograd_5, sign_int),
+                    (3, 7) => pfa_compose(&input, data, 3, 7, winograd_3, winograd_7, sign_int),
+                    (5, 7) => pfa_compose(&input, data, 5, 7, winograd_5, winograd_7, sign_int),
+                    _ => unreachable!(),
+                }
+            }
+            Algorithm::MixedRadix { factors } => {
+                let dir = match sign {
+                    Sign::Forward => TwiddleDirection::Forward,
+                    Sign::Backward => TwiddleDirection::Inverse,
+                };
+                execute_mixed_radix_inplace(data, factors, dir);
             }
         }
     }

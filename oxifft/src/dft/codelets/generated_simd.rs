@@ -32,6 +32,28 @@ gen_simd_codelet!(4);
 gen_simd_codelet!(8);
 
 // ---------------------------------------------------------------------------
+// Cached runtime dispatchers (AtomicU8-backed, avoid repeated feature probes)
+// ---------------------------------------------------------------------------
+//
+// Each invocation is placed in its own submodule because the macro emits
+// module-level const declarations (ISA_SCALAR_LEVEL, etc.) that would
+// collide if multiple invocations shared the same namespace.
+
+/// Cached dispatcher submodule for size-4 f64.
+mod cached_dispatch_4_f64 {
+    use oxifft_codegen::gen_dispatcher_codelet;
+    gen_dispatcher_codelet!(size = 4, ty = f64);
+}
+pub use cached_dispatch_4_f64::codelet_simd_4_cached_f64;
+
+/// Cached dispatcher submodule for size-4 f32.
+mod cached_dispatch_4_f32 {
+    use oxifft_codegen::gen_dispatcher_codelet;
+    gen_dispatcher_codelet!(size = 4, ty = f32);
+}
+pub use cached_dispatch_4_f32::codelet_simd_4_cached_f32;
+
+// ---------------------------------------------------------------------------
 // Public wrappers for integration with `notw_N_dispatch`
 // ---------------------------------------------------------------------------
 
@@ -456,6 +478,195 @@ mod tests {
             assert!((got.re / n - orig.re).abs() < 1e-5);
             assert!((got.im / n - orig.im).abs() < 1e-5);
         }
+    }
+
+    // ----- cached dispatcher tests ------------------------------------------
+
+    /// Verify that the cached dispatcher for size-4 f64 produces the same result
+    /// as the naive DFT reference and matches the non-cached dispatcher output.
+    #[test]
+    fn cached_dispatcher_4_f64_correctness() {
+        let input = [
+            Complex {
+                re: 1.0f64,
+                im: 0.0,
+            },
+            Complex {
+                re: 0.0f64,
+                im: 1.0,
+            },
+            Complex {
+                re: -1.0f64,
+                im: 0.0,
+            },
+            Complex {
+                re: 0.0f64,
+                im: -1.0,
+            },
+        ];
+        let expected = naive_dft(&input, -1);
+        let mut data = input;
+        codelet_simd_4_cached_f64(&mut data, -1);
+        assert!(
+            approx_eq_f64(&data, &expected, 1e-10),
+            "cached size-4 f64 forward: got {data:?}, expected {expected:?}"
+        );
+    }
+
+    /// Verify inverse direction for cached size-4 f64 dispatcher.
+    #[test]
+    fn cached_dispatcher_4_f64_inverse_correctness() {
+        let input = [
+            Complex {
+                re: 2.0f64,
+                im: 1.0,
+            },
+            Complex {
+                re: -1.0f64,
+                im: 0.5,
+            },
+            Complex {
+                re: 0.5f64,
+                im: -2.0,
+            },
+            Complex {
+                re: 1.5f64,
+                im: 0.0,
+            },
+        ];
+        let expected = naive_dft(&input, 1);
+        let mut data = input;
+        codelet_simd_4_cached_f64(&mut data, 1);
+        assert!(
+            approx_eq_f64(&data, &expected, 1e-10),
+            "cached size-4 f64 inverse: got {data:?}, expected {expected:?}"
+        );
+    }
+
+    /// Verify that calling the cached dispatcher twice converges (cache consistency).
+    #[test]
+    fn cached_dispatcher_4_f64_deterministic() {
+        let input = [
+            Complex {
+                re: 1.0f64,
+                im: 2.0,
+            },
+            Complex {
+                re: 3.0f64,
+                im: 4.0,
+            },
+            Complex {
+                re: 5.0f64,
+                im: 6.0,
+            },
+            Complex {
+                re: 7.0f64,
+                im: 8.0,
+            },
+        ];
+        let mut data_a = input;
+        let mut data_b = input;
+        // Two independent calls on the same input — should produce bit-identical results
+        codelet_simd_4_cached_f64(&mut data_a, -1);
+        codelet_simd_4_cached_f64(&mut data_b, -1);
+        // Use a tiny epsilon rather than 0.0: approx_eq uses strict < so 0.0 would fail
+        // even for bit-equal results (0.0 < 0.0 is false).
+        assert!(
+            approx_eq_f64(&data_a, &data_b, 1e-15),
+            "cached dispatcher must be deterministic: got data_a={data_a:?}, data_b={data_b:?}"
+        );
+    }
+
+    /// Verify cached size-4 f64 matches the non-cached dispatcher.
+    #[test]
+    fn cached_dispatcher_4_f64_matches_uncached() {
+        let input = [
+            Complex {
+                re: 1.0f64,
+                im: 0.5,
+            },
+            Complex {
+                re: -0.5f64,
+                im: 1.0,
+            },
+            Complex {
+                re: 0.0f64,
+                im: -1.0,
+            },
+            Complex {
+                re: 2.0f64,
+                im: 0.0,
+            },
+        ];
+        let mut data_cached = input;
+        let mut data_uncached = input;
+        codelet_simd_4_cached_f64(&mut data_cached, -1);
+        generated_simd_4_dispatch(&mut data_uncached, -1);
+        assert!(
+            approx_eq_f64(&data_cached, &data_uncached, 1e-14),
+            "cached and uncached dispatchers must agree: cached={data_cached:?}, uncached={data_uncached:?}"
+        );
+    }
+
+    /// Verify correctness of cached size-4 f32 dispatcher.
+    #[test]
+    fn cached_dispatcher_4_f32_correctness() {
+        let input = [
+            Complex {
+                re: 1.0f32,
+                im: 0.0,
+            },
+            Complex {
+                re: 0.0f32,
+                im: 1.0,
+            },
+            Complex {
+                re: -1.0f32,
+                im: 0.0,
+            },
+            Complex {
+                re: 0.0f32,
+                im: -1.0,
+            },
+        ];
+        let expected = naive_dft_f32(&input, -1);
+        let mut data = input;
+        codelet_simd_4_cached_f32(&mut data, -1);
+        assert!(
+            approx_eq_f32(&data, &expected, 1e-5),
+            "cached size-4 f32 forward: got {data:?}, expected {expected:?}"
+        );
+    }
+
+    /// Verify cached size-4 f32 matches non-cached dispatcher.
+    #[test]
+    fn cached_dispatcher_4_f32_matches_uncached() {
+        let input = [
+            Complex {
+                re: 1.5f32,
+                im: -0.5,
+            },
+            Complex {
+                re: -2.0f32,
+                im: 1.0,
+            },
+            Complex {
+                re: 0.5f32,
+                im: 0.5,
+            },
+            Complex {
+                re: -1.0f32,
+                im: 0.0,
+            },
+        ];
+        let mut data_cached = input;
+        let mut data_uncached = input;
+        codelet_simd_4_cached_f32(&mut data_cached, -1);
+        generated_simd_4_dispatch(&mut data_uncached, -1);
+        assert!(
+            approx_eq_f32(&data_cached, &data_uncached, 1e-6),
+            "cached f32 and uncached f64-typed dispatchers must agree numerically"
+        );
     }
 
     // ----- dispatch routing tests -------------------------------------------
