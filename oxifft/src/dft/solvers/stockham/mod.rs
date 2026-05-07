@@ -114,12 +114,18 @@ pub fn stockham_f64(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: S
         unsafe { aarch64::stockham_radix4_neon(input, output, sign) }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     {
         // Prefer AVX-512 when available (4x f64 per register for complex)
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512dq") {
-            unsafe { x86_64::stockham_radix4_avx512(input, output, sign) }
-        } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            unsafe { x86_64::stockham_radix4_avx512(input, output, sign) };
+            return;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             unsafe { x86_64::stockham_radix4_avx2(input, output, sign) }
         } else {
             generic::stockham_radix4_scalar(input, output, sign);

@@ -7,11 +7,11 @@
 mod codegen_tests;
 mod composite;
 pub mod generated_simd;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 pub mod hand_avx512;
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(test, target_arch = "x86_64", feature = "avx512"))]
 mod hand_avx512_tests;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 pub(crate) mod hand_avx512_twiddles;
 mod notw;
 pub mod simd;

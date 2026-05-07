@@ -63,6 +63,7 @@ std = ["dep:serde_json", "num-complex/std", "num-traits/std", "serde/std"]
 # Threading support (requires std)
 threading = ["std", "dep:rayon"]
 simd = []
+avx512 = []
 # Quad-precision (128-bit) floating-point support (pure Rust)
 f128-support = []
 # Half-precision (16-bit) floating-point support (pure Rust)

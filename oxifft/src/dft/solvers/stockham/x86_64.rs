@@ -423,6 +423,7 @@ pub unsafe fn stockham_radix4_avx2(
 /// undefined behavior (illegal instruction trap at runtime).
 /// Both `input` and `output` must have the same length, which must be a
 /// power of two.
+#[cfg(feature = "avx512")]
 #[target_feature(enable = "avx512f", enable = "avx512dq")]
 pub unsafe fn stockham_radix4_avx512(
     input: &[Complex<f64>],
@@ -659,6 +660,7 @@ pub unsafe fn stockham_radix4_avx512(
 /// Caller must ensure the target CPU supports the `avx512f` feature
 /// (the `_mm_permute_pd` and `_mm_addsub_pd` intrinsics used internally
 /// require at least SSE3/AVX, which is implied by `avx512f`).
+#[cfg(feature = "avx512")]
 #[inline(always)]
 unsafe fn avx512_cmul_128(
     v: core::arch::x86_64::__m128d,
@@ -688,6 +690,7 @@ unsafe fn avx512_cmul_128(
 /// Calling this function on a CPU that lacks these features causes undefined
 /// behavior (illegal instruction trap at runtime).
 /// `input` and `output` must have the same length, which must be 1, 2, or 4.
+#[cfg(feature = "avx512")]
 #[target_feature(enable = "avx512f", enable = "avx512dq")]
 unsafe fn stockham_small_avx512(input: &[Complex<f64>], output: &mut [Complex<f64>], sign: Sign) {
     unsafe {
