@@ -116,7 +116,7 @@ mod traits;
 mod avx;
 #[cfg(target_arch = "x86_64")]
 mod avx2;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 mod avx512;
 #[cfg(target_arch = "x86_64")]
 mod sse2;
@@ -144,7 +144,7 @@ pub use avx::{AvxF32, AvxF64};
 #[cfg(target_arch = "x86_64")]
 pub use avx2::{has_avx2_fma, Avx2F32, Avx2F64};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 pub use avx512::{has_avx512f, Avx512F32, Avx512F64};
 
 #[cfg(target_arch = "aarch64")]
