@@ -256,6 +256,7 @@ fn gen_dispatcher(n: usize) -> proc_macro2::TokenStream {
 
                 #[cfg(target_arch = "x86_64")]
                 {
+                    #[cfg(feature = "avx512")]
                     if is_x86_feature_detected!("avx512f") {
                         // Safety: AVX-512F detected, pointer valid for len f64s
                         unsafe { #avx512_f64_name(f64_data, sign); }
@@ -298,6 +299,7 @@ fn gen_dispatcher(n: usize) -> proc_macro2::TokenStream {
 
                 #[cfg(target_arch = "x86_64")]
                 {
+                    #[cfg(feature = "avx512")]
                     if is_x86_feature_detected!("avx512f") {
                         // Safety: AVX-512F detected
                         unsafe { #avx512_f32_name(f32_data, sign); }
@@ -363,6 +365,7 @@ fn gen_dispatcher_16() -> proc_macro2::TokenStream {
 
                 #[cfg(target_arch = "x86_64")]
                 {
+                    #[cfg(feature = "avx512")]
                     if is_x86_feature_detected!("avx512f") {
                         // Safety: AVX-512F detected, pointer valid for len f32s
                         unsafe { #avx512_f32_name(f32_data, sign); }
