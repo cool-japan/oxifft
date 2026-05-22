@@ -382,11 +382,11 @@ mod tests {
         let results = Mutex::new(vec![0usize; 100]);
 
         pool.parallel_for(100, |i| {
-            let mut r = results.lock().unwrap();
+            let mut r = results.lock().unwrap_or_else(|e| e.into_inner());
             r[i] = i * 2;
         });
 
-        let r = results.lock().unwrap();
+        let r = results.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..100 {
             assert_eq!(r[i], i * 2, "Element {i} has wrong value");
         }

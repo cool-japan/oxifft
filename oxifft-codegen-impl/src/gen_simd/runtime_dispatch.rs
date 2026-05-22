@@ -126,6 +126,7 @@ fn build_detect_x86_body() -> TokenStream {
     quote! {
         #[cfg(target_arch = "x86_64")]
         {
+            #[cfg(feature = "avx512")]
             if is_x86_feature_detected!("avx512f") {
                 return ISA_AVX512_LEVEL;
             }
@@ -176,7 +177,7 @@ fn build_x86_64_branches(config: DispatcherConfig) -> TokenStream {
     if size == 16 {
         if config.precision == Precision::F32 {
             return quote! {
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
                 {
                     if cached_level == ISA_AVX512_LEVEL {
                         // Safety: avx512f detected at runtime.
@@ -214,6 +215,7 @@ fn build_x86_64_branches(config: DispatcherConfig) -> TokenStream {
     quote! {
         #[cfg(target_arch = "x86_64")]
         {
+            #[cfg(feature = "avx512")]
             if cached_level == ISA_AVX512_LEVEL {
                 // Safety: avx512f detected at runtime.
                 let data_len = data.len() * 2;

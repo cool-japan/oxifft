@@ -24,3 +24,5 @@ rustc-ice-*.txt
 **/pkg/
 **/pkg_simd/
 **/pkg_node/
+
+target

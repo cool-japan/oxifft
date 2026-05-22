@@ -44,7 +44,7 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 ✅ **Zero clippy warnings** (all features)
 ✅ **Performance optimized** (9/15 composite sizes faster than RustFFT)
 ✅ **1544 public API items** documented and tested
-✅ **61K+ lines of code** across 3 crates (60,970 SLoC)
+✅ **71K+ lines of code** across 3 crates (71,623 SLoC)
 
 See [PROJECT_STATUS.md](./PROJECT_STATUS.md) for comprehensive status, [oxifft.md](./oxifft.md) for architecture blueprint, and [TODO.md](./TODO.md) for detailed roadmap.
 

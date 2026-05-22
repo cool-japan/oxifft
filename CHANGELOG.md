@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.3.2] - 2026-05-22
+
+### Added
+
+- **Multi-rank 3D pencil FFT execution**: `plan_3d_pencil` now supports multi-rank MPI
+  execution with full forward/inverse pencil decomposition. Expanded `plan_nd` error
+  handling for ND FFT plans.
+
+### Changed
+
+- **AVX-512 codelets and dispatchers gated behind a new default-off `avx512` feature**:
+  `rustc` 1.95 stable treats `#[target_feature(enable = "avx512*")]` as unstable
+  (rust-lang/rust#44839). Without `--features avx512`, builds fall through to the
+  existing AVX-2 / SSE / scalar dispatch paths. No API or ABI change when the feature
+  is enabled. Both `oxifft` and `oxifft-codegen-impl` are updated in concert.
+- **Refactored error handling for row and column pools** in multi-rank 3D pencil FFT
+  execution (`plan_3d_pencil`, `plan_nd`).
+
+### Dependencies
+
+- `oxicuda` (optional GPU backend) bumped from 0.1.4 → 0.1.8 across four incremental
+  updates (0.1.5, 0.1.6, 0.1.7, 0.1.8).
+
 ## [0.3.1] - 2026-05-02
 
 ### Added

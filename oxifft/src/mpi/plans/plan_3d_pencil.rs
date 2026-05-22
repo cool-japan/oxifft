@@ -31,11 +31,12 @@
 //!
 //! # Multi-rank status
 //!
-//! The multi-rank alltoallv passes are not yet implemented. Calling
-//! `execute_inplace` on a multi-rank plan returns
-//! `MpiError::FftError { message: "multi-rank pencil execution not yet implemented" }`.
-//! The type, constructor, buffer pre-allocation, and sub-communicator creation
-//! are fully implemented. Single-rank execution is fully functional.
+//! Both single-rank and multi-rank execution are fully implemented.
+//! For multi-rank plans, `execute_inplace` performs the full Z→Y→X pencil FFT
+//! with two distributed alltoallv transposes through the row and column
+//! sub-communicators. The output layout after a multi-rank transform is
+//! `[local_n2_col][local_n1_row][n0]` (row-major), which differs from the
+//! input layout `[local_n0][local_n1][n2]`.
 
 use mpi::datatype::Equivalence;
 use mpi::topology::{Color, Communicator, SimpleCommunicator};
@@ -46,6 +47,7 @@ use crate::kernel::{Complex, Float};
 use crate::mpi::distribution::LocalPartition;
 use crate::mpi::error::MpiError;
 use crate::mpi::pool::{MpiFloat, MpiPool};
+use crate::mpi::transpose::distributed_transpose;
 
 /// 2D process grid configuration for pencil decomposition.
 ///
@@ -119,7 +121,7 @@ pub struct PencilPlan3D<T: Float, C: Communicator> {
     ///
     /// Sized to hold `max(local_n0 * local_n1 * n2, local_n0 * n1 * local_n2_col,
     /// n0 * local_n1_row * local_n2_col)` elements.
-    _scratch: Vec<Complex<T>>,
+    scratch: Vec<Complex<T>>,
     /// Raw pointer to the global MPI pool (must outlive this plan; reserved for multi-rank impl).
     _pool: *const MpiPool<C>,
     /// Row sub-communicator pool: all procs with the same row_rank, varying col_rank.
@@ -247,7 +249,7 @@ where
             plan_x,
             plan_y,
             plan_z,
-            _scratch: scratch,
+            scratch,
             _pool: core::ptr::from_ref(pool),
             row_pool,
             col_pool,
@@ -326,11 +328,176 @@ where
             pure::fft_3d_zyx_with_plans(data, n0, n1, n2, &self.plan_x, &self.plan_y, &self.plan_z);
             Ok(())
         } else {
-            // Multi-rank: two alltoallv transposes + three local FFT passes -- NYI.
-            Err(MpiError::FftError {
-                message: "multi-rank pencil execution not yet implemented".to_string(),
-            })
+            self.execute_multirank(data, n0, n1, n2)
         }
+    }
+
+    /// Execute the multi-rank 3D pencil FFT (called when `row_pool.is_some()`).
+    ///
+    /// Algorithm (Z→Y→X):
+    /// 1. Z-FFT: local, on the `[local_n0, local_n1, n2]` slab.
+    /// 2. Row-comm alltoallv: redistributes n2 across col-ranks so each rank gets
+    ///    `[local_n0, local_n2_col, n1]` (via `distributed_transpose` on each i0 slab).
+    /// 3. Y-FFT: local, FFT over the contiguous n1 dimension.
+    /// 4. Col-comm alltoallv: redistributes n1 across row-ranks so each rank gets
+    ///    `[local_n2_col, local_n1_row, n0]` (via `distributed_transpose` on each i2 slab).
+    /// 5. X-FFT: local, FFT over the contiguous n0 dimension.
+    ///
+    /// # Errors
+    ///
+    /// - `MpiError::CommunicationError` -- if sub-communicator pools are missing
+    /// - `MpiError::CountOverflow` -- if element counts exceed `i32::MAX`
+    /// - `MpiError::SizeMismatch` -- propagated from `distributed_transpose`
+    fn execute_multirank(
+        &mut self,
+        data: &mut [Complex<T>],
+        n0: usize,
+        n1: usize,
+        n2: usize,
+    ) -> Result<(), MpiError> {
+        let row_pool = self
+            .row_pool
+            .as_ref()
+            .ok_or_else(|| MpiError::CommunicationError {
+                message: "row_pool is None in multi-rank path".to_string(),
+            })?;
+        let col_pool = self
+            .col_pool
+            .as_ref()
+            .ok_or_else(|| MpiError::CommunicationError {
+                message: "col_pool is None in multi-rank path".to_string(),
+            })?;
+
+        let local_n0 = self.local_n0;
+        let local_n1 = self.local_n1;
+        let local_0_start = self.local_0_start;
+        let local_1_start = self.local_1_start;
+
+        // Local n2 slice for this col-rank (col-comm size = grid.n_cols = row_pool.size()).
+        let local_n2_col = LocalPartition::new(n2, row_pool.size(), self.col_rank).local_n;
+        // Local n1 slice for this row-rank after col transpose (col-comm size = grid.n_rows = col_pool.size()).
+        let local_n1_row = LocalPartition::new(n1, col_pool.size(), self.row_rank).local_n;
+
+        // ── Step 1: Z-FFT ────────────────────────────────────────────────────────
+        // data layout: [local_n0][local_n1][n2]
+        // FFT along n2 for each (i0, i1) row — contiguous access.
+        {
+            let mut tmp_in = vec![Complex::<T>::zero(); n2];
+            let mut tmp_out = vec![Complex::<T>::zero(); n2];
+            for i0 in 0..local_n0 {
+                for i1 in 0..local_n1 {
+                    let off = i0 * local_n1 * n2 + i1 * n2;
+                    tmp_in.copy_from_slice(&data[off..off + n2]);
+                    self.plan_z.execute(&tmp_in, &mut tmp_out);
+                    data[off..off + n2].copy_from_slice(&tmp_out);
+                }
+            }
+        }
+
+        // ── Step 2: Row-comm alltoallv (redistribute n2) ─────────────────────────
+        // For each i0, call distributed_transpose on the [local_n1, n2] slab.
+        // Produces: [local_n0][local_n2_col][n1]  (stored as local_n2_col * n1 per i0)
+        let after_row_size = local_n0 * local_n2_col * n1;
+        // Use scratch for output of this stage.
+        self.scratch[..after_row_size].fill(Complex::<T>::zero());
+        {
+            let slab_in_size = local_n1 * n2;
+            let slab_out_size = local_n2_col * n1; // distributed_transpose output: [local_n2_col, n1]
+                                                   // We need mutable borrow of both data and scratch — use split at boundary.
+                                                   // Since scratch is a separate field, we can borrow both simultaneously.
+            let scratch = &mut self.scratch;
+            for i0 in 0..local_n0 {
+                let in_off = i0 * slab_in_size;
+                let out_off = i0 * slab_out_size;
+                let input_slab = &data[in_off..in_off + slab_in_size];
+                let output_slab = &mut scratch[out_off..out_off + slab_out_size];
+                // distributed_transpose(row_pool, input, output, n0=n1, n1=n2, local_n0=local_n1, local_1_start)
+                distributed_transpose(
+                    row_pool,
+                    input_slab,
+                    output_slab,
+                    n1,
+                    n2,
+                    local_n1,
+                    local_1_start,
+                )?;
+            }
+        }
+        // Copy result back into data for the Y-FFT pass.
+        // data layout after copy: [local_n0][local_n2_col][n1]
+        data[..after_row_size].copy_from_slice(&self.scratch[..after_row_size]);
+
+        // ── Step 3: Y-FFT ────────────────────────────────────────────────────────
+        // data layout: [local_n0][local_n2_col][n1]
+        // FFT along n1 for each (i0, i2) — contiguous access (n1 is innermost).
+        {
+            let mut tmp_in = vec![Complex::<T>::zero(); n1];
+            let mut tmp_out = vec![Complex::<T>::zero(); n1];
+            for i0 in 0..local_n0 {
+                for i2 in 0..local_n2_col {
+                    let off = i0 * local_n2_col * n1 + i2 * n1;
+                    tmp_in.copy_from_slice(&data[off..off + n1]);
+                    self.plan_y.execute(&tmp_in, &mut tmp_out);
+                    data[off..off + n1].copy_from_slice(&tmp_out);
+                }
+            }
+        }
+
+        // ── Step 4: Col-comm alltoallv (redistribute n1) ─────────────────────────
+        // For each i2 (local n2 index), call distributed_transpose on the [local_n0, n1] slab.
+        // But data is currently [local_n0][local_n2_col][n1].
+        // We need to extract [local_n0, n1] for each i2, but they are not contiguous.
+        // Build a contiguous slab first, then transpose.
+        // Output per-i2 slab: [local_n1_row, n0] (distributed_transpose output layout)
+        // Full output: [local_n2_col][local_n1_row][n0]
+        let after_col_size = local_n2_col * local_n1_row * n0;
+        self.scratch[..after_col_size].fill(Complex::<T>::zero());
+        {
+            let mut slab_in = vec![Complex::<T>::zero(); local_n0 * n1];
+            let mut slab_out = vec![Complex::<T>::zero(); local_n1_row * n0];
+            for i2 in 0..local_n2_col {
+                // Extract [local_n0, n1] slab for this i2: gather strided elements.
+                for i0 in 0..local_n0 {
+                    let src_off = i0 * local_n2_col * n1 + i2 * n1;
+                    let dst_off = i0 * n1;
+                    slab_in[dst_off..dst_off + n1].copy_from_slice(&data[src_off..src_off + n1]);
+                }
+                // distributed_transpose(col_pool, slab_in, slab_out, n0=n0, n1=n1, local_n0, local_0_start)
+                distributed_transpose(
+                    col_pool,
+                    &slab_in,
+                    &mut slab_out,
+                    n0,
+                    n1,
+                    local_n0,
+                    local_0_start,
+                )?;
+                // slab_out layout: [local_n1_row, n0] stored as output[j * n0 + global_i0]
+                // Store into scratch: scratch[i2 * local_n1_row * n0 ..]
+                let dst_off = i2 * local_n1_row * n0;
+                self.scratch[dst_off..dst_off + local_n1_row * n0].copy_from_slice(&slab_out);
+            }
+        }
+        // Copy back; final layout: [local_n2_col][local_n1_row][n0]
+        data[..after_col_size].copy_from_slice(&self.scratch[..after_col_size]);
+
+        // ── Step 5: X-FFT ────────────────────────────────────────────────────────
+        // data layout: [local_n2_col][local_n1_row][n0]
+        // FFT along n0 for each (i2, i1) — contiguous access (n0 is innermost).
+        {
+            let mut tmp_in = vec![Complex::<T>::zero(); n0];
+            let mut tmp_out = vec![Complex::<T>::zero(); n0];
+            for i2 in 0..local_n2_col {
+                for i1 in 0..local_n1_row {
+                    let off = i2 * local_n1_row * n0 + i1 * n0;
+                    tmp_in.copy_from_slice(&data[off..off + n0]);
+                    self.plan_x.execute(&tmp_in, &mut tmp_out);
+                    data[off..off + n0].copy_from_slice(&tmp_out);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Execute the distributed 3D FFT out-of-place.
@@ -340,7 +507,7 @@ where
     /// # Errors
     ///
     /// - `MpiError::SizeMismatch` -- if either buffer is too small
-    /// - `MpiError::FftError` -- if multi-rank execution is attempted (NYI)
+    /// - `MpiError::FftError` -- propagated from `execute_inplace`
     pub fn execute(
         &mut self,
         input: &[Complex<T>],

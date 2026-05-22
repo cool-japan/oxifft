@@ -74,7 +74,7 @@ pub fn notw_8_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
 #[inline]
 pub fn notw_16_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
     // --- x86_64: try hand-tuned AVX-512 first ---
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     {
         if TypeId::of::<T>() == TypeId::of::<f64>() {
             let x_f64 = unsafe {
@@ -115,7 +115,7 @@ fn notw_16_simd_f64_fallback<T: Float>(x: &mut [Complex<T>], sign: i32) {
 #[inline]
 pub fn notw_32_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
     // --- x86_64: try hand-tuned AVX-512 first ---
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     {
         if TypeId::of::<T>() == TypeId::of::<f64>() {
             let x_f64 = unsafe {
@@ -156,7 +156,7 @@ fn notw_32_simd_f64_fallback<T: Float>(x: &mut [Complex<T>], sign: i32) {
 #[inline]
 pub fn notw_64_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
     // --- x86_64: try hand-tuned AVX-512 first ---
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     {
         if TypeId::of::<T>() == TypeId::of::<f64>() {
             let x_f64 = unsafe {

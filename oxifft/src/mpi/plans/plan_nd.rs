@@ -243,38 +243,49 @@ where
         // Simplified approach: use MPI all-gather to collect full column, FFT, scatter back
         // This is not the most efficient but is correct
 
-        let _num_procs = pool.size();
-        let _rank = pool.rank();
+        let num_procs = pool.size();
+
+        // Build recv_counts and recv_displs once outside the loop:
+        // process p contributes LocalPartition::new(n0, num_procs, p).local_n elements.
+        let mut recv_counts: Vec<i32> = Vec::with_capacity(num_procs);
+        let mut recv_displs: Vec<i32> = Vec::with_capacity(num_procs);
+        {
+            use crate::mpi::distribution::LocalPartition;
+            let mut displ: i32 = 0;
+            for p in 0..num_procs {
+                let part = LocalPartition::new(n0, num_procs, p);
+                let count_i32 =
+                    i32::try_from(part.local_n).map_err(|_| MpiError::CountOverflow {
+                        count: part.local_n,
+                        rank: p,
+                    })?;
+                recv_counts.push(count_i32);
+                recv_displs.push(displ);
+                displ = displ
+                    .checked_add(count_i32)
+                    .ok_or(MpiError::CountOverflow { count: n0, rank: p })?;
+            }
+        }
+
+        let local_partition = pool.local_partition(n0);
 
         // For each "fiber" along dimension 0
         for fiber_idx in 0..stride {
-            // Gather local elements for this fiber
-            let mut local_fiber = Vec::with_capacity(self.local_n0);
+            // Build the local send buffer for this fiber.
+            let mut send_buf: Vec<Complex<T>> = Vec::with_capacity(self.local_n0);
             for i0 in 0..self.local_n0 {
-                local_fiber.push(data[i0 * stride + fiber_idx]);
+                send_buf.push(data[i0 * stride + fiber_idx]);
             }
 
-            // All-gather to get full fiber on all processes
-            // This is expensive but correct
+            // All-gather across all processes: collect the complete fiber.
             let mut global_fiber = vec![Complex::<T>::zero(); n0];
+            pool.all_gather_v_complex(&send_buf, &mut global_fiber, &recv_counts, &recv_displs)?;
 
-            // Use all-gather-v since different processes may have different amounts
-            let local_partition = pool.local_partition(n0);
-
-            // For simplicity, copy local contribution
-            for (i, &val) in local_fiber.iter().enumerate() {
-                global_fiber[local_partition.local_start + i] = val;
-            }
-
-            // Synchronize across processes (in a real implementation, use MPI_Allgatherv)
-            // For now, we assume all data is available (placeholder)
-            pool.barrier();
-
-            // FFT the full fiber
+            // FFT the full fiber (plan_n0 is a 1-D plan for dimension 0).
             let mut fft_result = vec![Complex::<T>::zero(); n0];
             plan_n0.execute(&global_fiber, &mut fft_result);
 
-            // Store back local portion
+            // Store back local portion.
             for i0 in 0..self.local_n0 {
                 let global_i0 = local_partition.local_start + i0;
                 data[i0 * stride + fiber_idx] = fft_result[global_i0];

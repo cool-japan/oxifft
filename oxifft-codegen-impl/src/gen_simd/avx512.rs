@@ -3,7 +3,7 @@
 //! f64 variant: 8×f64 = 4 complexes per `__m512d` register.
 //! f32 variant: 16×f32 = 8 complexes per `__m512` register; uses `_ps` intrinsics.
 //!
-//! All emitted functions carry `#[target_feature(enable = "avx512f")]`.
+//! All emitted functions carry `#[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]`.
 //! Complex multiply uses FMA:
 //! - Real part: `_mm512_fmsub_pd(re_a, re_b, mul(im_a, im_b))`  → ac − bd
 //! - Imag part: `_mm512_fmadd_pd(re_a, im_b, mul(im_a, re_b))`  → ad + bc
@@ -32,7 +32,7 @@ pub(super) fn gen_avx512_size_2_f64() -> TokenStream {
         /// - Caller must verify AVX-512F is available.
         /// - `data` must contain at least 4 f64 elements (2 complex numbers).
         #[cfg(target_arch = "x86_64")]
-        #[target_feature(enable = "avx512f")]
+        #[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]
         unsafe fn codelet_simd_2_avx512_f64(data: &mut [f64], _sign: i32) {
             use core::arch::x86_64::*;
 
@@ -79,7 +79,7 @@ pub(super) fn gen_avx512_size_4_f64() -> TokenStream {
         /// - Caller must verify AVX-512F is available.
         /// - `data` must contain at least 8 f64 elements.
         #[cfg(target_arch = "x86_64")]
-        #[target_feature(enable = "avx512f")]
+        #[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]
         unsafe fn codelet_simd_4_avx512_f64(data: &mut [f64], sign: i32) {
             use core::arch::x86_64::*;
 
@@ -150,7 +150,7 @@ pub(super) fn gen_avx512_size_8_f64() -> TokenStream {
         /// - Caller must verify AVX-512F is available.
         /// - `data` must contain at least 16 f64 elements.
         #[cfg(target_arch = "x86_64")]
-        #[target_feature(enable = "avx512f")]
+        #[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]
         #[allow(clippy::too_many_lines)]
         unsafe fn codelet_simd_8_avx512_f64(data: &mut [f64], sign: i32) {
             use core::arch::x86_64::*;
@@ -308,7 +308,7 @@ pub(super) fn gen_avx512_size_2_f32() -> TokenStream {
         /// - Caller must verify AVX-512F is available.
         /// - `data` must contain at least 4 f32 elements.
         #[cfg(target_arch = "x86_64")]
-        #[target_feature(enable = "avx512f")]
+        #[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]
         unsafe fn codelet_simd_2_avx512_f32(data: &mut [f32], _sign: i32) {
             use core::arch::x86_64::*;
 
@@ -348,7 +348,7 @@ pub(super) fn gen_avx512_size_4_f32() -> TokenStream {
         /// - Caller must verify AVX-512F is available.
         /// - `data` must contain at least 8 f32 elements.
         #[cfg(target_arch = "x86_64")]
-        #[target_feature(enable = "avx512f")]
+        #[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]
         unsafe fn codelet_simd_4_avx512_f32(data: &mut [f32], sign: i32) {
             use core::arch::x86_64::*;
 
@@ -418,7 +418,7 @@ pub(super) fn gen_avx512_size_8_f32() -> TokenStream {
         /// - Caller must verify AVX-512F is available.
         /// - `data` must contain at least 16 f32 elements.
         #[cfg(target_arch = "x86_64")]
-        #[target_feature(enable = "avx512f")]
+        #[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]
         #[allow(clippy::too_many_lines)]
         unsafe fn codelet_simd_8_avx512_f32(data: &mut [f32], sign: i32) {
             use core::arch::x86_64::*;
@@ -581,7 +581,7 @@ pub(super) fn gen_avx512_size_16_f32() -> TokenStream {
         /// - Caller must verify AVX-512F is available.
         /// - `data` must contain at least 32 f32 elements.
         #[cfg(target_arch = "x86_64")]
-        #[target_feature(enable = "avx512f")]
+        #[cfg(feature = "avx512")] #[target_feature(enable = "avx512f")]
         #[allow(clippy::too_many_lines)]
         unsafe fn codelet_simd_16_avx512_f32(data: &mut [f32], sign: i32) {
             use core::arch::x86_64::*;

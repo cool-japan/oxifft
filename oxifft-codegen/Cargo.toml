@@ -31,6 +31,14 @@ proc-macro2.workspace = true
 quote.workspace = true
 syn.workspace = true
 
+[features]
+# Matches the `avx512` feature of the `oxifft` consumer crate. The
+# `gen_simd_codelet!` macro emits `#[cfg(feature = "avx512")]`, which is
+# resolved against the crate that invokes the macro — so the codegen tests
+# need this feature declared to avoid `unexpected_cfgs` warnings. Default-off;
+# enable with `--features avx512` to compile and exercise the AVX-512 codelets.
+avx512 = []
+
 [dev-dependencies]
 oxifft-codegen-impl.workspace = true
 trybuild = "1.0"

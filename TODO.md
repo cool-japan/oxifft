@@ -229,7 +229,7 @@
 
 ---
 
-## Current Status (v0.3.0 — All Phases 1–10 Complete + v0.3.0 Performance — Released 2026-04-25)
+## Current Status (v0.3.2 — All Phases 1–10 Complete + v0.3.0/0.3.1/0.3.2 Performance — Released 2026-05-22)
 
 ### Implemented Solvers
 - **NOP Solver**: Size-0 and size-1 (identity) transforms
@@ -284,7 +284,7 @@
 - **rfft_batch/irfft_batch**: Convenience functions for batched real FFT
 
 ### Test Coverage
-- 858 tests passing (unit + integration + rustfft comparison + wisdom + planning + size coverage + GuruPlan + split-complex + codegen + SIMD + signal processing + autodiff + convolution + NUFFT + FrFT + sparse + pruned + streaming)
+- 1554 tests passing (unit + integration + rustfft comparison + wisdom + planning + size coverage + GuruPlan + split-complex + codegen + SIMD + signal processing + autodiff + convolution + NUFFT + FrFT + sparse + pruned + streaming + auto-tuning + mixed-radix + multi-rank 3D pencil FFT)
 - 28 FFTW comparison tests passing (oxifft-bench with fftw-compare feature)
 - 688 public API items (all documented and tested)
 - 0 unimplemented!() or todo!() in public API surface
@@ -307,6 +307,11 @@
 - ESTIMATE, MEASURE, PATIENT, EXHAUSTIVE planning mode tests
 - Time-limited planning tests
 - Plan recreation from wisdom tests
+
+### v0.3.2 Changes (2026-05-22)
+- **Multi-rank 3D pencil FFT**: `plan_3d_pencil` supports full forward/inverse MPI multi-rank execution
+- **AVX-512 feature-gated**: `avx512` Cargo feature (default-off) gates codelets and dispatchers for rustc 1.95 stable compatibility; falls back to AVX-2/SSE/scalar
+- **oxicuda 0.1.8**: Optional GPU backend updated from 0.1.4 → 0.1.8
 
 ---
 
@@ -749,7 +754,7 @@ to the GPU/performance milestone in v0.3.0.
 - GPU error recovery and pooling in place
 - `cargo semver-checks` passes
 - `cargo publish --dry-run` succeeds for all crates
-- 858 tests pass with `--all-features`
+- 1554 tests pass with `--all-features`
 
 ### Breaking Changes
 
