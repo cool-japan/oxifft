@@ -10,7 +10,7 @@ exclude = ["oxifft/fuzz"]
 default-members = ["oxifft", "oxifft-codegen", "oxifft-codegen-impl", "oxifft-bench"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 authors = ["COOLJAPAN OU (Team KitaSan)"]
 license = "Apache-2.0"
@@ -59,12 +59,12 @@ quote = "1.0"
 syn = { version = "2.0", features = ["full", "parsing"] }
 
 # Internal codegen logic (not proc-macro)
-oxifft-codegen-impl = { version = "0.4.1", path = "oxifft-codegen-impl" }
+oxifft-codegen-impl = { version = "0.4.2", path = "oxifft-codegen-impl" }
 # Proc-macro crate (kept in the workspace dependency table like
 # oxifft-codegen-impl so path/version can never drift out of lockstep again).
-oxifft-codegen = { version = "0.4.1", path = "oxifft-codegen" }
+oxifft-codegen = { version = "0.4.2", path = "oxifft-codegen" }
 # The core crate, consumed by oxifft-adapter-mpi.
-oxifft = { version = "0.4.1", path = "oxifft" }
+oxifft = { version = "0.4.2", path = "oxifft" }
 
 # Testing
 criterion = { version = "0.8", features = ["html_reports"] }
