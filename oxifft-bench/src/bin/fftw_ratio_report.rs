@@ -1,21 +1,42 @@
 //! FFTW Ratio Report — Post-processor for FFTW parity gate benchmarks.
 //!
-//! Reads criterion JSON from `target/criterion/*/current/estimates.json`
+//! Reads criterion JSON from `<target>/criterion/*/current/estimates.json`
 //! (written by `cargo bench -- --save-baseline current`), pairs `OxiFFT` and
 //! FFTW entries by gate name, computes the timing ratio, and emits:
 //!
-//! 1. A JSON snapshot to `benches/baselines/v0.3.0/fftw_ratios_YYYY-MM-DD.json`
-//! 2. A Markdown ratio table to stdout
+//! 1. A dated JSON snapshot (`fftw_ratios_YYYY-MM-DD.json`) into an **untracked**
+//!    output directory by default (`<target>/fftw-ratio-reports`).
+//! 2. A Markdown ratio table to stdout.
 //!
 //! # Usage
 //!
 //! ```bash
+//! # Default: read criterion output, write the snapshot to <target>/fftw-ratio-reports
 //! cargo run --features fftw-compare -p oxifft-bench --bin fftw_ratio_report
+//!
+//! # Link the system libfftw3 (e.g. Homebrew) instead of the bundled source:
+//! cargo run --features fftw-system  -p oxifft-bench --bin fftw_ratio_report
+//!
+//! # Options
+//! #   --criterion-dir <DIR>  override the criterion output directory
+//! #   --out <DIR>            write the snapshot to an explicit directory
+//! #   --commit-baseline      promote the snapshot into the tracked
+//! #                          benches/baselines/<version>/ history
 //! ```
 //!
+//! Target-directory resolution honours `CARGO_TARGET_DIR` (then `cargo
+//! metadata`, then `<workspace>/target`) so a non-default target dir is found
+//! rather than silently reporting every gate MISSING.
+//!
 //! Assumes the bench has been run with `--save-baseline current` so that
-//! `target/criterion/<group>/<bench>/current/estimates.json` exists.
+//! `<target>/criterion/<group>/<bench>/current/estimates.json` exists.
 //! Falls back to `new/estimates.json` if `current/` is absent.
+//!
+//! # Exit status
+//!
+//! Exits non-zero when any gate's estimates are MISSING (a misconfigured
+//! environment must not be mistaken for a clean run). Gates that ran but
+//! exceeded their target ratio are legitimate data and do not fail the tool.
 
 #![cfg(feature = "fftw-compare")]
 #![allow(clippy::cast_precision_loss)] // FFT size math; values are always << 2^53
@@ -47,8 +68,12 @@ const GATE_IDS: &[&str] = &[
 /// Target ratios (`oxifft / fftw`) per gate — the v1.0 performance goals.
 const TARGET_RATIOS: &[f64] = &[2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0];
 
-/// ISO date string for this baseline snapshot.
-const BASELINE_DATE: &str = "2026-04-20";
+/// Version segment of the tracked baseline history directory
+/// (`benches/baselines/<version>/`). Only written to under `--commit-baseline`.
+const BASELINE_VERSION: &str = "v0.3.0";
+
+/// Fallback ISO date used only if `date` cannot be invoked.
+const FALLBACK_DATE: &str = "unknown-date";
 
 // =============================================================================
 // JSON output schema
@@ -77,6 +102,10 @@ struct RatioReport {
     git_sha: String,
     cpu: String,
     rustc: String,
+    /// How FFTW was provided for this run: bundled source vs system library.
+    fftw_source: String,
+    /// FFTW library version string (e.g. from `pkg-config --modversion fftw3`).
+    fftw_version: String,
     gates: Vec<GateResult>,
     summary: Summary,
 }
@@ -138,6 +167,88 @@ fn rustc_version() -> String {
         .and_then(|o| o.status.success().then_some(o.stdout))
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .map_or_else(|| "unknown".to_string(), |s| s.trim().to_string())
+}
+
+/// Today's date as an ISO `YYYY-MM-DD` string (used for the dated snapshot
+/// filename). Shells out to `date` so no calendar dependency is pulled in;
+/// falls back to [`FALLBACK_DATE`] if that fails.
+fn today() -> String {
+    Command::new("date")
+        .args(["+%Y-%m-%d"])
+        .output()
+        .ok()
+        .and_then(|o| o.status.success().then_some(o.stdout))
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map_or_else(|| FALLBACK_DATE.to_string(), |s| s.trim().to_string())
+}
+
+/// How FFTW was provided for this build: the bundled `fftw-src` source, or the
+/// system library selected via the `fftw-system` feature (pkg-config linking).
+fn fftw_source() -> String {
+    if cfg!(feature = "fftw-system") {
+        "system (pkg-config / fftw crate `system` feature)".to_string()
+    } else {
+        "vendored (fftw crate bundled `fftw-src` source build)".to_string()
+    }
+}
+
+/// Best-effort FFTW library version. Queries `pkg-config --modversion fftw3`,
+/// which reflects the linked library when built with `fftw-system` and the
+/// available system copy otherwise. Returns `"unknown"` when pkg-config or the
+/// fftw3 module is unavailable.
+fn fftw_version() -> String {
+    Command::new("pkg-config")
+        .args(["--modversion", "fftw3"])
+        .output()
+        .ok()
+        .and_then(|o| o.status.success().then_some(o.stdout))
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Resolve the criterion output directory, honouring (in order):
+///
+/// 1. an explicit `--criterion-dir` argument (`override_dir`),
+/// 2. `CARGO_TARGET_DIR` (`<it>/criterion`),
+/// 3. `cargo metadata`'s `target_directory` (`<it>/criterion`),
+/// 4. `<workspace_root>/target/criterion` as a last resort.
+///
+/// This prevents the tool from reporting every gate MISSING merely because a
+/// non-default target directory was configured.
+fn resolve_criterion_dir(override_dir: Option<&Path>, workspace_root: &Path) -> PathBuf {
+    if let Some(dir) = override_dir {
+        return dir.to_path_buf();
+    }
+
+    if let Ok(target) = std::env::var("CARGO_TARGET_DIR") {
+        if !target.is_empty() {
+            return PathBuf::from(target).join("criterion");
+        }
+    }
+
+    if let Some(target) = cargo_metadata_target_dir(workspace_root) {
+        return target.join("criterion");
+    }
+
+    workspace_root.join("target").join("criterion")
+}
+
+/// Query `cargo metadata` for the true `target_directory`.
+fn cargo_metadata_target_dir(workspace_root: &Path) -> Option<PathBuf> {
+    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(workspace_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: Value = serde_json::from_slice(&output.stdout).ok()?;
+    json.get("target_directory")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
 }
 
 // =============================================================================
@@ -203,8 +314,12 @@ fn geomean(values: &[f64]) -> Option<f64> {
 // =============================================================================
 
 /// Collect per-gate results by reading criterion output.
-fn collect_gates(criterion_dir: &Path) -> Vec<GateResult> {
+///
+/// Returns the per-gate results and the number of gates whose criterion
+/// estimates could not be located (MISSING).
+fn collect_gates(criterion_dir: &Path) -> (Vec<GateResult>, usize) {
     let mut gates: Vec<GateResult> = Vec::with_capacity(GATE_IDS.len());
+    let mut missing = 0usize;
 
     for (&gate_id, &target_ratio) in GATE_IDS.iter().zip(TARGET_RATIOS.iter()) {
         let oxi_path = locate_estimates_json(criterion_dir, gate_id, "oxifft");
@@ -239,6 +354,7 @@ fn collect_gates(criterion_dir: &Path) -> Vec<GateResult> {
                 });
             }
             (oxi_p, fftw_p) => {
+                missing += 1;
                 eprintln!(
                     "  {gate_id}: MISSING estimates — oxifft={}, fftw={}",
                     if oxi_p.is_some() { "found" } else { "MISSING" },
@@ -256,7 +372,7 @@ fn collect_gates(criterion_dir: &Path) -> Vec<GateResult> {
         }
     }
 
-    gates
+    (gates, missing)
 }
 
 // =============================================================================
@@ -264,10 +380,12 @@ fn collect_gates(criterion_dir: &Path) -> Vec<GateResult> {
 // =============================================================================
 
 /// Write the JSON report and emit the Markdown table.
-fn write_report(report: &RatioReport, baseline_dir: &Path) -> Result<(), BoxError> {
+///
+/// The dated snapshot (`fftw_ratios_<date>.json`) is written into `out_dir`.
+fn write_report(report: &RatioReport, out_dir: &Path) -> Result<(), BoxError> {
     // Emit the JSON file
-    std::fs::create_dir_all(baseline_dir)?;
-    let json_path = baseline_dir.join(format!("fftw_ratios_{BASELINE_DATE}.json"));
+    std::fs::create_dir_all(out_dir)?;
+    let json_path = out_dir.join(format!("fftw_ratios_{}.json", report.date));
     let json_content = serde_json::to_string_pretty(report)?;
     std::fs::write(&json_path, &json_content)?;
     eprintln!("\nRatios written to: {}", json_path.display());
@@ -277,6 +395,12 @@ fn write_report(report: &RatioReport, baseline_dir: &Path) -> Result<(), BoxErro
     let mut out = stdout.lock();
 
     writeln!(out, "# FFTW Parity Ratio Report — {}", report.date)?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "FFTW: {} — version {}",
+        report.fftw_source, report.fftw_version
+    )?;
     writeln!(out)?;
     writeln!(
         out,
@@ -331,7 +455,72 @@ fn write_report(report: &RatioReport, baseline_dir: &Path) -> Result<(), BoxErro
 // Main
 // =============================================================================
 
+/// Parsed command-line options.
+struct Cli {
+    /// Override the criterion output directory.
+    criterion_dir: Option<PathBuf>,
+    /// Explicit snapshot output directory.
+    out: Option<PathBuf>,
+    /// Promote the snapshot into the tracked `benches/baselines/<version>/`.
+    commit_baseline: bool,
+}
+
+/// Parse CLI args; prints usage and returns `None` for `--help`.
+fn parse_cli() -> Result<Option<Cli>, BoxError> {
+    let mut criterion_dir = None;
+    let mut out = None;
+    let mut commit_baseline = false;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                return Ok(None);
+            }
+            "--commit-baseline" => commit_baseline = true,
+            "--criterion-dir" => {
+                let v = args
+                    .next()
+                    .ok_or("--criterion-dir requires a directory argument")?;
+                criterion_dir = Some(PathBuf::from(v));
+            }
+            "--out" => {
+                let v = args.next().ok_or("--out requires a directory argument")?;
+                out = Some(PathBuf::from(v));
+            }
+            other => return Err(format!("unknown argument: {other}").into()),
+        }
+    }
+
+    Ok(Some(Cli {
+        criterion_dir,
+        out,
+        commit_baseline,
+    }))
+}
+
+fn print_usage() {
+    eprintln!(
+        "fftw_ratio_report — summarise FFTW parity-gate criterion results\n\n\
+         USAGE:\n    fftw_ratio_report [OPTIONS]\n\n\
+         OPTIONS:\n\
+         \x20   --criterion-dir <DIR>  Override the criterion output directory\n\
+         \x20                          (default: honours CARGO_TARGET_DIR)\n\
+         \x20   --out <DIR>            Write the dated snapshot to <DIR>\n\
+         \x20                          (default: <target>/fftw-ratio-reports, untracked)\n\
+         \x20   --commit-baseline      Promote the snapshot into the tracked\n\
+         \x20                          benches/baselines/{BASELINE_VERSION}/ history\n\
+         \x20   -h, --help             Show this help\n\n\
+         Exits non-zero if any gate's criterion estimates are MISSING."
+    );
+}
+
 fn main() -> Result<(), BoxError> {
+    let Some(cli) = parse_cli()? else {
+        return Ok(());
+    };
+
     // Locate the workspace root (the directory containing `target/`)
     let bench_manifest_dir =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
@@ -340,16 +529,59 @@ fn main() -> Result<(), BoxError> {
         .parent()
         .map_or_else(|| bench_manifest_dir.clone(), Path::to_path_buf);
 
-    let criterion_dir = workspace_root.join("target").join("criterion");
+    let criterion_dir = resolve_criterion_dir(cli.criterion_dir.as_deref(), &workspace_root);
+
+    // The tracked baseline history — only written to under --commit-baseline.
     let baseline_dir = workspace_root
         .join("benches")
         .join("baselines")
-        .join("v0.3.0");
+        .join(BASELINE_VERSION);
+
+    // Default snapshot location: an untracked directory beside `criterion/`
+    // (i.e. inside the target dir), never a version-controlled source path.
+    let default_out_dir = criterion_dir
+        .parent()
+        .map_or_else(|| criterion_dir.clone(), Path::to_path_buf)
+        .join("fftw-ratio-reports");
+
+    // Resolve the effective output directory.
+    let out_dir = if cli.commit_baseline {
+        baseline_dir.clone()
+    } else {
+        cli.out.clone().unwrap_or(default_out_dir)
+    };
+
+    // Guard: refuse to write into the tracked baseline history unless the
+    // caller explicitly asked for it with --commit-baseline. This prevents an
+    // accidental --out into benches/baselines/ from clobbering real history.
+    if !cli.commit_baseline && out_dir.starts_with(&baseline_dir) {
+        return Err(format!(
+            "refusing to write into the tracked baseline history at {} \
+             without --commit-baseline",
+            out_dir.display()
+        )
+        .into());
+    }
 
     eprintln!("Criterion output dir: {}", criterion_dir.display());
-    eprintln!("Baseline output dir:  {}", baseline_dir.display());
+    eprintln!("Snapshot output dir:  {}", out_dir.display());
+    if cli.commit_baseline {
+        eprintln!("(--commit-baseline: promoting snapshot into tracked history)");
+    }
 
-    let gates = collect_gates(&criterion_dir);
+    let (gates, missing) = collect_gates(&criterion_dir);
+
+    // Never promote incomplete data into the tracked baseline history: if any
+    // gate is MISSING, refuse to write under --commit-baseline (this is exactly
+    // how real baselines get clobbered with NaN placeholders).
+    if cli.commit_baseline && missing > 0 {
+        return Err(format!(
+            "refusing to --commit-baseline with {missing}/{} gate(s) MISSING; \
+             run the full parity benches first",
+            GATE_IDS.len()
+        )
+        .into());
+    }
 
     let all_ratios: Vec<f64> = gates
         .iter()
@@ -361,10 +593,12 @@ fn main() -> Result<(), BoxError> {
     let geomean_ratio = geomean(&all_ratios);
 
     let report = RatioReport {
-        date: BASELINE_DATE.to_string(),
+        date: today(),
         git_sha: git_sha(),
         cpu: cpu_brand(),
         rustc: rustc_version(),
+        fftw_source: fftw_source(),
+        fftw_version: fftw_version(),
         gates,
         summary: Summary {
             gates_passing,
@@ -373,7 +607,20 @@ fn main() -> Result<(), BoxError> {
         },
     };
 
-    write_report(&report, &baseline_dir)?;
+    write_report(&report, &out_dir)?;
+
+    // A misconfigured environment (criterion output not found) must not look
+    // like a clean pass: fail loudly when any gate is MISSING.
+    if missing > 0 {
+        eprintln!(
+            "\nERROR: {missing}/{} gate(s) MISSING criterion estimates — \
+             check that the parity benches ran against {} \
+             (see --criterion-dir / CARGO_TARGET_DIR).",
+            GATE_IDS.len(),
+            criterion_dir.display()
+        );
+        std::process::exit(2);
+    }
 
     Ok(())
 }

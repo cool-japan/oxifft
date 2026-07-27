@@ -269,6 +269,58 @@ cargo bench --package oxifft-bench --features fftw-compare
 # oxifft/fftw_1024    time:   [12.345 µs]  (oxifft: 12.3 µs, FFTW: 11.8 µs, ratio: 1.04x)
 ```
 
+### FFTW Parity Gates (`fftw_ratio_report`)
+
+The `oxifft-bench` crate ships a `fftw_ratio_report` binary that reads the
+criterion output from the parity-gate benches and reports the OxiFFT/FFTW ratio
+for each of the 7 v1.0 gates (ratio = OxiFFT time / FFTW time; **lower is
+better**), plus the geometric mean and a pass/fail per gate.
+
+```bash
+# 1. Run the parity-gate benches (respects CARGO_TARGET_DIR)
+cargo bench -p oxifft-bench --features fftw-compare --bench fftw_parity_gates
+
+# 2. Generate the ratio report from the criterion output
+#    (the bin requires the `fftw-compare` feature)
+cargo run -p oxifft-bench --features fftw-compare --bin fftw_ratio_report
+
+# Write the dated JSON snapshot to an explicit (untracked) directory
+cargo run -p oxifft-bench --features fftw-compare --bin fftw_ratio_report -- --out /tmp/oxifft-bench
+
+# Promote the snapshot into the tracked baseline history
+# (benches/baselines/vX.Y.Z/) — do this deliberately, per release
+cargo run -p oxifft-bench --features fftw-compare --bin fftw_ratio_report -- --commit-baseline
+```
+
+Notes on the CLI (fixed in v0.4.0):
+
+- It **honors `CARGO_TARGET_DIR`** (then `cargo metadata`, then
+  `<workspace>/target`) when locating `criterion/`, so a non-default target dir
+  no longer silently reports every gate as `MISSING`.
+- By default it writes the dated snapshot to an **untracked** location; the
+  tracked `benches/baselines/<version>/` history is only written under
+  `--commit-baseline`, so a routine run cannot overwrite committed history.
+- It exits non-zero when any gate is `MISSING`, so a misconfigured environment
+  is not mistaken for a clean pass.
+
+#### Current honest numbers (v0.3.0 baseline)
+
+The committed baseline `benches/baselines/v0.3.0/fftw_ratios_2026-04-20.json`
+(Apple Silicon, mid-development) records **geomean ratio 1.50×**, **4 of 7**
+gates passing. The three failing gates:
+
+| Gate | Ratio | Target | Status |
+|------|-------|--------|--------|
+| `1d_cplx_2e20` (2^20 complex DFT) | 3.67× | < 2.0 | ❌ FAIL |
+| `1d_real_2e10` (2^10 real FFT) | 3.95× | < 2.0 | ❌ FAIL |
+| `dct2_1024` (DCT-II, 1024) | 3.90× | < 3.0 | ❌ FAIL |
+
+Against RustFFT, OxiFFT currently trails on large power-of-2, prime, and several
+composite sizes (the root cause is SIMD coverage limited to small codelets and
+pointwise multiplies). **Do not describe OxiFFT as generally at parity with, or
+faster than, FFTW/RustFFT until these gates pass.** Re-run and refresh the
+baseline (with `--commit-baseline`) before any performance announcement.
+
 ### Compare OxiFFT vs RustFFT
 
 RustFFT comparison is included in the test suite:
@@ -418,6 +470,12 @@ sudo cpupower frequency-set --governor powersave
 
 ### Expected Performance Characteristics
 
+> These are **rough order-of-magnitude targets** on modern hardware, not
+> measured results, and they say nothing about the FFTW/RustFFT ratio. For the
+> real, committed OxiFFT-vs-FFTW numbers (and the currently-failing gates), see
+> [FFTW Parity Gates](#fftw-parity-gates-fftw_ratio_report) above and
+> `benches/baselines/v0.3.0/`.
+
 | Transform Size | Time (µs) | Operations | Algorithm |
 |----------------|-----------|------------|-----------|
 | 64             | ~1-2      | 64 log₂ 64 = 384 | Cooley-Tukey |
@@ -440,7 +498,10 @@ T(1024) / T(512) ≈ 2 * (log 1024 / log 512) = 2 * (10/9) ≈ 2.22
 
 ## Benchmark Results Template
 
-Use this template to document benchmark results:
+Use this template to document benchmark results. **The `vs FFTW` numbers below
+are illustrative placeholders, not real measurements** — replace them with the
+output of `fftw_ratio_report` (see [BENCHMARK_RESULTS_TEMPLATE.md](BENCHMARK_RESULTS_TEMPLATE.md)
+and the committed baselines under `benches/baselines/`):
 
 ```markdown
 ## Benchmark Results - [Date]

@@ -39,6 +39,13 @@ gen_simd_codelet!(8);
 // module-level const declarations (ISA_SCALAR_LEVEL, etc.) that would
 // collide if multiple invocations shared the same namespace.
 
+// The cached dispatchers are emitted by `gen_dispatcher_codelet!`. Its
+// `AtomicU8`-backed ISA cache and feature detection are fully `no_std`-safe:
+// the cache uses `core::sync::atomic::AtomicU8`, and x86 feature probing goes
+// through the self-contained macro that expands to `is_x86_feature_detected!`
+// under `std` and `cfg!(target_feature = ...)` under `no_std`. No `::std::`
+// paths are emitted, so these submodules are available on `no_std` too.
+
 /// Cached dispatcher submodule for size-4 f64.
 mod cached_dispatch_4_f64 {
     use oxifft_codegen::gen_dispatcher_codelet;

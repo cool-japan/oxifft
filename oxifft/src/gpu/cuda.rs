@@ -1,8 +1,27 @@
 //! CUDA backend for GPU FFT using real oxicuda types.
 //!
 //! Uses oxicuda-driver for device management and oxicuda-fft for plan
-//! creation. Actual GPU kernel execution is deferred until oxicuda-launch
-//! integration; CPU FFT is used as the computation engine in the meantime.
+//! creation.
+//!
+//! # Execution target: CPU emulation (current status)
+//!
+//! **This backend currently computes on the CPU, not the GPU.**  A real CUDA
+//! [`oxicuda_driver::Context`], [`oxicuda_fft::FftHandle`], and
+//! [`oxicuda_fft::FftPlan`] are allocated (so the device is genuinely opened),
+//! but every transform is evaluated with the crate's own CPU DFT/FFT. This is
+//! not merely an oxifft limitation: `oxicuda-fft`'s own C2C/R2C/C2R execution
+//! path (`FftHandle::execute`) is itself a host fallback that copies the data
+//! off the device, runs a CPU FFT, and copies the result back — it does not yet
+//! launch device kernels.
+//!
+//! Callers can detect this at runtime, without parsing log output, via
+//! [`crate::gpu::GpuFft::execution_target`] (returns
+//! [`crate::gpu::ExecutionTarget::Cpu`] for CUDA) or
+//! [`GpuCapabilities::hardware_accelerated`] (`false` for CUDA).
+//!
+//! Making this backend truly GPU-accelerated requires oxicuda-fft to replace
+//! its host fallback with real PTX kernel dispatch; see the crate's TODO for
+//! the tracking item.
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -49,16 +68,36 @@ pub fn query_capabilities() -> GpuResult<GpuCapabilities> {
     let total_memory = device
         .total_memory()
         .map_err(|e| GpuError::InitializationFailed(e.to_string()))?;
+
+    // Number of streaming multiprocessors — a real device attribute that needs
+    // no active context.  Maps a query failure to 0 rather than erroring out.
+    let compute_units = device
+        .multiprocessor_count()
+        .map(|c| c.max(0) as u32)
+        .unwrap_or(0);
+
+    // Free device memory requires a current CUDA context (cuMemGetInfo).  Create
+    // a transient context and query it; best-effort — any failure leaves 0.
+    let available_memory = match Context::new(&device) {
+        Ok(_ctx) => oxicuda_driver::memory_info::device_memory_info()
+            .map(|(free, _total)| free as u64)
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+
     Ok(GpuCapabilities {
         backend: GpuBackend::Cuda,
         device_name: name,
         total_memory: total_memory as u64,
-        available_memory: 0,
+        available_memory,
         max_fft_size: 1 << 27,
         supports_f64: true,
         supports_f16: true,
-        compute_units: 0,
+        compute_units,
         max_workgroup_size: 1024,
+        // CUDA currently emulates on the CPU (see the module docs); this is the
+        // programmatic signal for that.
+        hardware_accelerated: false,
     })
 }
 
@@ -147,8 +186,12 @@ impl CudaFftPlan {
 
     /// Execute the FFT.
     ///
-    /// GPU kernel execution is pending oxicuda-launch integration.
-    /// CPU FFT is used as the computation engine until then.
+    /// # Execution target
+    ///
+    /// Computes on the **CPU**. Real device-kernel dispatch is pending GPU
+    /// kernel support in oxicuda-fft (its own execute path is still a host
+    /// fallback). See the module documentation and
+    /// [`crate::gpu::GpuFft::execution_target`].
     ///
     /// # Errors
     ///
@@ -222,10 +265,12 @@ impl CudaFftPlan {
 
     /// Execute a real-to-complex forward FFT.
     ///
-    /// // KNOWN LIMITATION: CUDA R2C/C2R runs on CPU until oxicuda-launch kernel dispatch is integrated
+    /// # Execution target
     ///
-    /// Wraps the existing CPU-fallback path.  An `eprintln!` warning is
-    /// emitted to notify callers of the CPU path.
+    /// This currently runs on the **CPU** (see the module-level documentation):
+    /// [`CudaFftPlan`] computes on the host until oxicuda-fft exposes real GPU
+    /// kernel dispatch.  Query [`crate::gpu::GpuFft::execution_target`] to detect
+    /// this programmatically instead of relying on log output.
     ///
     /// # Errors
     ///
@@ -253,11 +298,6 @@ impl CudaFftPlan {
             });
         }
 
-        eprintln!(
-            "CUDA R2C/C2R: using CPU fallback (known limitation \
-             — GPU path pending oxicuda-launch kernel dispatch integration)"
-        );
-
         use crate::api::{Direction, Flags, Plan};
 
         // Zero-extend real input → complex.
@@ -280,10 +320,12 @@ impl CudaFftPlan {
 
     /// Execute a complex-to-real inverse FFT.
     ///
-    /// // KNOWN LIMITATION: CUDA R2C/C2R runs on CPU until oxicuda-launch kernel dispatch is integrated
+    /// # Execution target
     ///
-    /// Wraps the existing CPU-fallback path.  An `eprintln!` warning is
-    /// emitted to notify callers of the CPU path.
+    /// This currently runs on the **CPU** (see the module-level documentation):
+    /// [`CudaFftPlan`] computes on the host until oxicuda-fft exposes real GPU
+    /// kernel dispatch.  Query [`crate::gpu::GpuFft::execution_target`] to detect
+    /// this programmatically instead of relying on log output.
     ///
     /// # Errors
     ///
@@ -311,11 +353,6 @@ impl CudaFftPlan {
             });
         }
 
-        eprintln!(
-            "CUDA R2C/C2R: using CPU fallback (known limitation \
-             — GPU path pending oxicuda-launch kernel dispatch integration)"
-        );
-
         use crate::api::{Direction, Flags, Plan};
 
         // Reconstruct conjugate-symmetric full spectrum.
@@ -337,6 +374,56 @@ impl CudaFftPlan {
         let norm = 1.0_f64 / n as f64;
         for (i, c) in time_f64.iter().enumerate() {
             output[i] = (c.re * norm) as f32;
+        }
+        Ok(())
+    }
+
+    /// Execute a single size-`self.size()` transform on the CPU, independent of
+    /// this plan's configured batch size.
+    ///
+    /// Used by the batch trait ([`crate::gpu::batch::GpuBatchFft`]) so that a
+    /// plan built with `batch_size > 1` can still service the per-element batch
+    /// API, whose slices are each exactly one transform.  Follows the FFTW
+    /// (unnormalised) convention, matching [`Self::execute`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuError::SizeMismatch` if `input`/`output` are not
+    /// `self.size()` long, or `GpuError::ExecutionFailed` if the CPU plan
+    /// cannot be created.
+    pub(crate) fn execute_one_cpu<T: Float>(
+        &self,
+        input: &[Complex<T>],
+        output: &mut [Complex<T>],
+        direction: GpuDirection,
+    ) -> GpuResult<()> {
+        use crate::api::{Direction, Flags, Plan};
+
+        if input.len() != self.size || output.len() != self.size {
+            return Err(GpuError::SizeMismatch {
+                expected: self.size,
+                got: input.len().min(output.len()),
+            });
+        }
+
+        let dir = match direction {
+            GpuDirection::Forward => Direction::Forward,
+            GpuDirection::Inverse => Direction::Backward,
+        };
+
+        let plan = Plan::dft_1d(self.size, dir, Flags::ESTIMATE).ok_or_else(|| {
+            GpuError::ExecutionFailed("Failed to create CPU fallback plan".into())
+        })?;
+
+        let input_f64: Vec<Complex<f64>> = input
+            .iter()
+            .map(|c| Complex::new(c.re.to_f64().unwrap_or(0.0), c.im.to_f64().unwrap_or(0.0)))
+            .collect();
+        let mut output_f64 = vec![Complex::<f64>::zero(); self.size];
+        plan.execute(&input_f64, &mut output_f64);
+
+        for (o, c) in output.iter_mut().zip(output_f64.iter()) {
+            *o = Complex::new(T::from_f64(c.re), T::from_f64(c.im));
         }
         Ok(())
     }
@@ -407,6 +494,10 @@ mod tests {
             let caps = query_capabilities().expect("Failed to query capabilities");
             assert_eq!(caps.backend, GpuBackend::Cuda);
             assert!(caps.supports_f64);
+            assert!(
+                !caps.hardware_accelerated,
+                "CUDA currently emulates on the CPU"
+            );
         }
     }
 

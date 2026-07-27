@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::streaming::{StreamingFft, WindowFunction, stft, istft};
 //!
 //! // One-shot STFT
@@ -21,12 +21,13 @@
 //!
 //! // Reconstruct from spectrogram
 //! let reconstructed = istft(&spectrogram, 64, WindowFunction::Hann);
+//! # let _ = reconstructed;
 //!
 //! // Real-time streaming
 //! let mut streaming = StreamingFft::new(256, 64, WindowFunction::Hann);
-//! streaming.feed(&signal[0..128]);
+//! streaming.feed(&signal);
 //! while let Some(frame) = streaming.pop_frame() {
-//!     println!("Frame: {:?}", frame);
+//!     let _ = frame; // process each frame in real time
 //! }
 //! ```
 

@@ -25,16 +25,16 @@ pub enum SimdLevel {
 pub fn detect_simd_level() -> SimdLevel {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f") {
+        if crate::detect_x86_feature!("avx512f") {
             return SimdLevel::Avx512;
         }
-        if is_x86_feature_detected!("avx2") {
+        if crate::detect_x86_feature!("avx2") {
             return SimdLevel::Avx2;
         }
-        if is_x86_feature_detected!("avx") {
+        if crate::detect_x86_feature!("avx") {
             return SimdLevel::Avx;
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::detect_x86_feature!("sse2") {
             return SimdLevel::Sse2;
         }
         // No SIMD features detected on x86_64
@@ -62,21 +62,21 @@ pub fn detect_simd_level() -> SimdLevel {
 #[must_use]
 #[cfg(target_arch = "x86_64")]
 pub fn has_avx() -> bool {
-    is_x86_feature_detected!("avx")
+    crate::detect_x86_feature!("avx")
 }
 
 /// Check if AVX2 is available.
 #[must_use]
 #[cfg(target_arch = "x86_64")]
 pub fn has_avx2() -> bool {
-    is_x86_feature_detected!("avx2")
+    crate::detect_x86_feature!("avx2")
 }
 
 /// Check if AVX-512 is available.
 #[must_use]
 #[cfg(target_arch = "x86_64")]
 pub fn has_avx512() -> bool {
-    is_x86_feature_detected!("avx512f")
+    crate::detect_x86_feature!("avx512f")
 }
 
 /// Check if SVE is available at runtime.

@@ -16,7 +16,7 @@
 //! This requires only an N-point FFT (not 2N), and the plan is cached
 //! on the `R2rSolver` struct, eliminating per-call planning overhead.
 
-use crate::api::{Direction, Flags, Plan};
+use crate::api::{Direction, Plan};
 use crate::kernel::{complex_mul::complex_mul_aos, Complex, Float};
 use crate::prelude::*;
 
@@ -158,7 +158,7 @@ impl<T: Float> R2rSolver<T> {
         }
 
         let mut y_fft = vec![Complex::zero(); n];
-        if let Some(plan) = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(n, Direction::Forward, self.flags) {
             plan.execute(&y, &mut y_fft);
         } else {
             return self.execute_dct2_direct(input, output);
@@ -298,7 +298,7 @@ impl<T: Float> R2rSolver<T> {
         let z_conj: Vec<Complex<T>> = z.iter().map(|c| c.conj()).collect();
         let mut y = vec![Complex::zero(); two_n];
 
-        if let Some(plan) = Plan::dft_1d(two_n, Direction::Forward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(two_n, Direction::Forward, self.flags) {
             plan.execute(&z_conj, &mut y);
         } else {
             return self.execute_dct3_direct(input, output);
@@ -380,7 +380,7 @@ impl<T: Float> R2rSolver<T> {
 
         let mut y = vec![Complex::zero(); m];
 
-        if let Some(plan) = Plan::dft_1d(m, Direction::Forward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(m, Direction::Forward, self.flags) {
             plan.execute(&v, &mut y);
         } else {
             return self.execute_dct1_direct(input, output);
@@ -503,7 +503,7 @@ impl<T: Float> R2rSolver<T> {
 
         let mut y = vec![Complex::zero(); four_n];
 
-        if let Some(plan) = Plan::dft_1d(four_n, Direction::Forward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(four_n, Direction::Forward, self.flags) {
             plan.execute(&x_padded, &mut y);
         } else {
             return self.execute_dct4_direct(input, output);
@@ -585,7 +585,7 @@ impl<T: Float> R2rSolver<T> {
 
         let mut y = vec![Complex::zero(); m];
 
-        if let Some(plan) = Plan::dft_1d(m, Direction::Forward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(m, Direction::Forward, self.flags) {
             plan.execute(&v, &mut y);
         } else {
             return self.execute_dst1_direct(input, output);
@@ -653,7 +653,7 @@ impl<T: Float> R2rSolver<T> {
             .collect();
 
         let mut dct2_y = vec![T::ZERO; n];
-        let helper = Self::new(R2rKind::Redft10, n);
+        let helper = Self::new_with_flags(R2rKind::Redft10, n, self.flags);
         helper.execute_dct2(&y, &mut dct2_y);
 
         // DST_II[k] = DCT_II(y)[N-1-k]
@@ -714,7 +714,7 @@ impl<T: Float> R2rSolver<T> {
         let f_reversed: Vec<T> = (0..n).map(|k| input[n - 1 - k]).collect();
 
         let mut dct3_out = vec![T::ZERO; n];
-        let helper = Self::new(R2rKind::Redft01, n);
+        let helper = Self::new_with_flags(R2rKind::Redft01, n, self.flags);
         helper.execute_dct3_fast(&f_reversed, &mut dct3_out);
 
         // DST_III[n] = (-1)^n * DCT_III(f_reversed)[n]
@@ -776,7 +776,7 @@ impl<T: Float> R2rSolver<T> {
         let x_reversed: Vec<T> = (0..n).map(|i| input[n - 1 - i]).collect();
 
         let mut dct4_out = vec![T::ZERO; n];
-        let helper = Self::new(R2rKind::Redft11, n);
+        let helper = Self::new_with_flags(R2rKind::Redft11, n, self.flags);
         helper.execute_dct4_fast(&x_reversed, &mut dct4_out);
 
         // DST_IV[k] = (-1)^k * DCT_IV(x_reversed)[k]
@@ -846,7 +846,7 @@ impl<T: Float> R2rSolver<T> {
         let v_complex: Vec<Complex<T>> = input.iter().map(|&x| Complex::new(x, T::ZERO)).collect();
         let mut y = vec![Complex::zero(); n];
 
-        if let Some(plan) = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(n, Direction::Forward, self.flags) {
             plan.execute(&v_complex, &mut y);
         } else {
             return self.execute_dht_direct(input, output);

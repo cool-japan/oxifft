@@ -13,16 +13,31 @@
 //!
 //! # Codelet convention
 //!
-//! All generated functions follow the existing `OxiFFT` codelet convention:
-//! ```ignore
-//! pub fn codelet_any_{N}<T: crate::kernel::Float>(
+//! Hardcoded-class generated functions follow the existing `OxiFFT` codelet
+//! convention (`codelet_notw_{N}` for the direct/odd/Rader sizes, `codelet_any_1`
+//! for the identity):
+//! ```text
+//! pub fn codelet_notw_{N}<T: crate::kernel::Float>(
 //!     x: &mut [crate::kernel::Complex<T>],
 //!     sign: i32,
 //! )
 //! ```
 //! where `sign < 0` means forward (W = e^{-2*pi*i/N}) and `sign > 0` means inverse.
+//! The runtime-wrapper classes emit `codelet_any_{N}` returning
+//! `Result<(), &'static str>` (they delegate to `::oxifft`'s `Plan::dft_1d`).
 //!
 //! See `Plan::dft_1d` in the `oxifft` crate for the primary entry point.
+//!
+//! # Classifying a size
+//!
+//! ```
+//! use oxifft_codegen_impl::{classify, SizeClass};
+//!
+//! assert!(matches!(classify(8), Ok(SizeClass::Notw(8))));
+//! assert!(matches!(classify(13), Ok(SizeClass::RaderHardcoded(13))));
+//! assert!(matches!(classify(15), Ok(SizeClass::MixedRadix(_))));
+//! assert!(matches!(classify(2003), Ok(SizeClass::Bluestein(2003))));
+//! ```
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -53,6 +68,21 @@ impl core::fmt::Display for CodegenError {
     }
 }
 
+/// Upper bound on any-size codelet generation.
+///
+/// Sizes above this are rejected with [`CodegenError::UnsupportedSize`] rather
+/// than routed to a runtime wrapper. The ceiling serves two purposes:
+///
+/// 1. It bounds the trial-division work performed by `is_prime` during
+///    classification (checked *before* any primality test, so a huge literal
+///    cannot stall proc-macro expansion).
+/// 2. A single generated codelet for an astronomically large transform is never
+///    a sensible request; such sizes indicate a bug at the call site.
+///
+/// `2^24` (16,777,216) is far larger than any realistic codelet size while still
+/// keeping `√n` trial division trivial.
+pub const MAX_ANY_SIZE: usize = 1 << 24;
+
 // ============================================================================
 // Size classification
 // ============================================================================
@@ -81,7 +111,8 @@ pub enum SizeClass {
 ///
 /// # Errors
 ///
-/// Returns `CodegenError::InvalidSize(0)` when `n == 0`.
+/// - Returns `CodegenError::InvalidSize(0)` when `n == 0`.
+/// - Returns `CodegenError::UnsupportedSize(n)` when `n > MAX_ANY_SIZE`.
 pub fn classify(n: usize) -> Result<SizeClass, CodegenError> {
     if n == 0 {
         return Err(CodegenError::InvalidSize(0));
@@ -89,6 +120,11 @@ pub fn classify(n: usize) -> Result<SizeClass, CodegenError> {
     if n == 1 {
         // N=1 is the identity transform; route to Notw so we emit the trivial codelet.
         return Ok(SizeClass::Notw(1));
+    }
+    // Reject absurd sizes up front. This MUST precede `is_prime` below so that an
+    // enormous literal cannot trigger unbounded trial division at expansion time.
+    if n > MAX_ANY_SIZE {
+        return Err(CodegenError::UnsupportedSize(n));
     }
 
     // Hardcoded non-twiddle direct codelets {2, 4, 8, 16, 32, 64}
@@ -109,8 +145,9 @@ pub fn classify(n: usize) -> Result<SizeClass, CodegenError> {
         return Ok(SizeClass::MixedRadix(factors));
     }
 
-    // Prime p <= 1021 — known to have a primitive root; routed to runtime
-    if is_prime(n) && n <= 1021 {
+    // Prime p <= 1021 — known to have a primitive root; routed to runtime.
+    // The bound is checked *before* the O(√n) primality test to cap the work.
+    if n <= 1021 && is_prime(n) {
         return Ok(SizeClass::RaderPrime(n));
     }
 
@@ -128,7 +165,7 @@ fn try_factor_smooth7(mut n: usize) -> Option<Vec<u16>> {
     const RADICES: &[usize] = &[16, 8, 7, 5, 4, 3, 2];
     let mut factors = Vec::new();
     for &r in RADICES {
-        while n % r == 0 {
+        while n.is_multiple_of(r) {
             // SAFETY: every radix in RADICES is <= 16, which fits in u16.
             #[allow(clippy::cast_possible_truncation)]
             factors.push(r as u16);
@@ -149,7 +186,7 @@ const fn is_prime(n: usize) -> bool {
     if n == 2 {
         return true;
     }
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         return false;
     }
     let mut i = 3usize;
@@ -158,7 +195,7 @@ const fn is_prime(n: usize) -> bool {
         if sq > n {
             break;
         }
-        if n % i == 0 {
+        if n.is_multiple_of(i) {
             return false;
         }
         i += 2;
@@ -172,17 +209,16 @@ const fn is_prime(n: usize) -> bool {
 
 /// Generate a codelet `TokenStream` for size `n`.
 ///
-/// The emitted function is:
-/// ```ignore
-/// pub fn codelet_any_{n}<T: crate::kernel::Float>(
-///     x: &mut [crate::kernel::Complex<T>],
-///     sign: i32,
-/// )
-/// ```
+/// The emitted function name and signature depend on the [`SizeClass`]:
+/// hardcoded classes emit `codelet_notw_{n}` / `codelet_any_1` returning `()`,
+/// while runtime-wrapper classes emit `codelet_any_{n}` returning
+/// `Result<(), &'static str>`. All take `(x: &mut [crate::kernel::Complex<T>], sign: i32)`.
 ///
 /// # Errors
 ///
-/// Returns `CodegenError` if `n == 0` or code emission fails.
+/// Returns `CodegenError::InvalidSize(0)` if `n == 0`,
+/// `CodegenError::UnsupportedSize(n)` if `n > MAX_ANY_SIZE`, or
+/// `CodegenError::EmitError` if code emission fails.
 pub fn generate(n: usize) -> Result<TokenStream, CodegenError> {
     match classify(n)? {
         SizeClass::Notw(sz) => generate_notw_any(sz),
@@ -250,16 +286,27 @@ fn generate_identity_codelet() -> TokenStream {
 fn generate_runtime_wrapper(n: usize) -> TokenStream {
     let fn_name = format_ident!("codelet_any_{n}");
     let n_lit = proc_macro2::Literal::usize_unsuffixed(n);
+    // Build the failure message at expansion time so the generated code carries a
+    // plain `&'static str` — no `panic!` is ever spliced into the consumer crate.
+    let plan_err = format!("codelet_any_{n}: Plan::dft_1d failed for size {n}");
 
     quote! {
         /// Runtime-delegating codelet generated for this size.
         ///
         /// Constructs an OxiFFT plan on each call and executes it.
         /// `sign < 0` selects the forward transform; `sign > 0` selects the inverse.
+        ///
+        /// Returns `Err` if the OxiFFT planner cannot build a plan for this size;
+        /// the failure is propagated to the caller rather than panicking inside
+        /// generated, non-reviewable code.
+        ///
+        /// # Errors
+        ///
+        /// Returns `Err(&'static str)` when `Plan::dft_1d` returns `None`.
         pub fn #fn_name<T: crate::kernel::Float>(
             x: &mut [crate::kernel::Complex<T>],
             sign: i32,
-        ) {
+        ) -> ::core::result::Result<(), &'static str> {
             use ::oxifft::api::{Direction, Flags, Plan};
 
             debug_assert_eq!(x.len(), #n_lit, "codelet input length mismatch");
@@ -271,16 +318,17 @@ fn generate_runtime_wrapper(n: usize) -> TokenStream {
             };
 
             let plan = Plan::<T>::dft_1d(#n_lit, direction, Flags::ESTIMATE)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "OxiFFT: Plan::dft_1d failed for compile-time-verified size {}",
-                        #n_lit
-                    )
-                });
+                .ok_or(#plan_err)?;
 
             // Plan::execute is out-of-place; copy input to scratch, then execute in-place.
-            let input_snapshot: ::std::vec::Vec<crate::kernel::Complex<T>> = x.to_vec();
+            // No explicit `Vec` path here (previously `::std::vec::Vec`, which does
+            // not exist under `#![no_std]`): `[T]::to_vec` is an inherent method
+            // resolved structurally, so plain type inference reaches whichever
+            // `Vec` (`std`'s or `alloc`'s — the same type either way) the calling
+            // crate has linked, with no explicit path required.
+            let input_snapshot = x.to_vec();
             plan.execute(&input_snapshot, x);
+            ::core::result::Result::Ok(())
         }
     }
 }
@@ -291,10 +339,11 @@ fn generate_runtime_wrapper(n: usize) -> TokenStream {
 
 /// Parse `gen_any_codelet!(N)` input and dispatch.
 ///
-/// # Syntax
-/// ```ignore
-/// gen_any_codelet!(8);    // size-8, generates codelet_any_8
-/// gen_any_codelet!(15);   // size-15, runtime-delegating wrapper
+/// This is the backend for the `oxifft_codegen::gen_any_codelet!` proc-macro;
+/// the macro is invoked as (from a crate that provides `crate::kernel`):
+/// ```text
+/// gen_any_codelet!(8);    // size-8, generates codelet_notw_8
+/// gen_any_codelet!(15);   // size-15, runtime-delegating wrapper (codelet_any_15)
 /// gen_any_codelet!(2003); // size-2003, Bluestein runtime wrapper
 /// ```
 ///
@@ -324,12 +373,15 @@ fn parse_and_generate(input: TokenStream) -> Result<TokenStream, CodegenError> {
 
 /// Builder for programmatic codelet generation without proc-macros.
 ///
+/// Produces the same [`proc_macro2::TokenStream`] the `gen_any_codelet!` macro
+/// would emit, for use from build scripts, benchmarks, and codegen tooling.
+///
 /// # Example
-/// ```no_run
+/// ```
 /// use oxifft_codegen_impl::CodeletBuilder;
 ///
-/// let ts = CodeletBuilder::new(15).build().unwrap();
-/// println!("{ts}");
+/// let tokens = CodeletBuilder::new(15).build().expect("size 15 is supported");
+/// assert!(!tokens.to_string().is_empty());
 /// ```
 pub struct CodeletBuilder {
     n: usize,
@@ -431,6 +483,76 @@ mod tests {
     #[test]
     fn classify_invalid_zero() {
         assert_eq!(classify(0).unwrap_err(), CodegenError::InvalidSize(0));
+    }
+
+    #[test]
+    fn classify_above_ceiling_is_unsupported() {
+        // Just past the ceiling must be rejected (not routed to Bluestein).
+        assert_eq!(
+            classify(MAX_ANY_SIZE + 1).unwrap_err(),
+            CodegenError::UnsupportedSize(MAX_ANY_SIZE + 1)
+        );
+        // usize::MAX would take ~2^31 trial-division steps in is_prime if the
+        // ceiling were not checked first; this returns immediately.
+        assert_eq!(
+            classify(usize::MAX).unwrap_err(),
+            CodegenError::UnsupportedSize(usize::MAX)
+        );
+    }
+
+    #[test]
+    fn classify_at_ceiling_is_ok() {
+        // Exactly at the ceiling is still accepted (MAX_ANY_SIZE = 2^24 is smooth-7).
+        assert!(classify(MAX_ANY_SIZE).is_ok());
+    }
+
+    #[test]
+    fn generate_above_ceiling_returns_unsupported() {
+        assert_eq!(
+            generate(MAX_ANY_SIZE + 1).unwrap_err(),
+            CodegenError::UnsupportedSize(MAX_ANY_SIZE + 1)
+        );
+    }
+
+    #[test]
+    fn runtime_wrapper_returns_result_not_panic() {
+        // The generated runtime wrapper must return a Result and must not embed a
+        // `panic!` for planner failure into the emitted code.
+        let ts = generate(15).unwrap();
+        // It must be a syntactically valid `fn` item.
+        let parsed: syn::ItemFn = syn::parse2(ts.clone()).expect("wrapper must parse as a fn");
+        // ... whose return type is a Result (not the unit default).
+        assert!(
+            matches!(parsed.sig.output, syn::ReturnType::Type(..)),
+            "runtime wrapper must have an explicit return type"
+        );
+        let src = ts.to_string();
+        assert!(
+            src.contains("Result") && src.contains("ok_or"),
+            "runtime wrapper must propagate planner failure via Result: {src}"
+        );
+        assert!(
+            !src.contains("panic !") && !src.contains("panic!"),
+            "runtime wrapper must not embed panic! into consumer code: {src}"
+        );
+    }
+
+    /// Regression guard for a `no_std`-breaking construct: the runtime
+    /// wrapper previously spelled its scratch buffer's type as
+    /// `::std::vec::Vec<...>`, which does not exist under `#![no_std]` (only
+    /// `alloc::vec::Vec` does). Type inference resolves the same `Vec`
+    /// without ever spelling out its path, so no `std` (or `alloc`) path
+    /// should appear in the emitted code at all.
+    #[test]
+    fn runtime_wrapper_has_no_qualified_std_path() {
+        for &n in &[15usize, 17, 2003] {
+            let ts = generate(n).unwrap();
+            let src = ts.to_string();
+            assert!(
+                !src.contains("std"),
+                "n={n}: runtime wrapper must not reference std: {src}"
+            );
+        }
     }
 
     #[test]

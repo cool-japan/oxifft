@@ -109,6 +109,66 @@ pub fn local_size_nd<C: Communicator>(dims: &[usize], pool: &MpiPool<C>) -> (usi
     (partition.local_n, partition.local_start, alloc_local)
 }
 
+/// Calculate local buffer sizes for a 2D distributed **real** FFT (r2c / c2r).
+///
+/// Returns `(local_n0, local_0_start, real_alloc, complex_alloc)`:
+/// - `local_n0`: number of rows owned by this process
+/// - `local_0_start`: global starting row index
+/// - `real_alloc`: complex-free real buffer size, `local_n0 * n1` (the r2c input
+///   / c2r output footprint)
+/// - `complex_alloc`: half-complex buffer size, the max over the natural
+///   `[local_n0][n1/2 + 1]` and transposed `[local_n1c][n0]` layouts, so a single
+///   allocation is valid for both `transposed_out` and normal output
+///
+/// The last dimension uses the FFTW r2c convention: `n1 -> n1/2 + 1` complex
+/// coefficients.
+pub fn local_size_2d_r2c<C: Communicator>(
+    n0: usize,
+    n1: usize,
+    pool: &MpiPool<C>,
+) -> (usize, usize, usize, usize) {
+    let n1c = n1 / 2 + 1;
+    let partition = pool.local_partition(n0);
+    let transposed_partition = LocalPartition::new(n1c, pool.size(), pool.rank());
+
+    let real_alloc = partition.local_n * n1;
+    let complex_alloc = (partition.local_n * n1c).max(n0 * transposed_partition.local_n);
+
+    (
+        partition.local_n,
+        partition.local_start,
+        real_alloc,
+        complex_alloc,
+    )
+}
+
+/// Calculate local buffer sizes for a 3D distributed **real** FFT (r2c / c2r).
+///
+/// Returns `(local_n0, local_0_start, real_alloc, complex_alloc)`. The last
+/// dimension uses the FFTW r2c convention: `n2 -> n2/2 + 1` complex coefficients.
+/// `complex_alloc` is the max over the natural `[local_n0][n1][n2/2 + 1]` and
+/// transposed `[local_n1][n0][n2/2 + 1]` layouts.
+pub fn local_size_3d_r2c<C: Communicator>(
+    n0: usize,
+    n1: usize,
+    n2: usize,
+    pool: &MpiPool<C>,
+) -> (usize, usize, usize, usize) {
+    let n2c = n2 / 2 + 1;
+    let partition = pool.local_partition(n0);
+    let transposed_partition = LocalPartition::new(n1, pool.size(), pool.rank());
+
+    let real_alloc = partition.local_n * n1 * n2;
+    let complex_alloc = (partition.local_n * n1 * n2c).max(n0 * transposed_partition.local_n * n2c);
+
+    (
+        partition.local_n,
+        partition.local_start,
+        real_alloc,
+        complex_alloc,
+    )
+}
+
 /// Get local partition info for both normal and transposed layouts.
 ///
 /// Returns `(local_n0, local_0_start, local_n1, local_1_start)`.

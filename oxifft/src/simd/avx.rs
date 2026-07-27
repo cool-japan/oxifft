@@ -358,7 +358,7 @@ mod tests {
     use super::*;
 
     fn has_avx() -> bool {
-        is_x86_feature_detected!("avx")
+        crate::detect_x86_feature!("avx")
     }
 
     #[test]

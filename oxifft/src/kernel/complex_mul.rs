@@ -38,16 +38,16 @@ pub fn complex_mul_aos_f64(dst: &mut [Complex<f64>], a: &[Complex<f64>], b: &[Co
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
             // SAFETY: AVX2 and FMA features confirmed above.
             return unsafe { complex_mul_aos_avx2_fma_f64(dst, a, b) };
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::detect_x86_feature!("sse2") {
             // SAFETY: SSE2 feature confirmed above.
             return unsafe { complex_mul_aos_sse2_f64(dst, a, b) };
         }
         // No SIMD available on this x86_64 CPU (extremely rare).
-        return complex_mul_aos_scalar_f64(dst, a, b);
+        complex_mul_aos_scalar_f64(dst, a, b)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -87,15 +87,15 @@ pub fn complex_mul_aos_f32(dst: &mut [Complex<f32>], a: &[Complex<f32>], b: &[Co
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
             // SAFETY: AVX2 and FMA features confirmed above.
             return unsafe { complex_mul_aos_avx2_fma_f32(dst, a, b) };
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::detect_x86_feature!("sse2") {
             // SAFETY: SSE2 feature confirmed above.
             return unsafe { complex_mul_aos_sse2_f32(dst, a, b) };
         }
-        return complex_mul_aos_scalar_f32(dst, a, b);
+        complex_mul_aos_scalar_f32(dst, a, b)
     }
 
     #[cfg(target_arch = "aarch64")]

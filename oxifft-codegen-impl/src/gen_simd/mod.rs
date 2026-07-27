@@ -15,6 +15,19 @@
 //! Probe order for `x86_64`: AVX-512F > AVX2+FMA > AVX > SSE2 > scalar.
 //! AVX-512F is probed first (when the host supports it) to enable
 //! `_mm512_fmadd_pd`/`_mm512_fmsub_pd` based butterfly arithmetic.
+//!
+//! ## `no_std` compatibility
+//!
+//! `is_x86_feature_detected!` is a `std`-only macro (it needs OS-assisted CPUID
+//! caching), so it cannot be referenced unconditionally in code that must also
+//! compile under `#![no_std]`. Every `x86_64` dispatch arm therefore goes
+//! through the self-contained `gen_x86_detect_macro` helper, which emits a
+//! locally scoped `macro_rules!` that expands to `is_x86_feature_detected!`
+//! under `#[cfg(feature = "std")]` and to the compile-time
+//! `cfg!(target_feature = ...)` check otherwise — mirroring the `oxifft`
+//! crate's own `detect_x86_feature!` macro, but without depending on it, so
+//! the generated code works standalone in any crate that satisfies the
+//! `crate::kernel` contract (with or without `oxifft`).
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -192,6 +205,57 @@ fn gen_simd_size_16() -> TokenStream {
 }
 
 // ---------------------------------------------------------------------------
+// no_std-safe CPU feature detection
+// ---------------------------------------------------------------------------
+
+/// Emit a locally scoped `macro_rules!` helper named `name` that performs
+/// `x86`/`x86_64` CPU feature detection with a `no_std`-safe fallback.
+///
+/// Under `#[cfg(feature = "std")]` (a Cargo feature the *invoking* crate is
+/// expected to declare — the same convention `oxifft` itself uses for its own
+/// `std` feature) this defers to the standard library's runtime probe
+/// (`is_x86_feature_detected!`), which reads CPUID once and caches the
+/// result internally.
+///
+/// Under `#[cfg(not(feature = "std"))]` — where OS-assisted runtime probing
+/// is unavailable — this falls back to the compile-time
+/// `cfg!(target_feature = ...)` check, which is `true` only when the crate
+/// was built with that feature statically enabled (e.g. via
+/// `-C target-feature=+avx2,+fma` or `-C target-cpu=native`). If the invoking
+/// crate does not declare a `std` Cargo feature at all, `cfg(feature = "std")`
+/// is simply always-false, so the code always takes this conservative but
+/// universally-`no_std`-safe compile-time path.
+///
+/// Emitted inside a fresh block scope (one per dispatch arm), so repeated
+/// invocations of this helper across sibling blocks in the same function
+/// never collide — `macro_rules!` items, like any other item, are scoped to
+/// the block they are declared in.
+fn gen_x86_detect_macro(name: &syn::Ident) -> TokenStream {
+    quote! {
+        // Self-contained CPU feature probe: `std` runtime detection with a
+        // `no_std` compile-time (`target_feature`) fallback. Scoped locally
+        // (block-local item) so this never collides with sibling dispatch
+        // arms that declare a macro of the same name.
+        // The feature name is matched as a `:tt` (single token tree), not a
+        // `:literal`. `is_x86_feature_detected!` requires the feature name to
+        // arrive as a raw string-literal token: a `:literal` fragment becomes an
+        // opaque interpolation nonterminal that `std_detect`'s internal matcher
+        // cannot inspect, yielding a spurious "unknown x86 target feature" error
+        // under `#[cfg(feature = "std")]`. A `:tt` fragment is passed through
+        // transparently, so both the `std` and `no_std` expansions see the
+        // literal. (Call sites only ever pass a string literal, e.g. `!("avx2")`.)
+        macro_rules! #name {
+            ($feat:tt) => {{
+                #[cfg(feature = "std")]
+                { is_x86_feature_detected!($feat) }
+                #[cfg(not(feature = "std"))]
+                { cfg!(target_feature = $feat) }
+            }};
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher generation
 // ---------------------------------------------------------------------------
 
@@ -230,6 +294,14 @@ fn gen_dispatcher(n: usize) -> proc_macro2::TokenStream {
          - other: scalar fallback"
     );
 
+    // Distinct macro names per fast-path block: each is its own block scope so
+    // reusing the same name would be harmless too, but distinct names read
+    // more clearly when both blocks appear in the same function body.
+    let detect_f64 = format_ident!("__codegen_detect_x86_f64");
+    let detect_f64_macro = gen_x86_detect_macro(&detect_f64);
+    let detect_f32 = format_ident!("__codegen_detect_x86_f32");
+    let detect_f32_macro = gen_x86_detect_macro(&detect_f32);
+
     quote! {
         #[doc = #doc]
         #[inline]
@@ -256,24 +328,26 @@ fn gen_dispatcher(n: usize) -> proc_macro2::TokenStream {
 
                 #[cfg(target_arch = "x86_64")]
                 {
+                    #detect_f64_macro
+
                     #[cfg(feature = "avx512")]
-                    if is_x86_feature_detected!("avx512f") {
+                    if #detect_f64!("avx512f") {
                         // Safety: AVX-512F detected, pointer valid for len f64s
                         unsafe { #avx512_f64_name(f64_data, sign); }
                         return;
                     }
-                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                    if #detect_f64!("avx2") && #detect_f64!("fma") {
                         // Safety: AVX2+FMA detected, pointer valid for len f64s
                         unsafe { #avx2_f64_name(f64_data, sign); }
                         return;
                     }
                     // Pure AVX (no FMA, no AVX2) — probe after AVX2+FMA, before SSE2
-                    if is_x86_feature_detected!("avx") {
+                    if #detect_f64!("avx") {
                         // Safety: AVX detected (superset of SSE2), pointer valid
                         unsafe { #plain_avx_fn_name(f64_data, sign); }
                         return;
                     }
-                    if is_x86_feature_detected!("sse2") {
+                    if #detect_f64!("sse2") {
                         // Safety: SSE2 detected (guaranteed on x86_64), pointer valid
                         unsafe { #sse2_f64_name(f64_data, sign); }
                         return;
@@ -299,18 +373,20 @@ fn gen_dispatcher(n: usize) -> proc_macro2::TokenStream {
 
                 #[cfg(target_arch = "x86_64")]
                 {
+                    #detect_f32_macro
+
                     #[cfg(feature = "avx512")]
-                    if is_x86_feature_detected!("avx512f") {
+                    if #detect_f32!("avx512f") {
                         // Safety: AVX-512F detected
                         unsafe { #avx512_f32_name(f32_data, sign); }
                         return;
                     }
-                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                    if #detect_f32!("avx2") && #detect_f32!("fma") {
                         unsafe { #avx2_f32_name(f32_data, sign); }
                         return;
                     }
                     // f32 has no dedicated AVX (non-AVX2) path; fall through to SSE2
-                    if is_x86_feature_detected!("sse2") {
+                    if #detect_f32!("sse2") {
                         unsafe { #sse2_f32_name(f32_data, sign); }
                         return;
                     }
@@ -337,6 +413,8 @@ fn gen_dispatcher(n: usize) -> proc_macro2::TokenStream {
 fn gen_dispatcher_16() -> proc_macro2::TokenStream {
     let avx512_f32_name = format_ident!("codelet_simd_16_avx512_f32");
     let scalar_name = format_ident!("codelet_simd_16_scalar");
+    let detect_f32 = format_ident!("__codegen_detect_x86_f32");
+    let detect_f32_macro = gen_x86_detect_macro(&detect_f32);
 
     quote! {
         /// Size-16 SIMD-optimized FFT codelet.
@@ -365,8 +443,10 @@ fn gen_dispatcher_16() -> proc_macro2::TokenStream {
 
                 #[cfg(target_arch = "x86_64")]
                 {
+                    #detect_f32_macro
+
                     #[cfg(feature = "avx512")]
-                    if is_x86_feature_detected!("avx512f") {
+                    if #detect_f32!("avx512f") {
                         // Safety: AVX-512F detected, pointer valid for len f32s
                         unsafe { #avx512_f32_name(f32_data, sign); }
                         return;
@@ -376,6 +456,132 @@ fn gen_dispatcher_16() -> proc_macro2::TokenStream {
 
             // Scalar fallback for f64, other types, or no AVX-512F
             #scalar_name(data, sign);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::generate;
+
+    fn ts(src: &str) -> proc_macro2::TokenStream {
+        src.parse().expect("valid token stream")
+    }
+
+    #[test]
+    fn supported_sizes_generate_ok() {
+        for &n in &[2_usize, 4, 8, 16] {
+            let out = generate(ts(&n.to_string()));
+            assert!(out.is_ok(), "size {n} should generate, got {:?}", out.err());
+            assert!(!out.unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn generated_output_contains_dispatcher_name() {
+        let out = generate(ts("8")).expect("size 8").to_string();
+        assert!(
+            out.contains("codelet_simd_8"),
+            "missing dispatcher fn name: {out}"
+        );
+    }
+
+    #[test]
+    fn unsupported_size_returns_error() {
+        for &n in &[1_usize, 3, 6, 32, 64] {
+            let err = generate(ts(&n.to_string()));
+            assert!(err.is_err(), "size {n} must be rejected");
+            assert!(
+                err.unwrap_err().to_string().contains("unsupported size"),
+                "size {n} error should mention 'unsupported size'"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_size_returns_error() {
+        assert!(generate(ts("0")).is_err(), "size 0 must be rejected");
+    }
+
+    #[test]
+    fn non_literal_input_returns_error() {
+        assert!(
+            generate(ts("foo")).is_err(),
+            "non-literal input must be rejected"
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_error() {
+        assert!(
+            generate(proc_macro2::TokenStream::new()).is_err(),
+            "empty input must be rejected"
+        );
+    }
+
+    // ── no_std safety: self-contained cfg-gated feature detection ─────────
+
+    /// Every dispatcher must carry both halves of the self-contained
+    /// `std`/`no_std` feature-detection split: the `std` runtime probe gated by
+    /// `#[cfg(feature = "std")]`, and the `no_std`-safe `cfg!(target_feature)`
+    /// fallback gated by `#[cfg(not(feature = "std"))]`. Neither branch alone
+    /// proves the fix — both must be present so that stripping the `std`
+    /// branch (as happens in a real `#![no_std]` build with the `std`
+    /// feature disabled) still leaves working, self-contained code behind.
+    #[test]
+    fn dispatcher_has_self_contained_std_and_no_std_branches() {
+        for &n in &[2_usize, 4, 8, 16] {
+            let s = generate(ts(&n.to_string()))
+                .expect("should generate")
+                .to_string();
+            assert!(
+                s.contains("feature = \"std\""),
+                "size {n}: missing `feature = \"std\"` cfg gate: {s}"
+            );
+            assert!(
+                s.contains("not (feature = \"std\")") || s.contains("not(feature = \"std\")"),
+                "size {n}: missing `not(feature = \"std\")` cfg gate: {s}"
+            );
+            assert!(
+                s.contains("is_x86_feature_detected"),
+                "size {n}: missing is_x86_feature_detected! under the std branch: {s}"
+            );
+            assert!(
+                s.contains("target_feature"),
+                "size {n}: missing cfg!(target_feature = ...) no_std fallback: {s}"
+            );
+        }
+    }
+
+    /// The generated dispatchers must be fully self-contained: no
+    /// `std ::`-qualified path (the only legitimate `std`-only symbol,
+    /// `is_x86_feature_detected!`, is referenced unqualified, exactly like
+    /// `oxifft`'s own `detect_x86_feature!` macro body does) and no
+    /// dependency on `oxifft` or its `detect_x86_feature!` macro — the
+    /// generated code must work standalone in any crate satisfying the
+    /// `crate::kernel` contract.
+    #[test]
+    fn dispatcher_has_no_qualified_std_path_and_no_oxifft_dependency() {
+        for &n in &[2_usize, 4, 8, 16] {
+            let s = generate(ts(&n.to_string()))
+                .expect("should generate")
+                .to_string();
+            assert!(
+                !s.contains("std ::"),
+                "size {n}: found qualified `std ::` path: {s}"
+            );
+            assert!(
+                !s.contains("oxifft"),
+                "size {n}: generated code must not reference oxifft: {s}"
+            );
+            assert!(
+                !s.contains("detect_x86_feature"),
+                "size {n}: generated code must not delegate to an external detect_x86_feature! macro: {s}"
+            );
         }
     }
 }

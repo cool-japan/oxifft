@@ -38,16 +38,15 @@
 //! `[local_n2_col][local_n1_row][n0]` (row-major), which differs from the
 //! input layout `[local_n0][local_n1][n2]`.
 
-use mpi::datatype::Equivalence;
 use mpi::topology::{Color, Communicator, SimpleCommunicator};
 
-use crate::api::{Direction, Flags, Plan};
-use crate::kernel::{Complex, Float};
+use oxifft::api::{Direction, Flags, Plan};
+use oxifft::kernel::{Complex, Float};
 
-use crate::mpi::distribution::LocalPartition;
-use crate::mpi::error::MpiError;
-use crate::mpi::pool::{MpiFloat, MpiPool};
-use crate::mpi::transpose::distributed_transpose;
+use crate::distribution::{Distribution, LocalPartition};
+use crate::error::MpiError;
+use crate::pool::{MpiFloat, MpiPool};
+use crate::transpose::distributed_transpose;
 
 /// 2D process grid configuration for pencil decomposition.
 ///
@@ -62,7 +61,17 @@ pub struct PencilGrid {
 
 impl PencilGrid {
     /// Create a new pencil grid.
+    ///
+    /// Both `n_rows` and `n_cols` must be non-zero; [`row_rank`](Self::row_rank)
+    /// and [`col_rank`](Self::col_rank) divide by `n_cols`, so a zero grid is a
+    /// divide-by-zero footgun. This is enforced with a `debug_assert!`; callers
+    /// that build a plan go through [`PencilPlan3D::new`], which additionally
+    /// rejects any grid whose `total_procs()` does not match the pool size.
     pub fn new(n_rows: usize, n_cols: usize) -> Self {
+        debug_assert!(
+            n_rows > 0 && n_cols > 0,
+            "PencilGrid dimensions must be non-zero (got {n_rows}x{n_cols})"
+        );
         Self { n_rows, n_cols }
     }
 
@@ -72,12 +81,24 @@ impl PencilGrid {
     }
 
     /// Row rank for a given global rank (0-indexed row in the 2D grid).
+    ///
+    /// Returns 0 for a degenerate zero-column grid instead of panicking on a
+    /// divide-by-zero.
     pub fn row_rank(&self, global_rank: usize) -> usize {
+        if self.n_cols == 0 {
+            return 0;
+        }
         global_rank / self.n_cols
     }
 
     /// Column rank for a given global rank (0-indexed column in the 2D grid).
+    ///
+    /// Returns 0 for a degenerate zero-column grid instead of panicking on a
+    /// divide-by-zero.
     pub fn col_rank(&self, global_rank: usize) -> usize {
+        if self.n_cols == 0 {
+            return 0;
+        }
         global_rank % self.n_cols
     }
 }
@@ -92,7 +113,7 @@ impl PencilGrid {
 ///
 /// - `T`: Float type (`f32` or `f64`)
 /// - `C`: MPI communicator type
-pub struct PencilPlan3D<T: Float, C: Communicator> {
+pub struct PencilPlan3D<'p, T: Float, C: Communicator> {
     /// Global dimensions `[n0, n1, n2]`.
     dims: [usize; 3],
     /// 2D process grid configuration.
@@ -122,27 +143,22 @@ pub struct PencilPlan3D<T: Float, C: Communicator> {
     /// Sized to hold `max(local_n0 * local_n1 * n2, local_n0 * n1 * local_n2_col,
     /// n0 * local_n1_row * local_n2_col)` elements.
     scratch: Vec<Complex<T>>,
-    /// Raw pointer to the global MPI pool (must outlive this plan; reserved for multi-rank impl).
-    _pool: *const MpiPool<C>,
+    /// Number of complex elements the caller must allocate for the data buffer
+    /// (the max over the input and all intermediate/output layouts).
+    alloc_local: usize,
+    /// Borrow of the global MPI pool; the borrow checker guarantees the pool
+    /// outlives the plan. The row/column sub-communicators below are the ones
+    /// actually used for communication.
+    _pool: &'p MpiPool<C>,
     /// Row sub-communicator pool: all procs with the same row_rank, varying col_rank.
     /// `None` for single-rank plans.
     row_pool: Option<MpiPool<SimpleCommunicator>>,
     /// Column sub-communicator pool: all procs with the same col_rank, varying row_rank.
     /// `None` for single-rank plans.
     col_pool: Option<MpiPool<SimpleCommunicator>>,
-    /// Marker for type parameters.
-    _phantom: core::marker::PhantomData<(T, C)>,
 }
 
-// SAFETY: PencilPlan3D stores a raw pointer to an MpiPool that must outlive the plan.
-// The caller ensures the pool outlives the plan (same contract as MpiPlan3D).
-unsafe impl<T: Float, C: Communicator + Send> Send for PencilPlan3D<T, C> {}
-unsafe impl<T: Float, C: Communicator + Sync> Sync for PencilPlan3D<T, C> {}
-
-impl<T: Float + MpiFloat, C: Communicator> PencilPlan3D<T, C>
-where
-    Complex<T>: Equivalence,
-{
+impl<'p, T: Float + MpiFloat, C: Communicator> PencilPlan3D<'p, T, C> {
     /// Create a new 3D pencil-decomposition distributed FFT plan.
     ///
     /// # Arguments
@@ -168,7 +184,7 @@ where
         grid: PencilGrid,
         direction: Direction,
         flags: Flags,
-        pool: &MpiPool<C>,
+        pool: &'p MpiPool<C>,
     ) -> Result<Self, MpiError> {
         let dims = [n0, n1, n2];
         for (i, &d) in dims.iter().enumerate() {
@@ -209,13 +225,19 @@ where
             message: format!("Failed to create Z (n2={n2}) plan"),
         })?;
 
-        // Pre-allocate scratch buffer sized for all intermediate layouts.
+        // Size the buffer for the largest of the three layouts the data buffer
+        // passes through: the input `[local_n0][local_n1][n2]`, the post-row
+        // layout `[local_n0][local_n2_col][n1]`, and the final post-col layout
+        // `[local_n2_col][local_n1_row][n0]`. For non-divisible sizes an
+        // intermediate/output layout can exceed the input footprint, so this is
+        // the buffer the caller must allocate (see [`Self::alloc_local`]). The
+        // scratch buffer is sized identically.
         let local_n2_col = LocalPartition::new(n2, grid.n_cols, col_rank).local_n;
         let local_n1_row = LocalPartition::new(n1, grid.n_rows, row_rank).local_n;
-        let scratch_size = (local_n0 * local_n1 * n2)
+        let alloc_local = (local_n0 * local_n1 * n2)
             .max(local_n0 * n1 * local_n2_col)
             .max(n0 * local_n1_row * local_n2_col);
-        let scratch = vec![Complex::<T>::zero(); scratch_size];
+        let scratch = vec![Complex::<T>::zero(); alloc_local];
 
         // Create row and column sub-communicator pools (only if P > 1).
         let (row_pool, col_pool) = if pool.size() == 1 {
@@ -250,16 +272,21 @@ where
             plan_y,
             plan_z,
             scratch,
-            _pool: core::ptr::from_ref(pool),
+            alloc_local,
+            _pool: pool,
             row_pool,
             col_pool,
-            _phantom: core::marker::PhantomData,
         })
     }
 
     /// Get global dimensions `[n0, n1, n2]`.
     pub fn dims(&self) -> [usize; 3] {
         self.dims
+    }
+
+    /// Data-distribution strategy used by this plan (always [`Distribution::Pencil`]).
+    pub fn distribution(&self) -> Distribution {
+        Distribution::Pencil
     }
 
     /// Get the 2D process grid.
@@ -300,25 +327,47 @@ where
         self.col_pool.as_ref()
     }
 
+    /// Number of complex elements the caller must allocate for the `data`
+    /// buffer passed to [`execute_inplace`](Self::execute_inplace) / the output
+    /// of [`execute`](Self::execute).
+    ///
+    /// Analogous to FFTW-MPI's `alloc_local`: for non-divisible sizes an
+    /// intermediate or the final transposed layout can exceed the input
+    /// footprint (`local_n0 * local_n1 * n2`), so the buffer must be sized to
+    /// this value, not merely to the input.
+    pub fn alloc_local(&self) -> usize {
+        self.alloc_local
+    }
+
     /// Execute the distributed 3D FFT in-place.
     ///
-    /// Input/output layout: `data[i0 * local_n1 * n2 + i1 * n2 + i2]`
+    /// Input layout: `data[i0 * local_n1 * n2 + i1 * n2 + i2]`
     /// where `i0 in [0, local_n0)`, `i1 in [0, local_n1)`, `i2 in [0, n2)`.
     ///
     /// For single-rank plans (`P = 1`), all data is local and no MPI
-    /// communication is performed. For multi-rank plans, this currently returns
-    /// `MpiError::FftError` with a "not yet implemented" message.
+    /// communication is performed; the output keeps the `[n0][n1][n2]` layout.
+    ///
+    /// For multi-rank plans, this performs the full Z->Y->X pencil FFT with two
+    /// distributed alltoallv transposes through the row and column
+    /// sub-communicators (see `Self::execute_multirank`). The output is in the
+    /// transposed layout `data[i2 * local_n1_row * n0 + i1 * n0 + i0]`, i.e.
+    /// `[local_n2_col][local_n1_row][n0]` where `local_n2_col` partitions `n2`
+    /// across `grid.n_cols` and `local_n1_row` partitions `n1` across
+    /// `grid.n_rows`.
     ///
     /// # Errors
     ///
-    /// - `MpiError::SizeMismatch` -- if `data.len() < local_n0 * local_n1 * n2`
-    /// - `MpiError::FftError` -- if multi-rank execution is attempted (NYI)
+    /// - `MpiError::SizeMismatch` -- if `data.len() < self.alloc_local()`
+    /// - `MpiError::CommunicationError` -- if a sub-communicator pool is missing
+    /// - `MpiError::CountOverflow` -- if any element count exceeds `i32::MAX`
     pub fn execute_inplace(&mut self, data: &mut [Complex<T>]) -> Result<(), MpiError> {
         let [n0, n1, n2] = self.dims;
-        let expected = self.local_n0 * self.local_n1 * n2;
-        if data.len() < expected {
+        // The buffer must hold every intermediate/output layout, not just the
+        // input footprint (see `alloc_local`); for non-divisible sizes those
+        // layouts can be larger.
+        if data.len() < self.alloc_local {
             return Err(MpiError::SizeMismatch {
-                expected,
+                expected: self.alloc_local,
                 actual: data.len(),
             });
         }
@@ -513,20 +562,22 @@ where
         input: &[Complex<T>],
         output: &mut [Complex<T>],
     ) -> Result<(), MpiError> {
-        let expected = self.local_n0 * self.local_n1 * self.dims[2];
-        if input.len() < expected {
+        // `input` holds the input footprint; `output` must hold every
+        // intermediate/output layout (see `alloc_local`).
+        let input_len = self.local_n0 * self.local_n1 * self.dims[2];
+        if input.len() < input_len {
             return Err(MpiError::SizeMismatch {
-                expected,
+                expected: input_len,
                 actual: input.len(),
             });
         }
-        if output.len() < expected {
+        if output.len() < self.alloc_local {
             return Err(MpiError::SizeMismatch {
-                expected,
+                expected: self.alloc_local,
                 actual: output.len(),
             });
         }
-        output[..expected].copy_from_slice(&input[..expected]);
+        output[..input_len].copy_from_slice(&input[..input_len]);
         self.execute_inplace(output)
     }
 }
@@ -662,8 +713,8 @@ pub mod pure {
 #[cfg(test)]
 mod tests {
     use super::pure::{fft_3d_zyx, max_abs_error};
-    use crate::api::Direction;
-    use crate::kernel::Complex;
+    use oxifft::api::Direction;
+    use oxifft::kernel::Complex;
 
     fn make_test_input_f64(n0: usize, n1: usize, n2: usize) -> Vec<Complex<f64>> {
         let n = n0 * n1 * n2;
@@ -700,6 +751,19 @@ mod tests {
         assert_eq!(g.total_procs(), 1);
         assert_eq!(g.row_rank(0), 0);
         assert_eq!(g.col_rank(0), 0);
+    }
+
+    #[test]
+    fn pencil_grid_zero_cols_no_panic() {
+        use super::PencilGrid;
+        // Regression: a degenerate zero-column grid (constructed directly to
+        // bypass `new`'s debug_assert) must not divide-by-zero panic.
+        let g = PencilGrid {
+            n_rows: 2,
+            n_cols: 0,
+        };
+        assert_eq!(g.row_rank(5), 0);
+        assert_eq!(g.col_rank(5), 0);
     }
 
     // ----- pure::fft_3d_zyx correctness tests -----
@@ -871,39 +935,67 @@ mod tests {
         assert!(result.is_err(), "expected error for zero n0");
     }
 
-    // Multi-rank tests require `mpirun -n N cargo test --features mpi`.
-    // They are marked `#[ignore]` so they are skipped in standard `cargo test`.
-    #[cfg(feature = "mpi")]
+    // Real MPI test for the single-rank (P=1) pencil path.
+    //
+    // It is `#[ignore]`d because a plain `cargo test` runs test functions on
+    // spawned threads, whereas MPI is initialised `MPI_THREAD_SINGLE`. This test
+    // therefore only exercises the P=1 code path (no cross-rank collectives, so
+    // no thread/collective deadlock). *Multi-rank* correctness is covered by the
+    // `examples/mpi_integration.rs` binary (its MPI calls run on the process
+    // main thread), driven by `scripts/run_mpi_tests.sh`.
+    //
+    // Run this one with, e.g.:
+    //   cargo test -p oxifft-adapter-mpi --no-run
+    //   mpirun -n 1 <test-binary> --ignored --exact \
+    //       plans::plan_3d_pencil::tests::mpi_required::pencil_mpi_single_rank
     mod mpi_required {
-        /// Placeholder: construction test for P=1 via MPI runtime.
-        ///
-        /// Run with: `mpirun -n 1 cargo test --features mpi pencil_mpi_construction_p1`
-        #[test]
-        #[ignore = "Requires MPI runtime: mpirun -n 1 cargo test --features mpi"]
-        fn pencil_mpi_construction_p1() {
-            // When run with mpirun:
-            //   let universe = mpi::initialize().unwrap();
-            //   let world = universe.world();
-            //   let pool = MpiPool::new(world.duplicate());
-            //   let grid = PencilGrid::new(1, 1);
-            //   let mut plan = PencilPlan3D::<f64, _>::new(
-            //       8, 8, 8, grid, Direction::Forward, Flags::ESTIMATE, &pool,
-            //   ).expect("plan creation should succeed");
-            //   let mut data = vec![Complex::<f64>::zero(); 8 * 8 * 8];
-            //   assert!(plan.execute_inplace(&mut data).is_ok());
+        use super::super::pure::{fft_3d_zyx, max_abs_error};
+        use super::super::{PencilGrid, PencilPlan3D};
+        use crate::pool::MpiPool;
+        use oxifft::api::{Direction, Flags};
+        use oxifft::kernel::Complex;
+
+        fn sample(idx: usize) -> Complex<f64> {
+            let t = idx as f64;
+            Complex {
+                re: (0.1 * t).sin() + 0.3,
+                im: (0.07 * t + 1.0).cos() - 0.2,
+            }
         }
 
-        /// Placeholder: 4-rank 8x8x8 test -- requires multi-rank NYI to be implemented.
+        /// Forward pencil FFT (P=1) vs. the serial `fft_3d_zyx` reference.
         ///
-        /// Run with: `mpirun -n 4 cargo test --features mpi pencil_mpi_4rank_8x8x8`
+        /// Run under `mpirun -n 1`. Under a larger `-n` this returns early (the
+        /// multi-rank path is validated by `examples/mpi_integration.rs`).
         #[test]
-        #[ignore = "Requires MPI runtime with 4 ranks: mpirun -n 4 cargo test --features mpi"]
-        fn pencil_mpi_4rank_8x8x8() {
-            // When multi-rank execute_inplace is implemented:
-            // 1. Initialize MPI, create 2x2 PencilPlan3D
-            // 2. Distribute 8x8x8 data across 4 ranks
-            // 3. Run forward FFT
-            // 4. Gather results and compare with pure::fft_3d_zyx (tolerance 1e-10)
+        #[ignore = "Requires MPI runtime: run under `mpirun -n 1 <bin> --ignored`"]
+        fn pencil_mpi_single_rank() {
+            let Some(universe) = mpi::initialize() else {
+                return;
+            };
+            let world = universe.world();
+            let pool = MpiPool::new(world);
+            if pool.size() != 1 {
+                // Multi-rank collectives from libtest's spawned thread would
+                // deadlock; see examples/mpi_integration.rs for real coverage.
+                return;
+            }
+
+            for &(n0, n1, n2) in &[(8usize, 8usize, 8usize), (6, 5, 4)] {
+                let grid = PencilGrid::new(1, 1);
+                let mut reference: Vec<Complex<f64>> = (0..n0 * n1 * n2).map(sample).collect();
+                fft_3d_zyx(&mut reference, n0, n1, n2, Direction::Forward)
+                    .expect("reference fft_3d_zyx");
+
+                let mut data: Vec<Complex<f64>> = (0..n0 * n1 * n2).map(sample).collect();
+                let mut plan =
+                    PencilPlan3D::new(n0, n1, n2, grid, Direction::Forward, Flags::ESTIMATE, &pool)
+                        .expect("PencilPlan3D::new");
+                plan.execute_inplace(&mut data).expect("execute_inplace");
+
+                let err = max_abs_error(&data, &reference);
+                assert!(err < 1e-8, "pencil P=1 {n0}x{n1}x{n2} err {err:.2e}");
+            }
         }
     }
 }

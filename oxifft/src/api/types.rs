@@ -106,6 +106,16 @@ impl Flags {
     /// Plan for unaligned data.
     pub const UNALIGNED: Self = Self(1 << 5);
 
+    /// Only use pre-existing wisdom; do not measure.
+    ///
+    /// Matches FFTW's `FFTW_WISDOM_ONLY`: when set, plan construction succeeds
+    /// only if a matching wisdom entry (build-time baseline or runtime cache)
+    /// already exists for the transform size. If no wisdom is found, planning
+    /// **fails** (returns `None`) rather than falling back to the heuristic or
+    /// running a benchmark. This lets callers guarantee that every plan they
+    /// build is backed by measured data.
+    pub const WISDOM_ONLY: Self = Self(1 << 6);
+
     /// Check if MEASURE flag is set.
     #[must_use]
     pub const fn is_measure(self) -> bool {
@@ -129,6 +139,14 @@ impl Flags {
     pub const fn can_destroy_input(self) -> bool {
         self.0 & Self::DESTROY_INPUT.0 != 0
     }
+
+    /// Check if WISDOM_ONLY flag is set.
+    ///
+    /// See [`Flags::WISDOM_ONLY`] for the semantics.
+    #[must_use]
+    pub const fn is_wisdom_only(self) -> bool {
+        self.0 & Self::WISDOM_ONLY.0 != 0
+    }
 }
 
 impl BitOr for Flags {
@@ -139,30 +157,10 @@ impl BitOr for Flags {
     }
 }
 
-/// Real-to-real transform kind (DCT/DST variants).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum R2rKind {
-    /// DCT-I (REDFT00)
-    DctI,
-    /// DCT-II (REDFT10) - "the DCT"
-    DctII,
-    /// DCT-III (REDFT01) - inverse of DCT-II
-    DctIII,
-    /// DCT-IV (REDFT11)
-    DctIV,
-    /// DST-I (RODFT00)
-    DstI,
-    /// DST-II (RODFT10)
-    DstII,
-    /// DST-III (RODFT01)
-    DstIII,
-    /// DST-IV (RODFT11)
-    DstIV,
-    /// Discrete Hartley Transform
-    Dht,
-    /// Half-complex to real (used internally)
-    Hc2r,
-    /// Real to half-complex (used internally)
-    R2hc,
-}
+// NOTE: The public real-to-real transform kind is
+// [`crate::rdft::solvers::R2rKind`] (FFTW's `REDFT00..RODFT11`/`DHT` naming),
+// which is the enum every `R2rPlan*` constructor actually accepts and which the
+// crate root re-exports as `oxifft::R2rKind`. A second, differently-named
+// `R2rKind` (DctI/DctII/.../Hc2r/R2hc) previously lived here but was never wired
+// into any API — it made `oxifft::R2rKind` a type no R2r plan could accept — so
+// it was removed in 0.4.0 to leave a single, usable kind enum.

@@ -15,7 +15,7 @@ use core::arch::x86_64::*;
 /// Check if AVX2 and FMA are available at runtime.
 #[inline]
 pub fn has_avx2_fma() -> bool {
-    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+    crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma")
 }
 
 /// AVX2 f64 vector type with FMA support (4 lanes).

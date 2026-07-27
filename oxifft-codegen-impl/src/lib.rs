@@ -21,5 +21,6 @@ pub mod gen_rader;
 pub mod gen_rdft;
 pub mod gen_simd;
 pub mod gen_twiddle;
+pub mod kernel_contract;
 pub mod symbolic;
 pub mod winograd_constants;

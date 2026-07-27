@@ -20,7 +20,10 @@
 //! - **Thread-local scratch** (under `std` feature): solver-id-keyed per-thread
 //!   scratch buffers amortize allocation cost when mutex is contended.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+// `AtomicUsize` (not `AtomicU64`) so the monotonic solver-ID counter also works
+// on targets without 64-bit atomics (e.g. riscv32imac). The id is session-local
+// and never persisted, so the narrower range on 32-bit targets is harmless.
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::dft::problem::Sign;
 use crate::kernel::complex_mul::complex_mul_aos;
@@ -30,7 +33,7 @@ use crate::prelude::*;
 use super::ct::CooleyTukeySolver;
 
 /// Global counter for assigning unique IDs to each `BluesteinSolver`.
-static BLUESTEIN_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static BLUESTEIN_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Bluestein (Chirp-Z) solver for arbitrary sizes.
 ///
@@ -77,7 +80,7 @@ impl<T: Float> BluesteinSolver<T> {
     /// Create a new Bluestein solver for the given size.
     #[must_use]
     pub fn new(n: usize) -> Self {
-        let solver_id = BLUESTEIN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let solver_id = BLUESTEIN_ID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64;
 
         if n == 0 {
             return Self {

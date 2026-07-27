@@ -18,7 +18,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::signal::resample;
 //!
 //! // Upsample from 100 to 200 samples

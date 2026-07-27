@@ -555,3 +555,81 @@ fn emit_const(v: f64) -> TokenStream {
         quote! { T::from_f64(#v) }
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::generate;
+
+    fn ts(src: &str) -> proc_macro2::TokenStream {
+        src.parse().expect("valid token stream")
+    }
+
+    #[test]
+    fn supported_sizes_both_kinds_generate_ok() {
+        for &n in &[2_usize, 4, 8] {
+            for kind in ["R2hc", "Hc2r"] {
+                let out = generate(ts(&format!("size = {n}, kind = {kind}")));
+                assert!(
+                    out.is_ok(),
+                    "size {n} {kind} should generate: {:?}",
+                    out.err()
+                );
+                assert!(!out.unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn generated_r2hc_contains_fn_name() {
+        let out = generate(ts("size = 4, kind = R2hc"))
+            .expect("size 4 r2hc")
+            .to_string();
+        assert!(out.contains("r2hc_4_gen"), "missing r2hc fn name: {out}");
+    }
+
+    #[test]
+    fn unsupported_size_returns_error() {
+        for &n in &[1_usize, 3, 5, 6, 16] {
+            for kind in ["R2hc", "Hc2r"] {
+                let err = generate(ts(&format!("size = {n}, kind = {kind}")));
+                assert!(err.is_err(), "size {n} {kind} must be rejected");
+                assert!(
+                    err.unwrap_err().to_string().contains("unsupported size"),
+                    "size {n} {kind} error should mention 'unsupported size'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_kind_returns_error() {
+        let err = generate(ts("size = 4, kind = Dft"));
+        assert!(err.is_err(), "unknown kind must be rejected");
+        assert!(err.unwrap_err().to_string().contains("unknown RDFT kind"));
+    }
+
+    #[test]
+    fn missing_kind_returns_error() {
+        assert!(
+            generate(ts("size = 4")).is_err(),
+            "missing kind must be rejected"
+        );
+    }
+
+    #[test]
+    fn wrong_first_keyword_returns_error() {
+        assert!(
+            generate(ts("radix = 4, kind = R2hc")).is_err(),
+            "first keyword must be `size`"
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_error() {
+        assert!(generate(proc_macro2::TokenStream::new()).is_err());
+    }
+}

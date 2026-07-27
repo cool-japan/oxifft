@@ -206,6 +206,10 @@ impl<T: Float> IndirectSolver<T> {
     }
 
     /// Execute using Cooley-Tukey for power-of-2 sizes.
+    ///
+    /// # Errors
+    /// Returns `Err` if the configured size `n` is not a power of two, since the
+    /// Cooley-Tukey radix-2 path only applies to power-of-two sizes.
     pub fn execute_ct(
         &self,
         input: &[Complex<T>],
@@ -213,17 +217,18 @@ impl<T: Float> IndirectSolver<T> {
         output: &mut [Complex<T>],
         output_base: usize,
         sign: Sign,
-    ) {
+    ) -> Result<(), &'static str> {
         use super::{CooleyTukeySolver, CtVariant};
 
         if !CooleyTukeySolver::<T>::applicable(self.n) {
-            panic!("IndirectSolver::execute_ct requires power-of-2 size");
+            return Err("IndirectSolver::execute_ct requires power-of-2 size");
         }
 
         let solver = CooleyTukeySolver::new(CtVariant::Dit);
         self.execute(input, input_base, output, output_base, sign, |i, o, s| {
             solver.execute(i, o, s);
         });
+        Ok(())
     }
 
     /// Execute using Bluestein for arbitrary sizes.
@@ -252,7 +257,7 @@ impl<T: Float> IndirectSolver<T> {
         output_base: usize,
         sign: Sign,
     ) {
-        use super::{CooleyTukeySolver, GenericSolver, RaderSolver};
+        use super::{CooleyTukeySolver, CtVariant, GenericSolver, RaderSolver};
         use crate::kernel::is_prime;
 
         let n = self.n;
@@ -269,7 +274,12 @@ impl<T: Float> IndirectSolver<T> {
         }
 
         if CooleyTukeySolver::<T>::applicable(n) {
-            self.execute_ct(input, input_base, output, output_base, sign);
+            // Applicability already checked here, so dispatch directly (this is
+            // the infallible equivalent of `execute_ct`).
+            let solver = CooleyTukeySolver::new(CtVariant::Dit);
+            self.execute(input, input_base, output, output_base, sign, |i, o, s| {
+                solver.execute(i, o, s);
+            });
         } else if is_prime(n) && n <= 1021 {
             if let Some(solver) = RaderSolver::new(n) {
                 self.execute(input, input_base, output, output_base, sign, |i, o, s| {
@@ -359,7 +369,9 @@ mod tests {
         ];
         let mut output = vec![Complex::zero(); 8];
 
-        solver.execute_ct(&input, 0, &mut output, 0, Sign::Forward);
+        solver
+            .execute_ct(&input, 0, &mut output, 0, Sign::Forward)
+            .expect("power-of-two size");
 
         // DC at index 0 should be sum: 0+1+2+3 = 6
         assert!(complex_approx_eq(output[0], Complex::new(6.0, 0.0), 1e-10));
@@ -404,11 +416,15 @@ mod tests {
 
         // Forward transform
         let mut transformed = vec![Complex::zero(); 16];
-        solver.execute_ct(&data, 0, &mut transformed, 0, Sign::Forward);
+        solver
+            .execute_ct(&data, 0, &mut transformed, 0, Sign::Forward)
+            .expect("power-of-two size");
 
         // Inverse transform
         let mut recovered = vec![Complex::zero(); 16];
-        solver.execute_ct(&transformed, 0, &mut recovered, 0, Sign::Backward);
+        solver
+            .execute_ct(&transformed, 0, &mut recovered, 0, Sign::Backward)
+            .expect("power-of-two size");
 
         // Verify roundtrip (with normalization)
         let scale = n as f64;
@@ -439,7 +455,9 @@ mod tests {
         // Out-of-place result for comparison
         let input = data.clone();
         let mut expected = vec![Complex::zero(); 8];
-        solver.execute_ct(&input, 0, &mut expected, 0, Sign::Forward);
+        solver
+            .execute_ct(&input, 0, &mut expected, 0, Sign::Forward)
+            .expect("power-of-two size");
 
         // In-place
         let ct_solver = CooleyTukeySolver::new(CtVariant::Dit);
@@ -473,7 +491,9 @@ mod tests {
         ];
         let mut output = vec![Complex::zero(); 12];
 
-        solver.execute_ct(&input, 0, &mut output, 0, Sign::Forward);
+        solver
+            .execute_ct(&input, 0, &mut output, 0, Sign::Forward)
+            .expect("power-of-two size");
 
         // DC at output[0] should be sum: 0+1+2+3 = 6
         assert!(complex_approx_eq(output[0], Complex::new(6.0, 0.0), 1e-10));
@@ -503,5 +523,16 @@ mod tests {
                 output[0].re
             );
         }
+    }
+
+    #[test]
+    fn test_execute_ct_non_power_of_two_returns_err() {
+        // A non-power-of-two size must return Err instead of panicking.
+        let solver = IndirectSolver::<f64>::new_contiguous(6);
+        let input = vec![Complex::<f64>::zero(); 6];
+        let mut output = vec![Complex::<f64>::zero(); 6];
+        assert!(solver
+            .execute_ct(&input, 0, &mut output, 0, Sign::Forward)
+            .is_err());
     }
 }

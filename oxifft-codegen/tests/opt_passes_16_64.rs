@@ -457,6 +457,30 @@ fn notw_32_f32_forward_vs_naive() {
     check_close_f32(&got, &expected, 1e-3, "notw_32_f32_fwd");
 }
 
+#[test]
+fn notw_32_f32_inverse_vs_naive() {
+    // Exercises the sign > 0 branch of codelet_notw_32 in f32.
+    let input = make_input_f32(32, 0xCAFE_BABE_0042);
+    let expected = dft_naive_f32(&input, 1);
+    let mut got = input;
+    codelet_notw_32(&mut got, 1);
+    check_close_f32(&got, &expected, 1e-3, "notw_32_f32_inv");
+}
+
+#[test]
+fn notw_32_f32_roundtrip() {
+    let original = make_input_f32(32, 0xCAFE_BABE_0043);
+    let mut data = original.clone();
+    codelet_notw_32(&mut data, -1);
+    codelet_notw_32(&mut data, 1);
+    let scale = 32.0_f32;
+    for x in &mut data {
+        x.re /= scale;
+        x.im /= scale;
+    }
+    check_close_f32(&data, &original, 1e-4, "notw_32_f32_roundtrip");
+}
+
 // ============================================================================
 // Tests — size-64 × f64
 // ============================================================================
@@ -504,4 +528,28 @@ fn notw_64_f32_forward_vs_naive() {
     let mut got = input;
     codelet_notw_64(&mut got, -1);
     check_close_f32(&got, &expected, 1e-2, "notw_64_f32_fwd");
+}
+
+#[test]
+fn notw_64_f32_inverse_vs_naive() {
+    // Exercises the sign > 0 branch of codelet_notw_64 in f32.
+    let input = make_input_f32(64, 0xCAFE_BABE_0052);
+    let expected = dft_naive_f32(&input, 1);
+    let mut got = input;
+    codelet_notw_64(&mut got, 1);
+    check_close_f32(&got, &expected, 1e-2, "notw_64_f32_inv");
+}
+
+#[test]
+fn notw_64_f32_roundtrip() {
+    let original = make_input_f32(64, 0xCAFE_BABE_0053);
+    let mut data = original.clone();
+    codelet_notw_64(&mut data, -1);
+    codelet_notw_64(&mut data, 1);
+    let scale = 64.0_f32;
+    for x in &mut data {
+        x.re /= scale;
+        x.im /= scale;
+    }
+    check_close_f32(&data, &original, 1e-3, "notw_64_f32_roundtrip");
 }

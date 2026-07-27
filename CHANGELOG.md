@@ -9,6 +9,204 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.4.0] - 2026-07-27
+
+### Breaking Changes
+
+- **`oxifft::kernel::{Solver, ProblemHash, hash_problem}` removed.** `Solver`
+  had zero implementors and `ProblemHash`/`hash_problem` were dead,
+  misleadingly-commented code; `kernel::planner::Planner` /
+  `kernel::wisdom::WisdomEntry` are the real, wired-in candidate model.
+- **`auto_tune::tune_size` gained a `flags: Flags` parameter.** Callers must
+  now pass planning flags; `MEASURE`/`PATIENT`/`EXHAUSTIVE` widen the
+  candidate set that gets profiled (radix-4/8, split-radix, Stockham,
+  cache-oblivious, generic, Rader, mixed-radix, …) instead of only timing the
+  single heuristic-chosen algorithm.
+- **`Flags::WISDOM_ONLY` added**, matching FFTW's `FFTW_WISDOM_ONLY`: plan
+  construction now fails (`None`) when no matching wisdom exists instead of
+  silently falling back to a fresh heuristic/measured plan.
+- **Wisdom binary format v2** (`BINARY_FORMAT_VERSION` bumped to 2): the v1
+  encoding used a fixed 30-byte entry layout and a `u16`-bounded factor count,
+  both of which could silently truncate `MixedRadix` solver names with many
+  factors. v2 uses variable-length factor lists with an explicit `u32` entry
+  count. `from_binary` still reads v1 files; `to_binary`/`to_binary_checked`
+  now always write v2.
+- **Workspace `rust-version` corrected from `1.75` to `1.87`.** `1.75` was
+  aspirational, not actual: `hashbrown` 0.17 (a default-feature, non-optional
+  dependency) requires edition2024/rust-version 1.85 at the dependency-
+  resolution level alone, and `oxifft`'s own `ntt`/`nufft` modules use
+  `u32::is_multiple_of`, stabilized in 1.87. Verified empirically with
+  `cargo +<toolchain> check -p oxifft --locked` across rustup toolchains
+  1.75.0, 1.77.1, 1.82.0, 1.85.0, 1.86.0 (all fail) and 1.87.0, 1.88.0 (both
+  succeed).
+
+### Added
+
+- **`oxifft-adapter-mpi`: distributed real transforms (`MpiRealPlan2D`,
+  `MpiRealPlan3D`).** Slab-decomposed r2c/c2r in the FFTW half-complex layout
+  (a real last dimension of size `n` is stored as `n/2 + 1` complex
+  coefficients; odd last dims supported). c2r is normalized by
+  `1 / product(dims)`, consistent with the core `RealPlan*::execute_c2r`
+  (deliberately unlike FFTW, which leaves c2r unnormalized), so an r2c -> c2r
+  round trip is the identity. r2c honours `MpiFlags::transposed_out`. Added
+  `local_size_2d_r2c` / `local_size_3d_r2c` allocation-size helpers.
+
+### Changed
+
+- **`oxifft::Plan::dft_1d` is now flag-aware and wisdom-cached.** `ESTIMATE`
+  keeps the pure heuristic; `MEASURE`/`PATIENT`/`EXHAUSTIVE` consult the
+  runtime wisdom cache (`lookup_wisdom`) first, and on a miss, benchmark real
+  candidate algorithms and cache the winner (`store_wisdom`) so repeated
+  `MEASURE` planning of the same size no longer re-benchmarks on every call.
+- Added `Algorithm::Rader` and `Algorithm::CacheOblivious`;
+  `algorithm_from_solver_name` now reconstructs all stateful solvers so
+  imported/measured wisdom actually feeds back into plan selection. Rader is
+  now selected by the `ESTIMATE` heuristic for primes in `17..=1021`.
+- `oxifft-bench`'s `rustfft` dependency is now optional and feature-gated
+  (`rustfft-compare`, on by default — mirrors the existing, already-optional
+  `fftw-compare`/`fftw` pairing) instead of an unconditional dependency. The
+  default `cargo build`/`cargo bench -p oxifft-bench` experience is
+  unchanged. `oxifft-bench` remains `publish = false`.
+- `oxifft-codegen-impl`'s crates.io category corrected from the copy-pasted
+  `development-tools::procedural-macro-helpers` (it is not a proc-macro
+  crate) to `["development-tools", "algorithms"]`.
+- **`oxifft-adapter-mpi`: `MpiPlanND::distributed_fft_dim0` now uses a single
+  `alltoallv`-based transpose** (was one blocking `all_gather_v` per fiber):
+  two collectives total regardless of fiber count, each rank holds only its
+  `1/P` share of the transposed data instead of gathering full fibers.
+  Validated under `mpirun -n 1/2/3/4`.
+
+### Dependencies
+
+- `oxicuda-driver` / `oxicuda-fft` / `oxicuda-metal` (optional GPU backends)
+  bumped from 0.1.8 → 0.5.1 across five incremental updates. CUDA execution
+  remains an honest CPU-fallback (`GpuFft::execution_target` returns
+  `ExecutionTarget::Cpu` for the CUDA backend; Metal returns `Gpu`) pending
+  device-side FFT support landing in `oxicuda-fft` itself — the bump tracks
+  upstream API changes only, no behavior change on the `oxifft` side.
+
+### Fixed / Dependency & Packaging Hygiene
+
+- **Added `deny.toml`** at the workspace root enforcing the COOLJAPAN
+  banned-crate policy (openblas, bincode, rustfft, Z3, rusqlite, zip, flate2,
+  zstd, bzip2, lz4, tar, snap, brotli, miniz_oxide) via `cargo deny check
+  bans`, with narrow, documented `wrappers` exceptions scoped only to
+  `oxifft-bench` (`publish = false`) and its comparison-benchmark
+  dependencies (`rustfft`, and the `fftw` → `fftw-sys` → `fftw-src` → `zip` →
+  {`flate2` → `miniz_oxide`, `zstd`, `bzip2`} chain behind the non-default
+  `fftw-compare` feature). `cargo deny check` (bans + licenses + advisories +
+  sources) passes clean on this workspace as of this release.
+- Fixed workspace dependency-inheritance violations: `oxifft/Cargo.toml`'s
+  stale `oxifft-codegen = "0.3.1"` local pin, `oxifft-adapter-mpi/Cargo.toml`'s
+  local pin on `oxifft`, and `oxifft-codegen/Cargo.toml`'s local `trybuild`
+  dev-dependency pin now all route through `[workspace.dependencies]` /
+  `.workspace = true`, matching the existing `oxifft-codegen-impl` pattern.
+- Removed the dead `seahash` dependency (its only consumer, `kernel/hash.rs`,
+  was deleted as part of the planner/wisdom rework above) and the dead
+  workspace `libc` dependency (declared "for SVE detection" but never
+  referenced anywhere; SVE detection uses
+  `std::arch::is_aarch64_feature_detected!` instead).
+- Added `[package.metadata.docs.rs]` to all four publishable crates
+  (`oxifft`, `oxifft-codegen`, `oxifft-codegen-impl`, `oxifft-adapter-mpi`).
+  `oxifft`'s docs.rs build now uses a curated feature list (`std`,
+  `threading`, `avx512`, `f128-support`, `f16-support`, `sparse`, `pruned`,
+  `sve`, `wasm`, `streaming`, `const-fft`, `signal`, `fftw-compat`, `ndarray`)
+  rather than `all-features`, since `cuda`/`metal`/`gpu` pull in
+  `oxicuda-metal`'s `metal` crate dependency, which does not build on
+  docs.rs's Linux container.
+- Added a real `README.md` for `oxifft-adapter-mpi` (previously shipped with
+  no readme at all) documenting what the crate is, its MPI/libclang build
+  prerequisites, a quickstart, and the `mpirun` integration-check workflow;
+  added `readme = "README.md"` to its `Cargo.toml`.
+- Every publishable crate (`oxifft`, `oxifft-codegen`, `oxifft-codegen-impl`,
+  `oxifft-adapter-mpi`) now ships its own copy of `LICENSE` in its package
+  tarball (previously only the workspace-root `LICENSE` existed, which is not
+  auto-included in any individual crate's `cargo package` output).
+- Excluded the prebuilt `pkg_simd/` wasm-pack artifacts (`.wasm`/`.js`/
+  `.d.ts`, still tracked in git from before a `.gitignore` rule was added for
+  them) from the `oxifft` crate's crates.io tarball via `Cargo.toml`'s
+  `exclude` list — `.gitignore` cannot retroactively untrack already-committed
+  files, so this is the mechanism that actually keeps them out of `cargo
+  package`.
+- Added `default-members = ["oxifft", "oxifft-codegen", "oxifft-codegen-impl",
+  "oxifft-bench"]` to the workspace so a plain `cargo build`/`cargo test` at
+  the repository root no longer requires a system MPI implementation or
+  `libclang`; `oxifft-adapter-mpi` remains fully buildable via
+  `cargo build --workspace` or `cargo build -p oxifft-adapter-mpi`.
+- **`no_std` SIMD compilation fixed across both the generated and hand-written
+  AVX-512 paths.** The codegen-emitted dispatchers (`gen_simd_codelet!`,
+  `gen_dispatcher_codelet!`) are now fully `no_std`-safe: x86 feature detection
+  goes through a self-contained, block-local `macro_rules!` that expands to
+  `is_x86_feature_detected!` under `std` and to `cfg!(target_feature = ...)`
+  under `no_std` (matched as `:tt`, not `:literal`, so `std_detect` sees the
+  raw feature literal — a `:literal` fragment tripped a spurious "unknown x86
+  target feature" error under `--features avx512,std`); the AVX-512 f32 size-16
+  twiddles are precomputed into literal constants at proc-macro expansion time
+  rather than emitting runtime `.sin()`/`.cos()` calls; and no `::std::` paths
+  are emitted (aarch64 NEON is assumed, matching the uncached dispatcher). With
+  the emitted code self-contained, the previously `std`-gated cached size-4
+  dispatchers in `generated_simd.rs` are now available under `no_std` too. The
+  hand-written AVX-512 codelets were fixed the same way: the dispatch wrappers
+  route `avx512f` detection through the crate's `detect_x86_feature!` macro
+  instead of the `std`-only `is_x86_feature_detected!`, and the precomputed
+  twiddle-table builders resolve `sin_cos` via `num_traits::Float` under
+  `no_std`. `cargo check -p oxifft --no-default-features --features avx512
+  --target x86_64-unknown-linux-gnu` and the `--features avx512,std` variant
+  both build clean.
+- Fixed two remaining lint warnings found in final full-workspace
+  verification: a `clippy::manual_midpoint` hit in
+  `const_fft::radix2::ifft2_inplace` (now uses `f64::midpoint`, stabilized in
+  the crate's MSRV 1.87) and a `rustdoc::private_intra_doc_links` warning in
+  `oxifft-codegen-impl/src/gen_simd/mod.rs` (doc comment referenced the
+  private `gen_x86_detect_macro` helper via `[...]` link syntax, which cannot
+  resolve to a private item). `cargo clippy --workspace --all-targets
+  --all-features` and `cargo doc --workspace --all-features --no-deps` are
+  both zero-warning as of this release. Full gate re-verification: 1730
+  tests passing workspace-wide, doctests passing, `cargo deny check` clean,
+  `mpirun -n 2` / `-n 4` MPI integration tests passing.
+- **Fixed release-build-only test flakiness in `kernel::twiddle`'s SoA-vs-AoS
+  parity tests** (`soa_vs_aos_correctness_f64_{1024,4096,16384,65536}`):
+  these passed under `cargo nextest run` (debug) but failed under `--release`,
+  up to 2048 ULP apart at specific (size, index) pairs. Root cause: the AoS
+  and SoA twiddle-table builders (`compute_twiddle_table_f64` vs
+  `compute_twiddle_table_soa_f64`) use the identical scalar formula but as
+  structurally different loops (iterator `.map().collect()` vs manual `for`
+  + `.push()`), so under `-O` LLVM's auto-vectorizer is free to choose
+  different, individually-valid instruction sequences for the division
+  feeding `cos`/`sin` in each — a sub-ULP input perturbation that can
+  occasionally amplify to a few thousand ULP in the trig output for specific
+  inputs, without either path being wrong. A raw ULP bound is the wrong tool
+  for comparing two independently-vectorized-and-compiled code paths for
+  exactly this reason; the tests (f64 and f32 variants) now use an
+  absolute/relative-error gate (`1e-11`/`1e-9` for f64, `1e-6`/`1e-5` for
+  f32) that comfortably clears the observed noise (worst case ~4.5e-13
+  relative) while staying far tighter than any real algorithmic bug would
+  produce. No production code changed — this was a test-tolerance defect
+  only, caught by adding a `cargo nextest run --release` pass (not
+  previously part of this project's verification gates) to `/final-call`.
+
+### Known Issues (tracked, not fixed this release)
+
+- `syn` stays pinned to the 2.0 major workspace-wide (crates.io's current
+  major is 3.0) because migrating `oxifft-codegen`/`oxifft-codegen-impl`'s
+  proc-macro internals to syn 3.0 is a real source migration, not a drop-in
+  bump. `serde_derive` already pulls in syn 3.0 transitively, so both majors
+  compile in every build regardless; `cargo deny`'s `multiple-versions`
+  duplicate check is informed of this via a documented `skip` entry.
+- `oxifft-bench --no-default-features` does not build:
+  `utils::rustfft_forward`/`utils::rustfft_inverse` and the `fft_comparison`
+  bench still reference `rustfft` unconditionally in source. The
+  `rustfft-compare` feature (on by default) makes the dependency itself
+  optional at the `Cargo.toml` level, but the call sites in
+  `oxifft-bench/src/utils.rs` need `#[cfg(feature = "rustfft-compare")]`
+  guards to fully honor `--no-default-features`; default-feature builds are
+  unaffected.
+- `oxifft-adapter-mpi`'s docs.rs build is expected to fail regardless of its
+  `[package.metadata.docs.rs]` stanza: its single, non-optional `mpi`
+  dependency requires a real MPI implementation and `libclang` at build time,
+  neither available on the docs.rs container, and there is no Cargo-level way
+  to make a non-optional dependency skip that requirement.
+
 ## [0.3.2] - 2026-05-22
 
 ### Added
@@ -502,15 +700,16 @@ _No unreleased changes._
 
 ## Project Statistics
 
-- **Total Lines of Code**: 37,594 (Rust code only)
-- **Rust Files**: 168
-- **Test Coverage**: 357 unit tests + doc tests passing
-- **Zero Warnings**: Clippy + rustdoc clean (all features)
-- **Documentation**: 2,853 comment lines + 5,552 doc comment lines
+- **Total Lines of Code**: 78,065 (Rust code only, `tokei`)
+- **Rust Files**: 300
+- **Test Coverage**: 1,730 tests + doc tests passing (0 failed, 7 skipped)
+- **Zero Warnings**: Clippy + rustdoc clean (all features, workspace-wide)
+- **Documentation**: 7,737 comment lines (incl. doc comments)
 
 ## Supported Platforms
 
-- **x86_64**: Linux, macOS, Windows (SSE2, AVX, AVX2, AVX-512)
+- **x86_64**: Linux, macOS, Windows (SSE2, AVX, AVX2, AVX-512 behind the
+  default-off `avx512` feature — see [0.3.2](#032---2026-05-22))
 - **aarch64**: Linux, macOS (NEON, SVE with feature flag)
 - **wasm32**: Browser and Node.js (WASM SIMD)
 
@@ -521,16 +720,19 @@ _No unreleased changes._
 - num-traits 0.2
 - serde 1.0
 - serde_json 1.0
-- seahash 4.1
 
 ### Optional
-- rayon 1.11 (threading)
-- mpi 0.8 (MPI distributed computing)
-- libc 0.2 (SVE detection)
+- rayon 1.12 (threading)
+- mpi 0.8 (MPI distributed computing, `oxifft-adapter-mpi`)
+- oxicuda-driver / oxicuda-fft / oxicuda-metal 0.5 (GPU backends — Metal is
+  real GPU execution, CUDA is an honest CPU-fallback pending upstream
+  device-side FFT support)
 - wasm-bindgen 0.2 (WebAssembly bindings)
 - js-sys 0.3 (JavaScript interop)
 
-[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cool-japan/oxifft/compare/v0.3.2...v0.4.0
+[0.3.2]: https://github.com/cool-japan/oxifft/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/cool-japan/oxifft/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/cool-japan/oxifft/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cool-japan/oxifft/compare/v0.1.4...v0.2.0

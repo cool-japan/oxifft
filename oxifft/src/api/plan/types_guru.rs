@@ -21,7 +21,7 @@ use super::types::Plan;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::{Complex, Direction, Flags, IoDim, Tensor};
 /// use oxifft::api::GuruPlan;
 ///
@@ -29,7 +29,7 @@ use super::types::Plan;
 /// let dims = Tensor::new(vec![IoDim::contiguous(256)]);
 /// let howmany = Tensor::new(vec![IoDim::new(10, 256, 256)]); // 10 batches, stride=256
 ///
-/// let mut input = vec![Complex::new(0.0, 0.0); 2560];
+/// let input = vec![Complex::new(0.0, 0.0); 2560];
 /// let mut output = vec![Complex::new(0.0, 0.0); 2560];
 ///
 /// let plan = GuruPlan::<f64>::dft(
@@ -37,7 +37,8 @@ use super::types::Plan;
 ///     &howmany,
 ///     Direction::Forward,
 ///     Flags::ESTIMATE,
-/// ).unwrap();
+/// )
+/// .expect("valid guru plan");
 ///
 /// plan.execute(&input, &mut output);
 /// ```

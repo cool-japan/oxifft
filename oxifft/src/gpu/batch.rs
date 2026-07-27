@@ -12,17 +12,19 @@
 //!
 //! # Example (Metal, Apple Silicon)
 //!
-//! ```ignore
-//! use oxifft::gpu::{GpuBatchFft, GpuDirection};
+//! ```no_run
+//! // no_run: requires a real Apple-Silicon Metal device.
 //! use oxifft::gpu::metal::MetalFftPlan;
-//! use oxifft::kernel::{Complex, Float};
+//! use oxifft::gpu::{GpuBatchFft, GpuDirection};
+//! use oxifft::Complex;
 //!
 //! let plan = MetalFftPlan::new(256, 1).expect("MetalFftPlan");
-//! let inputs: Vec<Vec<Complex<f32>>> = vec![/* ... */];
-//! let mut outputs: Vec<Vec<Complex<f32>>> = vec![/* ... */];
+//! let inputs: Vec<Vec<Complex<f32>>> = vec![vec![Complex::new(1.0, 0.0); 256]; 4];
+//! let mut outputs: Vec<Vec<Complex<f32>>> = vec![vec![Complex::new(0.0, 0.0); 256]; 4];
 //!
 //! let input_slices: Vec<&[Complex<f32>]> = inputs.iter().map(|v| v.as_slice()).collect();
-//! let mut output_slices: Vec<&mut [Complex<f32>]> = outputs.iter_mut().map(|v| v.as_mut_slice()).collect();
+//! let mut output_slices: Vec<&mut [Complex<f32>]> =
+//!     outputs.iter_mut().map(|v| v.as_mut_slice()).collect();
 //!
 //! plan.execute_batch(&input_slices, &mut output_slices, GpuDirection::Forward)
 //!     .expect("batch execute");
@@ -34,11 +36,16 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec::Vec};
 
-use super::buffer::GpuBuffer;
 use super::error::{GpuError, GpuResult};
 use super::plan::GpuDirection;
-use super::GpuBackend;
 use crate::kernel::{Complex, Float};
+
+// Used only by the test suites below (the production batch paths dispatch
+// through backend-specific methods, not raw `GpuBuffer`s).
+#[cfg(test)]
+use super::buffer::GpuBuffer;
+#[cfg(test)]
+use super::GpuBackend;
 
 /// Validate that `inputs` and `outputs` are consistent for a batch FFT.
 ///
@@ -140,6 +147,10 @@ pub trait GpuBatchFft<T: Float>: Send + Sync {
 /// incurring no overhead.  When it exceeds the limit the workload is split
 /// into `⌈inputs.len() / chunk_limit⌉` chunks dispatched in order so that
 /// output ordering is preserved.
+///
+/// This per-element helper backs the CUDA CPU-emulation path (the Metal backend
+/// uses native single-dispatch batching instead), and the chunking tests.
+#[cfg(any(feature = "cuda", test))]
 fn dispatch_chunked<T, F>(
     inputs: &[&[Complex<T>]],
     outputs: &mut [&mut [Complex<T>]],
@@ -200,24 +211,13 @@ mod metal_impl {
                 });
             }
 
-            // Fast path: batch fits within a single chunk — no extra allocation.
-            if inputs.len() <= METAL_BATCH_LIMIT {
-                for (inp, out) in inputs.iter().zip(outputs.iter_mut()) {
-                    let in_buf = GpuBuffer::from_slice(inp, GpuBackend::Metal)?;
-                    let mut out_buf = GpuBuffer::new(n, GpuBackend::Metal)?;
-                    self.execute(&in_buf, &mut out_buf, direction)?;
-                    out_buf.download(out)?;
-                }
-                return Ok(());
-            }
-
-            // Slow path: auto-chunk, preserving output order.
-            dispatch_chunked(inputs, outputs, METAL_BATCH_LIMIT, |inp, out| {
-                let in_buf = GpuBuffer::from_slice(inp, GpuBackend::Metal)?;
-                let mut out_buf = GpuBuffer::new(n, GpuBackend::Metal)?;
-                self.execute(&in_buf, &mut out_buf, direction)?;
-                out_buf.download(out)
-            })
+            // Native batched dispatch: transforms are packed and submitted in
+            // chunks of the plan's own `batch_size` through its already-compiled
+            // inner plan (no per-call shader recompilation).  This is correct
+            // for any plan `batch_size` — unlike the old per-element
+            // `self.execute` loop, which required `size * batch_size` buffers and
+            // errored out for `batch_size > 1`.
+            self.execute_batch_native(inputs, outputs, direction)
         }
     }
 }
@@ -260,23 +260,15 @@ mod cuda_impl {
                 });
             }
 
-            // Fast path: batch fits within a single chunk — no extra allocation.
-            if inputs.len() <= CUDA_BATCH_LIMIT {
-                for (inp, out) in inputs.iter().zip(outputs.iter_mut()) {
-                    let in_buf = GpuBuffer::from_slice(inp, GpuBackend::Cuda)?;
-                    let mut out_buf = GpuBuffer::new(n, GpuBackend::Cuda)?;
-                    self.execute(&in_buf, &mut out_buf, direction)?;
-                    out_buf.download(out)?;
-                }
-                return Ok(());
-            }
-
-            // Slow path: auto-chunk, preserving output order.
+            // The CUDA backend currently emulates on the CPU (see
+            // `crate::gpu::cuda`).  Dispatch each transform through the
+            // single-transform CPU path, which is independent of this plan's
+            // configured batch size — so, unlike the old `self.execute` loop,
+            // this works even when the plan was built with `batch_size > 1`.
+            // Native batched GPU dispatch will become worthwhile only once real
+            // device kernels land in oxicuda-fft.
             dispatch_chunked(inputs, outputs, CUDA_BATCH_LIMIT, |inp, out| {
-                let in_buf = GpuBuffer::from_slice(inp, GpuBackend::Cuda)?;
-                let mut out_buf = GpuBuffer::new(n, GpuBackend::Cuda)?;
-                self.execute(&in_buf, &mut out_buf, direction)?;
-                out_buf.download(out)
+                self.execute_one_cpu(inp, out, direction)
             })
         }
     }
@@ -766,6 +758,110 @@ mod tests {
                 GpuDirection::Forward,
             );
             assert!(result.is_err(), "wrong slice length should fail");
+        }
+
+        /// CPU reference: unnormalised forward DFT of a single size-`n` signal.
+        fn cpu_forward(input: &[Complex<f32>]) -> Vec<Complex<f32>> {
+            use crate::api::{Direction, Flags, Plan};
+            let n = input.len();
+            let plan = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE).expect("cpu plan");
+            let in64: Vec<Complex<f64>> = input
+                .iter()
+                .map(|c| Complex::new(c.re as f64, c.im as f64))
+                .collect();
+            let mut out64 = vec![Complex::<f64>::zero(); n];
+            plan.execute(&in64, &mut out64);
+            out64
+                .iter()
+                .map(|c| Complex::new(c.re as f32, c.im as f32))
+                .collect()
+        }
+
+        #[test]
+        fn metal_batch_matches_cpu() {
+            if !metal::is_available() {
+                return;
+            }
+            let n = 32usize;
+            let batch_count = 5usize;
+            let plan = MetalFftPlan::new(n, 1).expect("MetalFftPlan::new");
+
+            let inputs: Vec<Vec<Complex<f32>>> = (0..batch_count)
+                .map(|i| {
+                    (0..n)
+                        .map(|j| {
+                            let x = ((i * n + j) as f32) * 0.07_f32;
+                            Complex::new(x.sin(), 0.0)
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let cpu_outputs: Vec<Vec<Complex<f32>>> =
+                inputs.iter().map(|inp| cpu_forward(inp)).collect();
+
+            let input_slices: Vec<&[Complex<f32>]> = inputs.iter().map(|v| v.as_slice()).collect();
+            let mut batch_outputs: Vec<Vec<Complex<f32>>> =
+                (0..batch_count).map(|_| vec![Complex::zero(); n]).collect();
+            let mut output_slices: Vec<&mut [Complex<f32>]> =
+                batch_outputs.iter_mut().map(|v| v.as_mut_slice()).collect();
+
+            plan.execute_batch(&input_slices, &mut output_slices, GpuDirection::Forward)
+                .expect("batch execute");
+
+            let tol = 1e-3_f32 * n as f32;
+            for (b, (gpu, cpu)) in batch_outputs.iter().zip(cpu_outputs.iter()).enumerate() {
+                for (k, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
+                    let err = ((g.re - c.re).powi(2) + (g.im - c.im).powi(2)).sqrt();
+                    assert!(
+                        err <= tol,
+                        "batch={b} bin={k}: gpu=({},{}) cpu=({},{}) err={err} > {tol}",
+                        g.re,
+                        g.im,
+                        c.re,
+                        c.im
+                    );
+                }
+            }
+        }
+
+        /// Regression: a plan built with `batch_size > 1` must still service the
+        /// per-element batch trait.  The old loop passed size-`n` buffers to
+        /// `self.execute`, which required `size * batch_size` and errored out.
+        #[test]
+        fn metal_batch_works_with_plan_batch_size_gt_1() {
+            if !metal::is_available() {
+                return;
+            }
+            let n = 16usize;
+            // Plan batch = 4, but the batch call has 3 elements (count != batch).
+            let plan = MetalFftPlan::new(n, 4).expect("MetalFftPlan::new");
+
+            let inputs: Vec<Vec<Complex<f32>>> = (0..3)
+                .map(|i| {
+                    (0..n)
+                        .map(|j| Complex::new(((i * n + j) as f32) * 0.1_f32, 0.0))
+                        .collect()
+                })
+                .collect();
+            let input_slices: Vec<&[Complex<f32>]> = inputs.iter().map(|v| v.as_slice()).collect();
+            let mut outs: Vec<Vec<Complex<f32>>> =
+                (0..3).map(|_| vec![Complex::zero(); n]).collect();
+            let mut out_slices: Vec<&mut [Complex<f32>]> =
+                outs.iter_mut().map(|v| v.as_mut_slice()).collect();
+
+            plan.execute_batch(&input_slices, &mut out_slices, GpuDirection::Forward)
+                .expect("batch with plan batch_size > 1 must succeed");
+
+            // Each output must match the per-element CPU forward.
+            let tol = 1e-3_f32 * n as f32;
+            for (b, out) in outs.iter().enumerate() {
+                let cpu = cpu_forward(&inputs[b]);
+                for (k, (g, c)) in out.iter().zip(cpu.iter()).enumerate() {
+                    let err = ((g.re - c.re).powi(2) + (g.im - c.im).powi(2)).sqrt();
+                    assert!(err <= tol, "batch={b} bin={k}: err={err} > {tol}");
+                }
+            }
         }
     }
 

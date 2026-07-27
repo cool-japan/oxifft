@@ -12,11 +12,14 @@
 //!
 //! ## `AoS` (Array-of-Structs) — outer function signature
 //!
-//! For `V` transforms of size `N`:
+//! Transforms are grouped into batches of `V`; each batch is a contiguous block
+//! of `N * V * 2` floats. For global transform `g` (batch `b = g / V`, lane
+//! `t = g % V`), element `k`:
 //! ```text
-//! data[element_idx * v * 2 + transform_idx * 2 + 0]  = re of x[element_idx] for transform transform_idx
-//! data[element_idx * v * 2 + transform_idx * 2 + 1]  = im of x[element_idx] for transform transform_idx
+//! data[b * (N*V*2) + t * 2 + k * (V*2) + 0]  = re of x[k] for transform g
+//! data[b * (N*V*2) + t * 2 + k * (V*2) + 1]  = im of x[k] for transform g
 //! ```
+//! (A single batch, `g < V`, reduces to `data[k * V*2 + g * 2 + c]`.)
 //!
 //! ## `SoA` (Struct-of-Arrays) — inner SIMD function signature
 //!
@@ -26,14 +29,21 @@
 //! im_in[element_idx * v + transform_idx] = imag  part of x[element_idx] for transform transform_idx
 //! ```
 //!
-//! The SIMD functions operate natively in `SoA`. The outer `AoS` function optionally
-//! calls the inner `SoA` function (when `ISA` + precision match a SIMD path), otherwise
-//! falls back to the sequential scalar loop.
+//! The SIMD functions operate natively in `SoA`. The outer `AoS` function is
+//! **always** the sequential scalar loop — it never calls the inner `SoA`
+//! function. When a SIMD path exists the `_soa` companion is emitted *alongside*
+//! the outer function for callers that want true SIMD throughput; they must call
+//! the `_soa` function directly (see the `has_simd_impl` dispatch predicate).
+//!
+//! The outer `AoS` function only supports the canonical layout where
+//! `istride == ostride == 2 * V`; the transform-packing offset is hard-coded to
+//! that stride. Passing any other stride is a contract violation, guarded by a
+//! `debug_assert_eq!` in the generated body.
 //!
 //! # Generated function signatures
 //!
 //! Outer (`AoS`, called by users):
-//! ```rust,ignore
+//! ```text
 //! pub unsafe fn notw_4_v8_avx2_f32(
 //!     input: *const f32, output: *mut f32,
 //!     istride: usize, ostride: usize, count: usize,
@@ -41,7 +51,7 @@
 //! ```
 //!
 //! Inner `SoA` SIMD helpers (emitted alongside, for direct use or testing):
-//! ```rust,ignore
+//! ```text
 //! pub unsafe fn notw_4_v8_avx2_f32_soa(
 //!     re_in: *const f32, im_in: *const f32,
 //!     re_out: *mut f32, im_out: *mut f32,
@@ -186,6 +196,12 @@ fn gen_simd_inner(config: &MultiTransformConfig) -> Option<TokenStream> {
 /// regardless of whether a companion `SoA` SIMD function is also emitted.
 /// Callers that want true SIMD throughput should use the `_soa` companion directly.
 ///
+/// The transform-packing offset is hard-coded to a stride of `2 * V`, so the
+/// generated body opens with `debug_assert_eq!(istride, 2 * V)` /
+/// `debug_assert_eq!(ostride, 2 * V)`: any other stride would silently corrupt
+/// the interleaved output, so it is rejected as a contract violation in debug
+/// builds.
+///
 /// # Panics
 ///
 /// Panics only if internal constant string literals fail to parse — impossible
@@ -193,24 +209,43 @@ fn gen_simd_inner(config: &MultiTransformConfig) -> Option<TokenStream> {
 fn gen_outer_body(config: &MultiTransformConfig, size: usize, v: usize) -> TokenStream {
     let butterfly_body = scalar::gen_scalar_butterfly(size, config.precision);
     let v_lit = v;
-    let size_lit = size;
+    let stride_lit = v * 2;
+    // Floats per full V-transform batch block: `size` complex elements per
+    // transform, `v` interleaved transforms, 2 floats per complex.
+    let block_lit = size * v * 2;
     quote! {
+        // The AoS transform packing hard-codes a stride of 2*V; only the
+        // canonical layout is supported. Guard the contract in debug builds.
+        debug_assert_eq!(
+            istride, #stride_lit,
+            "multi-transform outer AoS: istride must equal 2*V ({})", #stride_lit
+        );
+        debug_assert_eq!(
+            ostride, #stride_lit,
+            "multi-transform outer AoS: ostride must equal 2*V ({})", #stride_lit
+        );
+
         let batches = count / #v_lit;
         let remainder = count % #v_lit;
 
+        // Each batch of V transforms occupies its own contiguous block of
+        // `size * V * 2` floats. Within a block, transform lane `t` starts at
+        // `t * 2` and its element `e` is at `t*2 + e*istride` (istride == 2*V).
         for b in 0..batches {
+            let block_base = b * #block_lit;
             for t in 0..#v_lit {
-                let base_in  = (b * #v_lit + t) * 2;
-                let base_out = (b * #v_lit + t) * 2;
+                let base_in  = block_base + t * 2;
+                let base_out = block_base + t * 2;
                 #butterfly_body
             }
         }
+        // Trailing partial batch (fewer than V transforms) lives in the next block.
+        let rem_base = batches * #block_lit;
         for t in 0..remainder {
-            let base_in  = (batches * #v_lit + t) * 2;
-            let base_out = (batches * #v_lit + t) * 2;
+            let base_in  = rem_base + t * 2;
+            let base_out = rem_base + t * 2;
             #butterfly_body
         }
-        let _ = #size_lit;
     }
 }
 
@@ -280,22 +315,28 @@ pub fn generate_multi_transform(config: &MultiTransformConfig) -> Result<TokenSt
         "Sequential scalar fallback (no SIMD for this `ISA`+precision+size combination).".into()
     };
 
+    let block = size * v * 2;
     let fn_doc = format!(
         "Process `count` transforms of size {size} in batches of {v} (v={v}) using {isa} ISA.\n\n\
          # Data layout (`AoS`)\n\
-         Interleaved with stride {v}: `data[element * {stride} + transform * 2 + c]`\n\
-         where `c` is 0 for real, 1 for imaginary.\n\n\
+         Transforms are grouped into batches of {v}; each batch is a contiguous block\n\
+         of `{block}` floats (`{size} * {v} * 2`). For global transform `g` the batch is\n\
+         `b = g / {v}` and the lane is `t = g % {v}`; element `k` of that transform lives at\n\
+         `data[b * {block} + t * 2 + k * {stride} + c]` where `c` is 0 for real, 1 for imag.\n\
+         A trailing partial batch (`count % {v}` transforms) occupies the next block.\n\n\
          # SIMD acceleration\n\
          {simd_note}\n\n\
          # Safety\n\
-         - `input` must be valid for `count * {size} * 2 * {v}` reads of `{ty_str}`.\n\
-         - `output` must be valid for `count * {size} * 2 * {v}` writes of `{ty_str}`.\n\
-         - `istride` / `ostride` must be `2 * {v}` for the canonical `AoS` layout.\n\
+         - `input` must be valid for `((count + {v} - 1) / {v}) * {block}` reads of `{ty_str}`.\n\
+         - `output` must be valid for the same number of `{ty_str}` writes.\n\
+         - `istride` / `ostride` MUST be `2 * {v}` = {stride} (the only supported layout;\n\
+           debug-asserted in the body).\n\
          - No alignment requirement; uses unaligned loads.",
         size = size,
         v = v,
         isa = config.isa.ident_str(),
         stride = stride,
+        block = block,
         ty_str = ty_str,
         simd_note = simd_note,
     );
@@ -427,7 +468,7 @@ impl Parse for MacroArgs {
 /// [`generate_multi_transform`].
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// gen_multi_transform_codelet!(size = 4, v = 8, isa = avx2, ty = f32);
 /// ```
 ///

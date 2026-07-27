@@ -10,11 +10,20 @@
 #[cfg(feature = "std")]
 use std::time::Instant;
 
+#[cfg(feature = "std")]
 use crate::api::wisdom::WisdomCache;
-use crate::api::{Direction, Flags};
+use crate::api::Direction;
+#[cfg(feature = "std")]
+use crate::api::Flags;
+#[cfg(feature = "std")]
 use crate::kernel::WisdomEntry;
+#[cfg(feature = "std")]
 use crate::kernel::{Complex, Float};
+#[cfg(feature = "std")]
+use crate::kernel::{Planner, PlannerFlags};
+use crate::prelude::*;
 
+#[cfg(feature = "std")]
 use super::types::Plan;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -37,6 +46,7 @@ pub struct TuneResult {
 /// Simple LCG-based deterministic input generator (no `rand` dependency).
 ///
 /// Uses Knuth's multiplicative LCG: state′ = state × A + C (mod 2⁶⁴).
+#[cfg(feature = "std")]
 fn make_test_input<T: Float>(n: usize) -> Vec<Complex<T>> {
     let mut state: u64 = 0xdead_beef_cafe_1234;
     (0..n)
@@ -57,12 +67,13 @@ fn make_test_input<T: Float>(n: usize) -> Vec<Complex<T>> {
 /// Compute the median of a sorted slice of nanosecond timings.
 ///
 /// Requires `timings` to be sorted in ascending order.
+#[cfg(feature = "std")]
 fn median_ns(timings: &[u64]) -> u64 {
     let len = timings.len();
     if len == 0 {
         return 0;
     }
-    if len % 2 == 0 {
+    if len.is_multiple_of(2) {
         (timings[len / 2 - 1] / 2) + (timings[len / 2] / 2)
     } else {
         timings[len / 2]
@@ -96,29 +107,75 @@ fn time_plan<T: Float>(plan: &Plan<T>, input: &[Complex<T>], max_iters: usize) -
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/// Profile the heuristic algorithm for `n` and return a [`TuneResult`].
-///
-/// `max_iters` controls the number of timing repetitions per algorithm;
-/// values in 16–1000 are sensible. Smaller values are faster but noisier.
-///
-/// This function always passes [`Flags::ESTIMATE`] when constructing internal
-/// plans to avoid infinite recursion in the MEASURE/PATIENT code path.
-///
-/// Returns `None` if no plan can be constructed for `n`.
+/// Map public planning [`Flags`] onto the kernel planner's flags, which control
+/// how wide a candidate set the planner proposes.
 #[cfg(feature = "std")]
-pub fn tune_size<T: Float>(n: usize, direction: Direction, max_iters: usize) -> Option<TuneResult> {
+fn planner_flags_from(flags: Flags) -> PlannerFlags {
+    if flags.is_exhaustive() {
+        PlannerFlags::EXHAUSTIVE
+    } else if flags.is_patient() {
+        PlannerFlags::PATIENT
+    } else {
+        // MEASURE breadth (the planner's default).
+        PlannerFlags::default()
+    }
+}
+
+/// Profile every candidate algorithm valid for `n` and return the fastest.
+///
+/// `flags` controls how wide the candidate set is: MEASURE compares the core
+/// alternatives, while PATIENT / EXHAUSTIVE add specialised variants (radix-4/8,
+/// split-radix, Stockham, cache-oblivious, generic, …). The heuristic pick is
+/// always included, so the winner is never slower than the ESTIMATE choice.
+///
+/// `max_iters` controls the number of timing repetitions per candidate; values
+/// in 16–1000 are sensible. Smaller values are faster but noisier.
+///
+/// Each candidate is constructed with a fixed algorithm (never re-entering the
+/// tuner) so there is no recursion. Returns `None` if no plan can be built.
+#[cfg(feature = "std")]
+pub fn tune_size<T: Float>(
+    n: usize,
+    direction: Direction,
+    flags: Flags,
+    max_iters: usize,
+) -> Option<TuneResult> {
     // Clamp repetition count to a sane range.
     let iters = max_iters.clamp(4, 10_000);
-
-    // Build the heuristic plan (ESTIMATE to avoid re-entry into the tuner).
-    let plan = Plan::<T>::dft_1d(n, direction, Flags::ESTIMATE)?;
     let input = make_test_input::<T>(n);
-    let elapsed_ns = time_plan(&plan, &input, iters);
 
+    // Assemble the candidate list: the heuristic pick first (guaranteeing the
+    // tuner never regresses below ESTIMATE), then the planner's flag-aware
+    // candidate set. Duplicates are dropped.
+    let mut names: Vec<String> = Vec::new();
+    if let Some(heuristic) = Plan::<T>::dft_1d(n, direction, Flags::ESTIMATE) {
+        names.push(heuristic.wisdom_solver_name());
+    }
+    let planner = Planner::<T>::with_flags(planner_flags_from(flags));
+    for name in planner.candidate_solver_names(n) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+
+    // Time each candidate we can actually reconstruct and keep the fastest.
+    let mut best: Option<(String, u64)> = None;
+    for name in names {
+        let Some(plan) = Plan::<T>::from_solver_name(n, direction, &name) else {
+            continue;
+        };
+        let elapsed_ns = time_plan(&plan, &input, iters);
+        match &best {
+            Some((_, best_ns)) if *best_ns <= elapsed_ns => {}
+            _ => best = Some((name, elapsed_ns)),
+        }
+    }
+
+    let (algorithm_name, elapsed_ns) = best?;
     Some(TuneResult {
         n,
         direction,
-        algorithm_name: plan.wisdom_solver_name(),
+        algorithm_name,
         elapsed_ns,
     })
 }
@@ -140,7 +197,7 @@ pub fn tune_range<T: Float>(
     let mut cache = WisdomCache::new();
 
     for n in min_n..=max_n {
-        if let Some(result) = tune_size::<T>(n, Direction::Forward, reps_per_size) {
+        if let Some(result) = tune_size::<T>(n, Direction::Forward, Flags::MEASURE, reps_per_size) {
             // Use `n` directly as the problem hash (matches the keying strategy
             // used by `from_baseline_wisdom` in types.rs).
             cache.store(WisdomEntry {
@@ -163,7 +220,7 @@ mod tests {
 
     #[test]
     fn tune_size_returns_result() {
-        let result = tune_size::<f64>(64, Direction::Forward, 16);
+        let result = tune_size::<f64>(64, Direction::Forward, Flags::MEASURE, 16);
         assert!(result.is_some(), "tune_size should succeed for n=64");
         let r = result.expect("already checked is_some");
         assert_eq!(r.n, 64);
@@ -177,14 +234,36 @@ mod tests {
     #[test]
     fn tune_size_various_sizes() {
         // Power of 2
-        let r = tune_size::<f64>(8, Direction::Forward, 8);
+        let r = tune_size::<f64>(8, Direction::Forward, Flags::MEASURE, 8);
         assert!(r.is_some());
-        // Prime (Bluestein fallback)
-        let r = tune_size::<f64>(17, Direction::Forward, 8);
+        // Prime (Rader vs Bluestein vs Direct compared)
+        let r = tune_size::<f64>(17, Direction::Forward, Flags::MEASURE, 8);
         assert!(r.is_some());
         // Smooth-7 composite
-        let r = tune_size::<f64>(12, Direction::Forward, 8);
+        let r = tune_size::<f64>(12, Direction::Forward, Flags::MEASURE, 8);
         assert!(r.is_some());
+    }
+
+    #[test]
+    fn tune_size_compares_multiple_candidates() {
+        // A large power-of-two exposes several genuinely different candidates
+        // (ct-dit, ct-dif, stockham, cache-oblivious). PATIENT widens the set
+        // further (split-radix, radix-4/8). The winner must be a real,
+        // reconstructable algorithm, proving multi-candidate comparison runs.
+        let planner = Planner::<f64>::with_flags(planner_flags_from(Flags::PATIENT));
+        let candidates = planner.candidate_solver_names(1024);
+        assert!(
+            candidates.len() >= 3,
+            "expected several candidates for n=1024 under PATIENT, got {candidates:?}"
+        );
+
+        let r = tune_size::<f64>(1024, Direction::Forward, Flags::PATIENT, 8)
+            .expect("tune_size for n=1024 must succeed");
+        assert!(
+            Plan::<f64>::from_solver_name(1024, Direction::Forward, &r.algorithm_name).is_some(),
+            "winning algorithm '{}' must be reconstructable",
+            r.algorithm_name
+        );
     }
 
     #[test]
@@ -220,23 +299,26 @@ mod tests {
 
     #[test]
     fn binary_wisdom_round_trip_solver_name_content() {
-        // n=6 = 2×3 uses MixedRadix; its wisdom name must survive a binary round-trip.
-        // The innermost-first factor sequence for 6 is [2,3] (greedy-largest-first peels
-        // 3 then 2, reversed → innermost=[2,3]), so wisdom name = "mixed-radix-2-3".
-        let result = tune_size::<f64>(6, Direction::Forward, 4);
-        let r = result.expect("tune_size for n=6 (MixedRadix) must succeed");
-        assert!(
-            r.algorithm_name.starts_with("mixed-radix-"),
-            "n=6 must map to mixed-radix, got: {}",
-            r.algorithm_name
+        // n=6 = 2×3 uses MixedRadix in the heuristic; its wisdom name must
+        // survive a binary round-trip. The innermost-first factor sequence for 6
+        // is [2,3] (greedy-largest-first peels 3 then 2, reversed → [2,3]), so
+        // the wisdom name = "mixed-radix-2-3". We take the name directly from the
+        // heuristic plan (deterministic) rather than the tuner's fastest pick,
+        // which is timing-dependent.
+        let plan = Plan::<f64>::dft_1d(6, Direction::Forward, Flags::ESTIMATE)
+            .expect("plan for n=6 must build");
+        let solver_name = plan.wisdom_solver_name();
+        assert_eq!(
+            solver_name, "mixed-radix-2-3",
+            "n=6 heuristic must map to mixed-radix-2-3, got: {solver_name}"
         );
 
         // Build a tiny cache with just n=6 and round-trip through binary.
         let mut cache = WisdomCache::new();
         cache.store(crate::kernel::WisdomEntry {
             problem_hash: 6,
-            solver_name: r.algorithm_name.clone(),
-            cost: r.elapsed_ns as f64,
+            solver_name: solver_name.clone(),
+            cost: 1.0,
         });
         let bytes = cache.to_binary();
         let restored = WisdomCache::from_binary(&bytes)
@@ -252,7 +334,7 @@ mod tests {
             "round-tripped solver name must still be mixed-radix, got: {restored_name}"
         );
         assert_eq!(
-            restored_name, r.algorithm_name,
+            restored_name, solver_name,
             "solver name must be identical after binary round-trip"
         );
     }

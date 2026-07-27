@@ -15,11 +15,24 @@
 //!
 //! - **SIMD-accelerated pointwise multiply** of `a_fft[i] * twiddle_fft[i]` via
 //!   `complex_mul_aos`, dispatching to AVX2+FMA / SSE2 / NEON at runtime.
+//! - **SIMD-dispatched inner convolution FFT** of size `p-1`: the length-(p-1)
+//!   cyclic convolution is computed with the fastest available engine for that
+//!   size ([`ConvSolver`]) rather than unconditionally through Bluestein.  For a
+//!   prime `p ≥ 5`, `p-1` is always even and therefore composite, so the
+//!   convolution routes through the SIMD-accelerated radix-2 Cooley-Tukey path
+//!   (power-of-two `p-1`) or the SIMD mixed-radix [`GenericSolver`] (smooth
+//!   composite `p-1`), which are markedly cheaper than Bluestein's zero-padding
+//!   to `next_pow2(2(p-1)-1)`.  Bluestein remains the fallback only when `p-1`
+//!   has a large prime factor (so the mixed-radix recursion would itself bottom
+//!   out in Bluestein anyway).
 //! - **4th inplace scratch mutex**: `work_inplace` avoids an unconditional
 //!   `data.to_vec()` allocation in `execute_inplace` for the common case.
 //! - **Unique solver ID**: assigned at construction for potential debugging.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+// `AtomicUsize` (not `AtomicU64`) so the monotonic solver-ID counter also works
+// on targets without 64-bit atomics (e.g. riscv32imac). The id is session-local
+// and never persisted, so the narrower range on 32-bit targets is harmless.
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::dft::problem::Sign;
 use crate::kernel::complex_mul::complex_mul_aos;
@@ -28,9 +41,73 @@ use crate::kernel::{Complex, Float};
 use crate::prelude::*;
 
 use super::bluestein::BluesteinSolver;
+use super::ct::CooleyTukeySolver;
+use super::generic::GenericSolver;
+
+/// Inner FFT engine for the length-(p-1) cyclic convolution at the heart of
+/// Rader's algorithm.
+///
+/// The convolution requires a forward and an inverse DFT of size `n = p-1`.
+/// Because `p` is an odd prime (`≥ 3`), `n` is always even; for every prime
+/// `p ≥ 5` this makes `n` composite, so a dedicated composite engine is both
+/// applicable and much faster than Bluestein (which would pad `n` up to
+/// `next_pow2(2n-1)` and run two FFTs of that larger size per convolution DFT).
+///
+/// All three variants share the same DFT sign convention (`Forward` uses
+/// `e^{-2πi/n}`) and leave the inverse transform unnormalized, so the cyclic
+/// convolution identity holds regardless of which one is selected.
+enum ConvSolver<T: Float> {
+    /// `n` is a power of two: SIMD-accelerated radix-2 DIT Cooley-Tukey.
+    PowerOfTwo(CooleyTukeySolver<T>),
+    /// `n` is composite (non power-of-two): SIMD mixed-radix recursive solver.
+    Generic(Box<GenericSolver<T>>),
+    /// Fallback for `n` with a large prime factor (`> GENERIC_MAX_PRIME_FACTOR`):
+    /// Bluestein over the whole of `n`.
+    Bluestein(Box<BluesteinSolver<T>>),
+}
+
+impl<T: Float> ConvSolver<T> {
+    /// Largest prime factor for which the mixed-radix [`GenericSolver`] recursion
+    /// still bottoms out in a small codelet / direct kernel rather than an inner
+    /// Bluestein call.  For `n` whose largest prime factor exceeds this, a single
+    /// Bluestein transform over the whole of `n` is cheaper than splitting `n`
+    /// only to recurse into Bluestein on the large prime factor anyway.
+    const GENERIC_MAX_PRIME_FACTOR: usize = 13;
+
+    /// Select the fastest inner engine for a length-`n` cyclic convolution.
+    fn new(n: usize) -> Self {
+        if n >= 2 && n.is_power_of_two() {
+            Self::PowerOfTwo(CooleyTukeySolver::default())
+        } else if GenericSolver::<T>::applicable(n) && Self::generic_is_favourable(n) {
+            Self::Generic(Box::new(GenericSolver::new(n)))
+        } else {
+            Self::Bluestein(Box::new(BluesteinSolver::new(n)))
+        }
+    }
+
+    /// Returns `true` when every prime factor of `n` is small enough that the
+    /// mixed-radix decomposition terminates in codelets rather than an inner
+    /// Bluestein transform (see [`Self::GENERIC_MAX_PRIME_FACTOR`]).
+    fn generic_is_favourable(n: usize) -> bool {
+        use crate::kernel::factor;
+        factor(n)
+            .last()
+            .is_none_or(|&(prime, _)| prime <= Self::GENERIC_MAX_PRIME_FACTOR)
+    }
+
+    /// Execute a forward/inverse DFT of size `n` (unnormalized).
+    #[inline]
+    fn execute(&self, input: &[Complex<T>], output: &mut [Complex<T>], sign: Sign) {
+        match self {
+            Self::PowerOfTwo(s) => s.execute(input, output, sign),
+            Self::Generic(s) => s.execute(input, output, sign),
+            Self::Bluestein(s) => s.execute(input, output, sign),
+        }
+    }
+}
 
 /// Global counter for assigning unique IDs to each `RaderSolver`.
-static RADER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static RADER_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Rader's algorithm solver for prime sizes.
 ///
@@ -53,8 +130,8 @@ pub struct RaderSolver<T: Float> {
     twiddle_fft_fwd: Vec<Complex<T>>,
     /// Precomputed FFT of backward twiddle factors
     twiddle_fft_bwd: Vec<Complex<T>>,
-    /// Bluestein solver for the convolution (size p-1)
-    conv_solver: BluesteinSolver<T>,
+    /// Inner FFT engine for the length-(p-1) cyclic convolution.
+    conv_solver: ConvSolver<T>,
     /// Unique solver identifier for debugging.
     pub(crate) solver_id: u64,
     /// Pre-allocated work buffer for reordered input
@@ -81,7 +158,7 @@ impl<T: Float> RaderSolver<T> {
             return None;
         }
 
-        let solver_id = RADER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let solver_id = RADER_ID_COUNTER.fetch_add(1, Ordering::Relaxed) as u64;
         let g = primitive_root(p)?;
         let n = p - 1; // Convolution size
 
@@ -100,7 +177,7 @@ impl<T: Float> RaderSolver<T> {
             g_inv_powers.push(g_powers[(n - k) % n]);
         }
 
-        let conv_solver = BluesteinSolver::new(n);
+        let conv_solver = ConvSolver::new(n);
 
         // Precompute forward twiddle factors: W_p^(g^k) for k = 0..p-2
         // W_p = e^(-2πi/p) for forward transform
@@ -322,6 +399,66 @@ mod tests {
 
     fn complex_approx_eq(a: Complex<f64>, b: Complex<f64>, eps: f64) -> bool {
         approx_eq(a.re, b.re, eps) && approx_eq(a.im, b.im, eps)
+    }
+
+    /// Regression test for the inner-convolution engine selection.
+    ///
+    /// Rader used to force `BluesteinSolver` for the length-(p-1) convolution
+    /// even when `p-1` is a power of two or a smooth composite, where a direct
+    /// Cooley-Tukey / mixed-radix transform is markedly faster.  This test
+    /// locks in that the fast engines are chosen for the sizes that matter and
+    /// that Bluestein remains the fallback only when `p-1` has a large prime
+    /// factor (so the mixed-radix recursion would otherwise bottom out in
+    /// Bluestein anyway).
+    #[test]
+    fn conv_solver_selects_fast_engine() {
+        // p-1 is a power of two (Fermat-style primes 17, 257) -> Cooley-Tukey.
+        assert!(matches!(
+            ConvSolver::<f64>::new(16),
+            ConvSolver::PowerOfTwo(_)
+        ));
+        assert!(matches!(
+            ConvSolver::<f64>::new(256),
+            ConvSolver::PowerOfTwo(_)
+        ));
+        // Smooth composite p-1 (96 = 2^5·3, 1008 = 2^4·3^2·7) -> mixed-radix.
+        assert!(matches!(ConvSolver::<f64>::new(96), ConvSolver::Generic(_)));
+        assert!(matches!(
+            ConvSolver::<f64>::new(1008),
+            ConvSolver::Generic(_)
+        ));
+        // p-1 with a large prime factor (358 = 2·179) -> Bluestein fallback.
+        assert!(matches!(
+            ConvSolver::<f64>::new(358),
+            ConvSolver::Bluestein(_)
+        ));
+    }
+
+    /// Correctness across all three inner-engine paths, checked against the
+    /// O(n²) direct DFT so a mis-selected engine cannot pass silently.
+    #[test]
+    fn rader_matches_direct_across_engine_paths() {
+        // p=17 -> conv 16 (Cooley-Tukey); p=97 -> conv 96 (Generic);
+        // p=359 -> conv 358 (Bluestein fallback, largest prime factor 179).
+        for &p in &[17_usize, 97, 359] {
+            let input: Vec<Complex<f64>> = (0..p)
+                .map(|i| Complex::new((i as f64 * 0.3).sin(), (i as f64 * 0.7).cos()))
+                .collect();
+            let mut rader_out = vec![Complex::zero(); p];
+            let mut direct_out = vec![Complex::zero(); p];
+
+            RaderSolver::new(p)
+                .expect("p is prime")
+                .execute(&input, &mut rader_out, Sign::Forward);
+            DirectSolver::new().execute(&input, &mut direct_out, Sign::Forward);
+
+            for (k, (a, b)) in rader_out.iter().zip(direct_out.iter()).enumerate() {
+                assert!(
+                    complex_approx_eq(*a, *b, 1e-8),
+                    "p={p} output[{k}]: rader={a:?} direct={b:?}"
+                );
+            }
+        }
     }
 
     #[test]

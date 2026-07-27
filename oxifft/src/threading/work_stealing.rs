@@ -94,6 +94,14 @@ impl WorkStealingContext {
     /// When a custom pool is configured, the work is `install`ed inside that
     /// pool; otherwise the global rayon pool is used directly.
     ///
+    /// Before dispatching in parallel, this consults
+    /// [`should_parallelize`](super::should_parallelize) with the resulting
+    /// chunk count and this context's thread count; when the workload is
+    /// judged too small to be worth parallelising (per the global
+    /// [`ParallelConfig`](super::ParallelConfig)), `f` is instead applied to
+    /// each chunk in a plain sequential loop, avoiding thread-pool dispatch
+    /// overhead entirely.
+    ///
     /// # Type Parameters
     ///
     /// * `T` — Element type; must be `Send` so slices can be sent across threads.
@@ -104,12 +112,19 @@ impl WorkStealingContext {
         T: Send,
         F: Fn(&mut [T]) + Send + Sync,
     {
-        use rayon::prelude::*;
-
         if chunk_size == 0 || data.is_empty() {
             return;
         }
 
+        let num_chunks = (data.len() + chunk_size - 1) / chunk_size;
+        if !super::should_parallelize(num_chunks, self.num_threads()) {
+            for chunk in data.chunks_mut(chunk_size) {
+                f(chunk);
+            }
+            return;
+        }
+
+        use rayon::prelude::*;
         match &self.pool {
             Some(pool) => {
                 pool.install(|| {
@@ -126,6 +141,9 @@ impl WorkStealingContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
 
     #[test]
     fn test_default_context_increments_all_chunks() {
@@ -173,6 +191,84 @@ mod tests {
             }
         });
         assert!(data.iter().all(|&v| v == 2));
+    }
+
+    /// Below the global `ParallelConfig` threshold, `par_map_slices_mut`
+    /// must fall back to a plain sequential loop -- proven here by checking
+    /// that every chunk is processed on the calling thread itself, never on
+    /// one of the (distinct) dedicated pool's worker threads.
+    #[test]
+    fn test_small_workload_runs_serially_on_caller_thread() {
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .expect("pool build failed"),
+        );
+        let ctx = WorkStealingContext::with_pool(pool);
+        let caller_thread = std::thread::current().id();
+
+        // chunk_size=2 over 4 elements => 2 chunks; with num_threads=2 and
+        // the default min_batch_chunk=4, the parallelise threshold is
+        // 2*4=8, so 2 chunks stays below it and must run serially.
+        let mut data = vec![0u8; 4];
+        let seen: Mutex<HashSet<ThreadId>> = Mutex::new(HashSet::new());
+        ctx.par_map_slices_mut(&mut data, 2, |chunk| {
+            seen.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(std::thread::current().id());
+            for v in chunk.iter_mut() {
+                *v = 9;
+            }
+        });
+
+        assert!(data.iter().all(|&v| v == 9));
+        let observed = seen.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            *observed,
+            HashSet::from([caller_thread]),
+            "expected serial fallback on the caller thread only"
+        );
+    }
+
+    /// Above the global `ParallelConfig` threshold, `par_map_slices_mut`
+    /// must dispatch through the dedicated pool via `install` -- proven
+    /// here by checking that no chunk runs on the caller's own thread (the
+    /// caller is not one of the pool's registered workers) and that no more
+    /// distinct threads than the pool's size are ever observed.
+    #[test]
+    fn test_large_workload_dispatches_onto_pool_threads() {
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .expect("pool build failed"),
+        );
+        let ctx = WorkStealingContext::with_pool(pool);
+        let caller_thread = std::thread::current().id();
+
+        // chunk_size=1 over 32 elements => 32 chunks, well above the
+        // 2*4=8 threshold, so this must dispatch in parallel.
+        let mut data = vec![0u8; 32];
+        let seen: Mutex<HashSet<ThreadId>> = Mutex::new(HashSet::new());
+        ctx.par_map_slices_mut(&mut data, 1, |chunk| {
+            seen.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(std::thread::current().id());
+            chunk[0] = 5;
+        });
+
+        assert!(data.iter().all(|&v| v == 5));
+        let observed = seen.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !observed.contains(&caller_thread),
+            "expected work to run on dedicated pool threads, not the caller thread"
+        );
+        assert!(
+            observed.len() <= 2,
+            "observed {} distinct threads, expected <= 2",
+            observed.len()
+        );
     }
 
     #[test]

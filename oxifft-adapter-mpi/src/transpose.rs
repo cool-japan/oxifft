@@ -2,10 +2,9 @@
 //!
 //! Implements the all-to-all transpose required for distributed FFT.
 
-use mpi::datatype::Equivalence;
 use mpi::topology::Communicator;
 
-use crate::kernel::Complex;
+use oxifft::kernel::Complex;
 
 use super::distribution::LocalPartition;
 use super::error::MpiError;
@@ -39,7 +38,6 @@ pub fn distributed_transpose<T, C>(
 where
     T: MpiFloat,
     C: Communicator,
-    Complex<T>: Equivalence,
 {
     let num_procs = pool.size();
     let rank = pool.rank();
@@ -164,6 +162,150 @@ where
     Ok(())
 }
 
+/// Perform a batched distributed transpose of a 3D array in a single collective.
+///
+/// Transposes `input`, laid out as `[local_n0][n1][depth]` (the first dimension
+/// distributed across processes, the trailing `depth` dimension carried along
+/// unchanged), into `output`, laid out as `[local_n1][n0][depth]` (now
+/// distributed across the `n1` dimension). All `depth` planes are packed into
+/// **one** `alltoallv` exchange instead of issuing one transpose per plane.
+///
+/// This is the batched analogue of [`distributed_transpose`] used by the 3D slab
+/// plan, where `depth == n2`: it collapses the previous `n2` separate collectives
+/// (per forward/backward transpose) into a single one.
+///
+/// # Arguments
+/// * `pool` - MPI pool
+/// * `input` - Local input, `local_n0 * n1 * depth` elements
+/// * `output` - Local output, `n0 * local_n1 * depth` elements
+/// * `n0` - Global size of the (currently distributed) first dimension
+/// * `n1` - Global size of the second dimension (distributed after transpose)
+/// * `local_n0` - Number of `n0`-slabs owned by this process
+/// * `depth` - Size of the trailing dimension carried through unchanged
+///
+/// # Errors
+/// Returns `MpiError::SizeMismatch` if input/output buffers are too small, or
+/// `MpiError::CountOverflow` if a per-rank element count exceeds `i32::MAX`.
+pub fn distributed_transpose_batched<T, C>(
+    pool: &MpiPool<C>,
+    input: &[Complex<T>],
+    output: &mut [Complex<T>],
+    n0: usize,
+    n1: usize,
+    local_n0: usize,
+    depth: usize,
+) -> Result<(), MpiError>
+where
+    T: MpiFloat,
+    C: Communicator,
+{
+    let num_procs = pool.size();
+    let rank = pool.rank();
+
+    let expected_input_size = local_n0 * n1 * depth;
+    if input.len() < expected_input_size {
+        return Err(MpiError::SizeMismatch {
+            expected: expected_input_size,
+            actual: input.len(),
+        });
+    }
+
+    let transposed_partition = LocalPartition::new(n1, num_procs, rank);
+    let local_n1 = transposed_partition.local_n;
+
+    let expected_output_size = n0 * local_n1 * depth;
+    if output.len() < expected_output_size {
+        return Err(MpiError::SizeMismatch {
+            expected: expected_output_size,
+            actual: output.len(),
+        });
+    }
+
+    let mut send_counts = Vec::with_capacity(num_procs);
+    let mut send_displs = Vec::with_capacity(num_procs);
+    let mut recv_counts = Vec::with_capacity(num_procs);
+    let mut recv_displs = Vec::with_capacity(num_procs);
+
+    let mut send_offset = 0usize;
+    let mut recv_offset = 0usize;
+
+    for p in 0..num_procs {
+        let partition_p = LocalPartition::new(n1, num_procs, p);
+        let send_count = local_n0 * partition_p.local_n * depth;
+        let send_count_i32 = i32::try_from(send_count).map_err(|_| MpiError::CountOverflow {
+            count: send_count,
+            rank: p,
+        })?;
+        let send_displ_i32 = i32::try_from(send_offset).map_err(|_| MpiError::CountOverflow {
+            count: send_offset,
+            rank: p,
+        })?;
+        send_counts.push(send_count_i32);
+        send_displs.push(send_displ_i32);
+        send_offset += send_count;
+
+        let source_partition = LocalPartition::new(n0, num_procs, p);
+        let recv_count = source_partition.local_n * local_n1 * depth;
+        let recv_count_i32 = i32::try_from(recv_count).map_err(|_| MpiError::CountOverflow {
+            count: recv_count,
+            rank: p,
+        })?;
+        let recv_displ_i32 = i32::try_from(recv_offset).map_err(|_| MpiError::CountOverflow {
+            count: recv_offset,
+            rank: p,
+        })?;
+        recv_counts.push(recv_count_i32);
+        recv_displs.push(recv_displ_i32);
+        recv_offset += recv_count;
+    }
+
+    // Pack: for each destination p, its columns of every local row and depth.
+    // input index: input[i0 * n1 * depth + global_col * depth + d]
+    let mut send_buffer = vec![Complex::<T>::zero(); send_offset];
+    let mut buf_offset = 0;
+    for p in 0..num_procs {
+        let partition_p = LocalPartition::new(n1, num_procs, p);
+        for row in 0..local_n0 {
+            for col in 0..partition_p.local_n {
+                let global_col = partition_p.local_start + col;
+                let base = row * n1 * depth + global_col * depth;
+                for d in 0..depth {
+                    send_buffer[buf_offset] = input[base + d];
+                    buf_offset += 1;
+                }
+            }
+        }
+    }
+
+    let mut recv_buffer = vec![Complex::<T>::zero(); recv_offset];
+    pool.all_to_all_v_complex(
+        &send_buffer,
+        &send_counts,
+        &send_displs,
+        &mut recv_buffer,
+        &recv_counts,
+        &recv_displs,
+    )?;
+
+    // Unpack: output[local_col * n0 * depth + global_row * depth + d]
+    let mut recv_idx = 0;
+    for p in 0..num_procs {
+        let source_partition = LocalPartition::new(n0, num_procs, p);
+        for src_row in 0..source_partition.local_n {
+            let global_row = source_partition.local_start + src_row;
+            for local_col in 0..local_n1 {
+                let base = local_col * n0 * depth + global_row * depth;
+                for d in 0..depth {
+                    output[base + d] = recv_buffer[recv_idx];
+                    recv_idx += 1;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Perform in-place distributed transpose.
 ///
 /// The buffer must be large enough to hold max(input_size, output_size).
@@ -184,7 +326,6 @@ pub fn distributed_transpose_inplace<T, C>(
 where
     T: MpiFloat,
     C: Communicator,
-    Complex<T>: Equivalence,
 {
     // Use scratch buffer for output, then copy back
     distributed_transpose(pool, data, scratch, n0, n1, local_n0, local_0_start)?;

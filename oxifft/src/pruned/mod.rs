@@ -6,14 +6,24 @@
 //!
 //! # Complexity
 //!
-//! For output-pruned FFT computing M outputs from N inputs:
-//! - Standard FFT: O(N log N)
-//! - Pruned FFT: O(N log M) when M << N
+//! For output pruning (computing `M` outputs from `N` inputs):
+//! - Full FFT:                  `O(N log N)`
+//! - Goertzel per output:       `O(M·N)`  — best for very small `M`
+//! - Butterfly skipping:        `O(N log M)` arithmetic operations
+//!   (see [`fft_pruned_output_butterfly`])
+//!
+//! The crate's full FFT is vectorized, so on SIMD targets it usually beats the
+//! scalar butterfly-skipping path in wall-clock time despite the latter's lower
+//! operation count.  Accordingly [`fft_pruned_output`] selects Goertzel for
+//! very small `M` (where a pruned evaluation genuinely beats the full FFT) and a
+//! full FFT plus selection otherwise, while [`fft_pruned_output_butterfly`]
+//! remains available for callers on targets without a vectorized FFT or who
+//! want the minimum arithmetic-operation count.
 //!
 //! # Example
 //!
-//! ```ignore
-//! use oxifft::pruned::{fft_pruned_output, fft_pruned_input, PrunedPlan};
+//! ```
+//! use oxifft::pruned::{fft_pruned_output, fft_pruned_input};
 //! use oxifft::Complex;
 //!
 //! let n = 1024;
@@ -21,14 +31,16 @@
 //!
 //! // Output pruning: only compute specific frequencies
 //! let desired_indices = vec![10, 20, 30, 100, 200];
-//! let output = fft_pruned_output(&input, &desired_indices);
+//! let pruned = fft_pruned_output(&input, &desired_indices);
+//! # let _ = pruned;
 //!
 //! // Input pruning: when most inputs are zero
 //! let nonzero_inputs = vec![
 //!     (0, Complex::new(1.0, 0.0)),
 //!     (100, Complex::new(0.5, 0.5)),
 //! ];
-//! let output = fft_pruned_input(&nonzero_inputs, n);
+//! let full = fft_pruned_input(&nonzero_inputs, n);
+//! # let _ = full;
 //! ```
 
 mod input_pruned;
@@ -39,7 +51,7 @@ mod partial_tests;
 mod plan;
 
 pub use input_pruned::fft_pruned_input;
-pub use output_pruned::fft_pruned_output;
+pub use output_pruned::{fft_pruned_output, fft_pruned_output_butterfly};
 pub use partial::{PartialFft, PartialStrategy};
 pub use plan::{PrunedPlan, PruningMode};
 

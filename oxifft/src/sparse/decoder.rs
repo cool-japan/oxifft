@@ -1,546 +1,332 @@
-//! Peeling decoder for sparse FFT.
+//! Certified peeling decoder for the aliasing-based sparse FFT.
 //!
-//! Implements the peeling-based decoding algorithm that iteratively
-//! extracts frequency components from bucketized observations.
+//! The decoder consumes a set of *aliasing stages*, each of which bucketizes
+//! the input spectrum by a distinct downsampling factor, and recovers the
+//! individual non-zero frequency components via phase-based singleton
+//! detection plus iterative peeling.
+//!
+//! # Why two offset measurements per stage
+//!
+//! Each stage is built from two downsampled copies of the signal: one taken at
+//! offset 0 (`z0[j] = x[j·L]`) and one at offset 1 (`z1[j] = x[j·L + 1]`),
+//! where `L = n / B` and `B` is the stage's bucket count.  Their length-`B`
+//! DFTs alias every input frequency `f` into bucket `b = f mod B`:
+//!
+//! ```text
+//! Z0[b] = (1/L) · Σ_{f ≡ b (mod B)}  X[f]
+//! Z1[b] = (1/L) · Σ_{f ≡ b (mod B)}  X[f] · exp(2πi f / n)
+//! ```
+//!
+//! For a *singleton* bucket (exactly one non-zero `X[f]` aliases into it) the
+//! ratio `Z1[b] / Z0[b] = exp(2πi f / n)` is a pure phase, from which `f` is
+//! recovered exactly, and `X[f] = L · Z0[b]`.  Working in *coefficient space*
+//! (`L · Z0`, `L · Z1`) removes the per-stage `L` factor so that a recovered
+//! frequency can be subtracted uniformly from every stage.
+//!
+//! # Soundness of certification
+//!
+//! After peeling, the decoder checks that the residual in **both** the
+//! offset-0 and offset-1 measurements of every bucket has collapsed below a
+//! relative tolerance.  Two distinct un-recovered frequencies cannot cancel in
+//! both measurements simultaneously (that would require identical phase, i.e.
+//! identical frequency), so a passing certification proves the recovered set
+//! explains essentially all signal energy — its top-`k` is therefore the true
+//! top-`k`.  When certification fails the caller must fall back to a dense FFT,
+//! guaranteeing that no silently-wrong result is ever returned.
 
 use crate::kernel::{Complex, Float};
+use crate::prelude::*;
 
-use super::bucket::{Bucket, BucketArray};
-use super::result::SparseResult;
-
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
-/// Peeling decoder state.
-#[derive(Debug, Clone)]
-pub struct PeelingDecoder<T: Float> {
-    /// Signal length.
-    n: usize,
-    /// Expected sparsity.
-    k: usize,
-    /// Detected frequencies and values.
-    detected: Vec<(usize, Complex<T>)>,
-    /// Magnitude threshold for detection.
-    threshold: T,
-    /// Maximum iterations.
-    max_iterations: usize,
-}
-
-impl<T: Float> PeelingDecoder<T> {
-    /// Create a new peeling decoder.
-    ///
-    /// # Arguments
-    ///
-    /// * `n` - Signal length
-    /// * `k` - Expected sparsity
-    /// * `threshold` - Magnitude threshold for frequency detection
-    pub fn new(n: usize, k: usize, threshold: T) -> Self {
-        Self {
-            n,
-            k,
-            detected: Vec::with_capacity(k),
-            threshold,
-            max_iterations: k * 3, // Allow some extra iterations
-        }
-    }
-
-    /// Run the peeling decoder on bucket observations.
-    ///
-    /// # Arguments
-    ///
-    /// * `bucket_stages` - Multiple stages of bucket observations
-    ///
-    /// # Returns
-    ///
-    /// Sparse result containing detected frequencies.
-    pub fn decode(&mut self, bucket_stages: &mut [BucketArray<T>]) -> SparseResult<T> {
-        self.detected.clear();
-
-        // k=0: no frequencies to detect — return immediately.
-        if self.k == 0 {
-            return SparseResult::empty();
-        }
-
-        if bucket_stages.is_empty() {
-            return SparseResult::empty();
-        }
-
-        // k=n (full density): sparse FFT is pointless; signal has energy in every
-        // frequency bin. Detect all n bins in the first stage rather than peeling.
-        if self.k >= self.n {
-            return self.decode_full_density(bucket_stages);
-        }
-
-        // Pure noise guard: measure total bucket energy across all stages.
-        // If the total energy is below the noise floor, nothing is decodable.
-        let total_energy: T = bucket_stages
-            .iter()
-            .flat_map(|stage| (0..stage.len()).filter_map(|i| stage.get(i)))
-            .fold(T::ZERO, |acc, b| acc + b.value.norm_sqr());
-
-        let noise_floor = self.threshold * self.threshold;
-        if total_energy < noise_floor {
-            return SparseResult::empty();
-        }
-
-        // Clamp max_iterations to the signal length as a hard ceiling to
-        // prevent spin on pathological inputs (e.g. all multitons that never
-        // peel). The loop also breaks early once singletons stop appearing.
-        let iteration_limit = self.max_iterations.min(self.n);
-
-        // Iterative peeling algorithm
-        for _iter in 0..iteration_limit {
-            if self.detected.len() >= self.k {
-                break;
-            }
-
-            // Find singleton buckets across all stages
-            let singletons = self.find_singletons(bucket_stages);
-
-            if singletons.is_empty() {
-                // No more singletons found, check for remaining multitons
-                break;
-            }
-
-            // Peel off detected frequencies
-            for (freq, value) in singletons {
-                if !self.is_already_detected(freq) {
-                    self.detected.push((freq, value));
-
-                    // Remove contribution from all bucket stages
-                    self.peel_frequency(bucket_stages, freq, value);
-                }
-            }
-        }
-
-        // Handle any remaining multitons with heuristics
-        self.resolve_multitons(bucket_stages);
-
-        // Build result
-        let indices: Vec<usize> = self.detected.iter().map(|(i, _)| *i).collect();
-        let values: Vec<Complex<T>> = self.detected.iter().map(|(_, v)| *v).collect();
-
-        SparseResult::new(indices, values, self.n)
-    }
-
-    /// Find singleton buckets across all stages.
-    fn find_singletons(&self, bucket_stages: &[BucketArray<T>]) -> Vec<(usize, Complex<T>)> {
-        let mut singletons = Vec::new();
-
-        // For each stage, look for buckets with single dominant frequency
-        for (stage_idx, stage) in bucket_stages.iter().enumerate() {
-            for bucket_idx in 0..stage.len() {
-                if let Some(bucket) = stage.get(bucket_idx) {
-                    if let Some((freq, value)) =
-                        self.check_singleton(bucket, bucket_stages, stage_idx)
-                    {
-                        // Verify against other stages
-                        if self.verify_singleton(freq, value, bucket_stages) {
-                            singletons.push((freq, value));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Deduplicate
-        singletons.sort_by_key(|(f, _)| *f);
-        singletons.dedup_by_key(|(f, _)| *f);
-
-        singletons
-    }
-
-    /// Check if a bucket contains a singleton frequency.
-    fn check_singleton(
-        &self,
-        bucket: &Bucket<T>,
-        bucket_stages: &[BucketArray<T>],
-        stage_idx: usize,
-    ) -> Option<(usize, Complex<T>)> {
-        // Skip if below threshold
-        if bucket.value.norm_sqr() < self.threshold * self.threshold {
-            return None;
-        }
-
-        // If we have explicit singleton info, use it
-        if let Some(freq) = bucket.detected_freq {
-            return Some((freq, bucket.value));
-        }
-
-        // Otherwise, try to identify using CRT across stages
-        if bucket_stages.len() > 1 {
-            let other_stage_idx = (stage_idx + 1) % bucket_stages.len();
-            let other_stage = &bucket_stages[other_stage_idx];
-
-            // Find corresponding bucket in other stage
-            let bucket_idx = bucket.index % other_stage.len();
-            if let Some(other_bucket) = other_stage.get(bucket_idx) {
-                // Use phase information to estimate frequency
-                return self.estimate_frequency_crt(bucket, other_bucket, bucket_stages, stage_idx);
-            }
-        }
-
-        None
-    }
-
-    /// Estimate frequency using Chinese Remainder Theorem.
-    fn estimate_frequency_crt(
-        &self,
-        bucket1: &Bucket<T>,
-        bucket2: &Bucket<T>,
-        bucket_stages: &[BucketArray<T>],
-        stage_idx: usize,
-    ) -> Option<(usize, Complex<T>)> {
-        let val1 = bucket1.value;
-        let val2 = bucket2.value;
-
-        // Check if magnitudes are similar (indicating same frequency)
-        let mag1 = val1.norm_sqr();
-        let mag2 = val2.norm_sqr();
-
-        if mag2 < self.threshold * self.threshold {
-            return None;
-        }
-
-        let ratio = mag1 / mag2;
-        if ratio < T::from_f64(0.25) || ratio > T::from_f64(4.0) {
-            return None; // Magnitudes too different
-        }
-
-        // Get bucket sizes for CRT
-        let b1 = bucket_stages[stage_idx].len();
-        let other_idx = (stage_idx + 1) % bucket_stages.len();
-        let b2 = bucket_stages[other_idx].len();
-
-        // Frequency satisfies: freq ≡ bucket1.index (mod b1) and freq ≡ bucket2.index (mod b2)
-        let idx1 = bucket1.index % b1;
-        let idx2 = bucket2.index % b2;
-
-        // Solve using CRT (simple search for small n)
-        for candidate in 0..self.n {
-            if candidate % b1 == idx1 && candidate % b2 == idx2 {
-                return Some((candidate, val1));
-            }
-        }
-
-        None
-    }
-
-    /// Verify singleton detection against other stages.
-    fn verify_singleton(
-        &self,
-        freq: usize,
-        expected_value: Complex<T>,
-        bucket_stages: &[BucketArray<T>],
-    ) -> bool {
-        let expected_mag = expected_value.norm_sqr();
-
-        for stage in bucket_stages {
-            let bucket_idx = freq % stage.len();
-            if let Some(bucket) = stage.get(bucket_idx) {
-                let bucket_mag = bucket.value.norm_sqr();
-
-                // Check if magnitude is consistent (allowing for some noise)
-                let ratio = bucket_mag / (expected_mag + T::from_f64(1e-10));
-                if ratio < T::from_f64(0.1) || ratio > T::from_f64(10.0) {
-                    return false;
-                }
-            }
-        }
-
-        true
-    }
-
-    /// Check if a frequency has already been detected.
-    fn is_already_detected(&self, freq: usize) -> bool {
-        self.detected.iter().any(|(f, _)| *f == freq)
-    }
-
-    /// Remove frequency contribution from all bucket stages.
-    fn peel_frequency(&self, bucket_stages: &mut [BucketArray<T>], freq: usize, value: Complex<T>) {
-        for stage in bucket_stages.iter_mut() {
-            let bucket_idx = freq % stage.len();
-            if let Some(bucket) = stage.get_mut(bucket_idx) {
-                // Subtract the frequency's contribution
-                bucket.value = bucket.value - value;
-                if bucket.count > 0 {
-                    bucket.count -= 1;
-                }
-            }
-        }
-    }
-
-    /// Try to resolve remaining multiton buckets.
-    fn resolve_multitons(&mut self, bucket_stages: &[BucketArray<T>]) {
-        // Simple heuristic: look at remaining significant buckets
-        // and try to extract the largest remaining frequency
-
-        for stage in bucket_stages {
-            for bucket_idx in 0..stage.len() {
-                if self.detected.len() >= self.k {
-                    return;
-                }
-
-                if let Some(bucket) = stage.get(bucket_idx) {
-                    if bucket.value.norm_sqr() > self.threshold * self.threshold {
-                        // For multitons, estimate the dominant frequency
-                        // This is a heuristic and may not be perfectly accurate
-                        let freq = bucket_idx; // Simple estimate
-
-                        if freq < self.n && !self.is_already_detected(freq) {
-                            self.detected.push((freq, bucket.value));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Handle full-density case (k >= n) by reading all significant buckets
-    /// directly from the first bucket stage.
-    fn decode_full_density(&mut self, bucket_stages: &[BucketArray<T>]) -> SparseResult<T> {
-        self.detected.clear();
-        let threshold_sq = self.threshold * self.threshold;
-
-        if let Some(stage) = bucket_stages.first() {
-            for bucket_idx in 0..stage.len() {
-                if let Some(bucket) = stage.get(bucket_idx) {
-                    if bucket.value.norm_sqr() >= threshold_sq && bucket_idx < self.n {
-                        self.detected.push((bucket_idx, bucket.value));
-                    }
-                }
-            }
-        }
-
-        let indices: Vec<usize> = self.detected.iter().map(|(i, _)| *i).collect();
-        let values: Vec<Complex<T>> = self.detected.iter().map(|(_, v)| *v).collect();
-        SparseResult::new(indices, values, self.n)
-    }
-
-    /// Get the number of detected frequencies.
-    pub fn num_detected(&self) -> usize {
-        self.detected.len()
-    }
-
-    /// Clear detected frequencies.
-    pub fn reset(&mut self) {
-        self.detected.clear();
-    }
-}
-
-/// Simple singleton detection for a single bucket observation.
+/// One aliasing stage, stored as bucket residuals in *coefficient space*.
 ///
-/// Uses magnitude-based detection with threshold.
-pub fn detect_singleton<T: Float>(bucket_value: Complex<T>, threshold: T) -> Option<Complex<T>> {
-    if bucket_value.norm_sqr() >= threshold * threshold {
-        Some(bucket_value)
+/// `coeff0[b]` holds `L · Z0[b]` and `coeff1[b]` holds `L · Z1[b]`.  In
+/// coefficient space a singleton bucket containing exactly one true frequency
+/// `f` satisfies `coeff0[b] = X[f]` and `coeff1[b] = X[f] · exp(2πi f / n)`,
+/// independent of the stage's `L`.  Both arrays are mutated in place as
+/// frequencies are peeled off.
+pub struct AliasStage<T: Float> {
+    /// Number of buckets in this stage (a divisor of `n`).
+    pub b_count: usize,
+    /// Residual of `L · Z0`, updated in place during peeling.
+    pub coeff0: Vec<Complex<T>>,
+    /// Residual of `L · Z1`, updated in place during peeling.
+    pub coeff1: Vec<Complex<T>>,
+}
+
+/// Magnitude of a complex value as an `f64` (used for tolerance comparisons).
+#[inline]
+fn abs_f64<T: Float>(c: Complex<T>) -> f64 {
+    let re = c.re.to_f64().unwrap_or(0.0);
+    let im = c.im.to_f64().unwrap_or(0.0);
+    libm::sqrt(re * re + im * im)
+}
+
+/// Subtract a recovered frequency `f` with coefficient `coeff = X[f]` from
+/// every stage's residual, in both offset measurements.
+fn subtract_frequency<T: Float>(
+    stages: &mut [AliasStage<T>],
+    n: usize,
+    f: usize,
+    coeff: Complex<T>,
+) {
+    // Twiddle exp(+2πi f / n) applied to the offset-1 measurement.
+    let theta = <T as Float>::TWO_PI * T::from_usize(f) / T::from_usize(n);
+    let (sin_t, cos_t) = Float::sin_cos(theta);
+    let w = Complex::new(cos_t, sin_t);
+    let coeff_w = coeff * w;
+
+    for stage in stages.iter_mut() {
+        let b = f % stage.b_count;
+        stage.coeff0[b] = stage.coeff0[b] - coeff;
+        stage.coeff1[b] = stage.coeff1[b] - coeff_w;
+    }
+}
+
+/// Run certified peeling over the aliasing stages.
+///
+/// Returns `Some(recovered)` — a list of `(frequency, X[frequency])` pairs —
+/// only when the recovered set is *certified* to explain the whole signal
+/// (all residuals below a relative tolerance).  Returns `None` when the fast
+/// path cannot certify its solution, signalling the caller to fall back to a
+/// dense FFT.  A completely silent signal certifies trivially as an empty set.
+///
+/// # Arguments
+///
+/// * `stages`        - Aliasing stages in coefficient space (mutated in place).
+/// * `n`             - Original signal length.
+/// * `max_recover`   - Hard ceiling on the number of frequencies to peel.
+/// * `abs_threshold` - Absolute magnitude floor; energy below this is treated
+///   as noise and ignored (maps the public `SparsePlan` threshold).
+pub fn certified_peel<T: Float>(
+    stages: &mut [AliasStage<T>],
+    n: usize,
+    max_recover: usize,
+    abs_threshold: f64,
+) -> Option<Vec<(usize, Complex<T>)>> {
+    if stages.is_empty() || n == 0 {
+        return None;
+    }
+
+    // Peak coefficient magnitude across all stages, for relative tolerances.
+    let mut peak = 0.0_f64;
+    for stage in stages.iter() {
+        for c in stage.coeff0.iter() {
+            let m = abs_f64(*c);
+            if m > peak {
+                peak = m;
+            }
+        }
+    }
+
+    // Silent (or entirely sub-threshold) signal: nothing to recover, and the
+    // empty set trivially explains it.
+    if peak <= abs_threshold {
+        return Some(Vec::new());
+    }
+
+    // Relative tolerances derived from the signal peak.
+    let occ_floor = (1e-9 * peak).max(abs_threshold);
+    let phase_tol = 1e-6_f64;
+    let cert_tol = 1e-6 * peak;
+    let two_pi = core::f64::consts::PI * 2.0;
+
+    let mut recovered: Vec<(usize, Complex<T>)> = Vec::new();
+
+    // Each outer pass scans for a single certified singleton, removes it, and
+    // restarts (so that newly-isolated buckets become visible).  A pass that
+    // finds nothing terminates the loop.  The iteration ceiling is a safety net
+    // — in practice the loop stops after `recovered.len()` successful passes.
+    let iter_cap = max_recover.saturating_mul(4).saturating_add(8);
+    let mut iterations = 0usize;
+
+    'peel: loop {
+        iterations += 1;
+        if iterations > iter_cap || recovered.len() >= max_recover {
+            break;
+        }
+
+        for si in 0..stages.len() {
+            let b_count = stages[si].b_count;
+            for b in 0..b_count {
+                let c0 = stages[si].coeff0[b];
+                let m0 = abs_f64(c0);
+                if m0 <= occ_floor {
+                    continue;
+                }
+
+                let c1 = stages[si].coeff1[b];
+
+                // Estimate the candidate frequency from the phase advance
+                // between the two offset measurements.
+                let a0 = libm::atan2(c0.im.to_f64().unwrap_or(0.0), c0.re.to_f64().unwrap_or(0.0));
+                let a1 = libm::atan2(c1.im.to_f64().unwrap_or(0.0), c1.re.to_f64().unwrap_or(0.0));
+                let dtheta = (a1 - a0).rem_euclid(two_pi);
+                let f_est = (libm::round(dtheta * (n as f64) / two_pi) as usize) % n;
+
+                // Singleton validation:
+                //   (a) the recovered frequency must alias back to this bucket,
+                //   (b) the two measurements must have equal magnitude (a pure
+                //       phase rotation — otherwise the bucket is a collision).
+                if f_est % b_count != b {
+                    continue;
+                }
+                let m1 = abs_f64(c1);
+                if (m1 - m0).abs() > phase_tol * m0 {
+                    continue;
+                }
+                if recovered.iter().any(|(ff, _)| *ff == f_est) {
+                    continue;
+                }
+
+                // Accept: the residual at a singleton bucket *is* X[f_est].
+                subtract_frequency(stages, n, f_est, c0);
+                recovered.push((f_est, c0));
+                continue 'peel;
+            }
+        }
+
+        // A full pass found no new singleton.
+        break;
+    }
+
+    // Certification: every residual bucket must be explained in both offset
+    // measurements.  A single un-explained bucket forces the dense fallback.
+    let mut residual = 0.0_f64;
+    for stage in stages.iter() {
+        for c in stage.coeff0.iter().chain(stage.coeff1.iter()) {
+            let m = abs_f64(*c);
+            if m > residual {
+                residual = m;
+            }
+        }
+    }
+
+    if residual <= cert_tol {
+        Some(recovered)
     } else {
         None
     }
-}
-
-/// Collision detection between two bucket observations.
-///
-/// Returns true if the buckets likely contain multiple aliased frequencies.
-pub fn is_collision<T: Float>(val1: Complex<T>, val2: Complex<T>, threshold: T) -> bool {
-    let mag1 = val1.norm_sqr();
-    let mag2 = val2.norm_sqr();
-
-    // If magnitudes are very different, likely collision
-    if mag1 < threshold * threshold || mag2 < threshold * threshold {
-        return false;
-    }
-
-    let ratio = mag1 / mag2;
-    ratio < T::from_f64(0.3) || ratio > T::from_f64(3.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_decoder_creation() {
-        let decoder: PeelingDecoder<f64> = PeelingDecoder::new(1024, 10, 0.001);
-        assert_eq!(decoder.n, 1024);
-        assert_eq!(decoder.k, 10);
-        assert_eq!(decoder.num_detected(), 0);
-    }
-
-    #[test]
-    fn test_singleton_detection() {
-        let val = Complex::new(1.0_f64, 0.5);
-        let threshold = 0.1;
-
-        assert!(detect_singleton(val, threshold).is_some());
-        assert!(detect_singleton(Complex::new(0.01_f64, 0.01), threshold).is_none());
-    }
-
-    #[test]
-    fn test_collision_detection() {
-        let val1 = Complex::new(1.0_f64, 0.0);
-        let val2 = Complex::new(0.9, 0.1);
-        let threshold = 0.1;
-
-        // Similar magnitudes - not collision
-        assert!(!is_collision(val1, val2, threshold));
-
-        // Very different magnitudes - collision
-        let val3 = Complex::new(0.1_f64, 0.0);
-        assert!(is_collision(val1, val3, threshold));
-    }
-
-    #[test]
-    fn test_decoder_empty_input() {
-        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 5, 0.001);
-        let mut stages: Vec<BucketArray<f64>> = Vec::new();
-
-        let result = decoder.decode(&mut stages);
-        assert!(result.is_empty());
-    }
-
-    /// k=0 early return: the decoder must immediately return empty without
-    /// iterating, even when non-empty bucket stages are present.
-    #[test]
-    fn test_decoder_k_zero_early_return() {
-        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 0, 0.001);
-
-        // Build a non-empty stage so we verify the k=0 guard fires.
-        let mut stage: BucketArray<f64> = BucketArray::new(16, 4, 64);
-        // Populate bucket 3 with a strong signal.
-        if let Some(b) = stage.get_mut(3) {
-            b.value = Complex::new(10.0, 0.0);
-            b.count = 1;
-            b.detected_freq = Some(3);
+    /// Build a single aliasing stage from a dense spectrum, in coefficient
+    /// space, for testing the decoder in isolation.
+    fn stage_from_spectrum(spectrum: &[Complex<f64>], b_count: usize) -> AliasStage<f64> {
+        let n = spectrum.len();
+        let two_pi = core::f64::consts::PI * 2.0;
+        let mut coeff0 = vec![Complex::new(0.0, 0.0); b_count];
+        let mut coeff1 = vec![Complex::new(0.0, 0.0); b_count];
+        for (f, &x) in spectrum.iter().enumerate() {
+            let b = f % b_count;
+            let theta = two_pi * (f as f64) / (n as f64);
+            let w = Complex::new(theta.cos(), theta.sin());
+            coeff0[b] = coeff0[b] + x;
+            coeff1[b] = coeff1[b] + x * w;
         }
-        let mut stages = vec![stage];
-
-        let result = decoder.decode(&mut stages);
-        assert!(
-            result.is_empty(),
-            "k=0 should yield empty result regardless of input"
-        );
-    }
-
-    /// k >= n (full-density) path: the decoder should use decode_full_density
-    /// instead of the peeling loop.  We verify it returns buckets directly
-    /// from the first stage rather than attempting peeling.
-    #[test]
-    fn test_decoder_full_density_path() {
-        let n = 16;
-        // k equal to n triggers the full-density branch.
-        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(n, n, 0.001);
-
-        let mut stage: BucketArray<f64> = BucketArray::new(n, 1, n);
-        // Mark every other bucket as occupied.
-        for i in (0..n).step_by(2) {
-            if let Some(b) = stage.get_mut(i) {
-                b.value = Complex::new(1.0, 0.0);
-                b.count = 1;
-                b.detected_freq = Some(i);
-            }
-        }
-        let mut stages = vec![stage];
-
-        let result = decoder.decode(&mut stages);
-        // Full-density path should have captured the occupied buckets.
-        assert!(
-            !result.is_empty(),
-            "Full-density path should detect occupied buckets"
-        );
-        // All returned indices must be valid.
-        for &idx in &result.indices {
-            assert!(idx < n, "Index {idx} out of range [0, {n})");
+        AliasStage {
+            b_count,
+            coeff0,
+            coeff1,
         }
     }
 
-    /// Pure-noise guard: when all bucket energies are below the threshold
-    /// the decoder should return empty rather than producing garbage.
     #[test]
-    fn test_decoder_pure_noise_guard() {
-        let threshold = 1.0_f64; // High threshold so tiny values appear as noise.
-        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 5, threshold);
+    fn test_single_tone_recovered_exactly() {
+        let n = 256;
+        let mut spectrum = vec![Complex::new(0.0, 0.0); n];
+        spectrum[37] = Complex::new(3.0, -1.5);
 
-        let mut stage: BucketArray<f64> = BucketArray::new(16, 4, 64);
-        // Fill with sub-threshold values.
-        for i in 0..16 {
-            if let Some(b) = stage.get_mut(i) {
-                b.value = Complex::new(0.0001, 0.0001); // well below threshold
-                b.count = 0;
-            }
+        let mut stages = vec![stage_from_spectrum(&spectrum, 16)];
+        let recovered =
+            certified_peel(&mut stages, n, n, 1e-10).expect("clean single tone must certify");
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].0, 37);
+        assert!((recovered[0].1.re - 3.0).abs() < 1e-9);
+        assert!((recovered[0].1.im - (-1.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_multiple_isolated_tones() {
+        let n = 512;
+        let planted = [
+            (11usize, Complex::new(1.0, 0.0)),
+            (200, Complex::new(-2.0, 0.5)),
+            (301, Complex::new(0.25, 0.75)),
+        ];
+        let mut spectrum = vec![Complex::new(0.0, 0.0); n];
+        for &(f, v) in &planted {
+            spectrum[f] = v;
         }
-        let mut stages = vec![stage];
 
-        let result = decoder.decode(&mut stages);
-        assert!(
-            result.is_empty(),
-            "Pure-noise input should yield an empty result"
-        );
-    }
+        // Two stages with distinct bucket counts help isolation.
+        let mut stages = vec![
+            stage_from_spectrum(&spectrum, 32),
+            stage_from_spectrum(&spectrum, 64),
+        ];
+        let recovered =
+            certified_peel(&mut stages, n, n, 1e-10).expect("isolated tones must certify");
 
-    /// `num_detected` returns 0 before decode and can be read without panicking.
-    #[test]
-    fn test_num_detected_initial() {
-        let decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 5, 0.001);
-        assert_eq!(decoder.num_detected(), 0);
-    }
-
-    /// `reset` clears all detected frequencies.
-    #[test]
-    fn test_reset_clears_detected() {
-        let mut decoder: PeelingDecoder<f64> = PeelingDecoder::new(64, 5, 0.001);
-        // Verify reset on a fresh decoder is safe.
-        decoder.reset();
-        assert_eq!(decoder.num_detected(), 0);
-
-        // Decode something, then reset and verify state is cleared.
-        let mut stage: BucketArray<f64> = BucketArray::new(16, 4, 64);
-        if let Some(b) = stage.get_mut(3) {
-            b.value = Complex::new(10.0, 0.0);
-            b.count = 1;
-            b.detected_freq = Some(3);
+        assert_eq!(recovered.len(), 3);
+        for &(f, v) in &planted {
+            let found = recovered
+                .iter()
+                .find(|(rf, _)| *rf == f)
+                .expect("planted frequency must be recovered");
+            assert!((found.1.re - v.re).abs() < 1e-9);
+            assert!((found.1.im - v.im).abs() < 1e-9);
         }
-        let mut stages = vec![stage];
-        let _ = decoder.decode(&mut stages);
-
-        decoder.reset();
-        assert_eq!(decoder.num_detected(), 0);
     }
 
-    /// `detect_singleton` returns `Some` for above-threshold values.
     #[test]
-    fn test_detect_singleton_above_threshold() {
-        let val = Complex::new(2.0_f64, 0.0);
-        let result = detect_singleton(val, 1.0);
-        assert!(result.is_some());
-        let detected = result.unwrap();
-        assert!((detected.re - 2.0).abs() < 1e-10);
+    fn test_permanent_collision_fails_certification() {
+        // Two frequencies that differ by n/2 collide in every power-of-two
+        // bucketization smaller than n, so a single power-of-two stage cannot
+        // separate them — certification must fail (never a wrong answer).
+        let n = 256;
+        let mut spectrum = vec![Complex::new(0.0, 0.0); n];
+        spectrum[10] = Complex::new(1.0, 0.0);
+        spectrum[10 + 128] = Complex::new(0.5, 0.3);
+
+        let mut stages = vec![
+            stage_from_spectrum(&spectrum, 16),
+            stage_from_spectrum(&spectrum, 32),
+        ];
+        // Both stages are power-of-two, and 10 ≡ 138 (mod 16) and (mod 32):
+        // the pair never separates, so no certified solution exists.
+        let result = certified_peel(&mut stages, n, n, 1e-10);
+        assert!(result.is_none(), "an unresolved collision must not certify");
     }
 
-    /// `detect_singleton` returns `None` for below-threshold values.
     #[test]
-    fn test_detect_singleton_below_threshold() {
-        let val = Complex::new(0.001_f64, 0.0);
-        assert!(detect_singleton(val, 1.0).is_none());
+    fn test_silent_signal_certifies_empty() {
+        let n = 64;
+        let spectrum = vec![Complex::new(0.0, 0.0); n];
+        let mut stages = vec![stage_from_spectrum(&spectrum, 16)];
+        let recovered =
+            certified_peel(&mut stages, n, n, 1e-10).expect("silent signal certifies as empty");
+        assert!(recovered.is_empty());
     }
 
-    /// `is_collision` detects very different magnitudes as a collision.
     #[test]
-    fn test_is_collision_different_magnitudes() {
-        let large = Complex::new(10.0_f64, 0.0);
-        let small = Complex::new(0.5_f64, 0.0);
-        // ratio = 4 / 400 = 0.01 < 0.3, so collision
-        assert!(is_collision(large, small, 0.1));
+    fn test_empty_stages_returns_none() {
+        let mut stages: Vec<AliasStage<f64>> = Vec::new();
+        assert!(certified_peel(&mut stages, 64, 64, 1e-10).is_none());
     }
 
-    /// `is_collision` returns false for similar magnitudes.
     #[test]
-    fn test_is_collision_similar_magnitudes() {
-        let a = Complex::new(1.0_f64, 0.0);
-        let b = Complex::new(0.9_f64, 0.1);
-        assert!(!is_collision(a, b, 0.1));
+    fn test_sub_threshold_signal_ignored() {
+        // A tone whose magnitude is below the absolute threshold is treated as
+        // noise and yields a certified-empty result.
+        let n = 64;
+        let mut spectrum = vec![Complex::new(0.0, 0.0); n];
+        spectrum[5] = Complex::new(1e-12, 0.0);
+        let mut stages = vec![stage_from_spectrum(&spectrum, 16)];
+        let recovered =
+            certified_peel(&mut stages, n, n, 1e-10).expect("sub-threshold certifies empty");
+        assert!(recovered.is_empty());
     }
 }

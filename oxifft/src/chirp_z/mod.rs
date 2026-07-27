@@ -133,7 +133,30 @@ impl<T: Float> CztPlan<T> {
     /// (i.e. `N²/2 · ln|W| > 700`).
     /// Returns [`CztError::PlanFailed`] when the internal FFT plan cannot be
     /// constructed (extremely unlikely for power-of-two sizes).
+    ///
+    /// Uses [`Flags::ESTIMATE`] for the internal length-`L` FFT plans (fast
+    /// planning, no benchmarking). Use [`CztPlan::with_flags`] to request a
+    /// different planning strategy (e.g. `Flags::MEASURE` when the same plan
+    /// will be executed many times and the extra planning cost is amortized).
     pub fn new(n: usize, m: usize, a: Complex<T>, w: Complex<T>) -> CztResult<Self> {
+        Self::with_flags(n, m, a, w, Flags::ESTIMATE)
+    }
+
+    /// Create a new CZT plan with an explicit FFT planning strategy.
+    ///
+    /// Equivalent to [`CztPlan::new`] but lets the caller choose the
+    /// [`Flags`] used for the internal length-`L` forward/inverse FFT plans.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`CztPlan::new`].
+    pub fn with_flags(
+        n: usize,
+        m: usize,
+        a: Complex<T>,
+        w: Complex<T>,
+        flags: Flags,
+    ) -> CztResult<Self> {
         if n == 0 {
             return Err(CztError::InvalidSize(n));
         }
@@ -162,9 +185,9 @@ impl<T: Float> CztPlan<T> {
         let h_circ = build_chirp_filter(n, m, l, w);
 
         let fft_plan =
-            Plan::<T>::dft_1d(l, Direction::Forward, Flags::MEASURE).ok_or(CztError::PlanFailed)?;
-        let ifft_plan = Plan::<T>::dft_1d(l, Direction::Backward, Flags::MEASURE)
-            .ok_or(CztError::PlanFailed)?;
+            Plan::<T>::dft_1d(l, Direction::Forward, flags).ok_or(CztError::PlanFailed)?;
+        let ifft_plan =
+            Plan::<T>::dft_1d(l, Direction::Backward, flags).ok_or(CztError::PlanFailed)?;
 
         let mut h_fft = vec![Complex::<T>::zero(); l];
         fft_plan.execute(&h_circ, &mut h_fft);

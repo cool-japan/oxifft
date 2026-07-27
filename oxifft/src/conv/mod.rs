@@ -25,18 +25,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use oxifft::conv::{convolve, correlate, polynomial_multiply};
+//! ```
+//! use oxifft::conv::{convolve, polynomial_multiply};
 //!
 //! // Signal convolution
 //! let signal = vec![1.0, 2.0, 3.0, 4.0];
 //! let kernel = vec![0.5, 0.5];
 //! let result = convolve(&signal, &kernel);
+//! assert_eq!(result.len(), signal.len() + kernel.len() - 1);
 //!
 //! // Polynomial multiplication: (1 + 2x) * (3 + 4x) = 3 + 10x + 8x²
-//! let p1 = vec![1.0, 2.0];  // 1 + 2x
-//! let p2 = vec![3.0, 4.0];  // 3 + 4x
-//! let product = polynomial_multiply(&p1, &p2);  // [3, 10, 8]
+//! let p1 = vec![1.0, 2.0]; // 1 + 2x
+//! let p2 = vec![3.0, 4.0]; // 3 + 4x
+//! let product = polynomial_multiply(&p1, &p2); // ≈ [3, 10, 8]
+//! assert_eq!(product.len(), 3);
 //! ```
 
 #[cfg(not(feature = "std"))]
@@ -563,5 +565,273 @@ mod tests {
 
         // Valid mode: output length = max - min + 1 = 5 - 3 + 1 = 3
         assert_eq!(result.len(), 3);
+    }
+
+    // -------------------------------------------------------------------
+    // FFT-based convolution path (N >= 32) direct tests.
+    //
+    // `convolve_with_mode` only takes the FFT branch when *both* inputs are
+    // >= 32 elements (see the `a.len() < 32 && b.len() < 32` check above);
+    // every test above this point uses 2-5 element inputs and therefore only
+    // exercises `convolve_direct`.  These tests use inputs >= 32 elements
+    // and independently-computed O(n^2) references (not calling the
+    // library's own `convolve_direct`/`convolve_circular_direct` helpers) so
+    // that the FFT-based code paths (lines computing `fft_len`,
+    // `Plan::dft_1d`, and the pointwise-multiply + inverse FFT) are actually
+    // exercised and checked against ground truth.
+    // -------------------------------------------------------------------
+
+    /// Independent O(n*m) reference for full linear convolution (f64).
+    fn naive_convolve_full_f64(a: &[f64], b: &[f64]) -> Vec<f64> {
+        let mut result = vec![0.0_f64; a.len() + b.len() - 1];
+        for (i, &ai) in a.iter().enumerate() {
+            for (j, &bj) in b.iter().enumerate() {
+                result[i + j] += ai * bj;
+            }
+        }
+        result
+    }
+
+    /// Independent O(n*m) reference for full linear convolution (f32).
+    fn naive_convolve_full_f32(a: &[f32], b: &[f32]) -> Vec<f32> {
+        let mut result = vec![0.0_f32; a.len() + b.len() - 1];
+        for (i, &ai) in a.iter().enumerate() {
+            for (j, &bj) in b.iter().enumerate() {
+                result[i + j] += ai * bj;
+            }
+        }
+        result
+    }
+
+    /// Independent O(n*m) reference for complex full linear convolution (f64).
+    fn naive_convolve_full_complex_f64(
+        a: &[Complex<f64>],
+        b: &[Complex<f64>],
+    ) -> Vec<Complex<f64>> {
+        let mut result = vec![Complex::<f64>::zero(); a.len() + b.len() - 1];
+        for (i, &ai) in a.iter().enumerate() {
+            for (j, &bj) in b.iter().enumerate() {
+                result[i + j] = result[i + j] + ai * bj;
+            }
+        }
+        result
+    }
+
+    /// Independent O(n^2) reference for circular convolution:
+    /// `c[i] = sum_j a[j] * b[(i-j) mod n]`, zero-padding the shorter input.
+    fn naive_circular_convolve_f64(a: &[f64], b: &[f64]) -> Vec<f64> {
+        let n = a.len().max(b.len());
+        let mut ap = vec![0.0_f64; n];
+        ap[..a.len()].copy_from_slice(a);
+        let mut bp = vec![0.0_f64; n];
+        bp[..b.len()].copy_from_slice(b);
+
+        let mut result = vec![0.0_f64; n];
+        for i in 0..n {
+            let mut sum = 0.0_f64;
+            for j in 0..n {
+                sum += ap[j] * bp[(i + n - j) % n];
+            }
+            result[i] = sum;
+        }
+        result
+    }
+
+    fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    fn max_abs_diff_f32(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
+    }
+
+    fn max_abs_diff_complex(a: &[Complex<f64>], b: &[Complex<f64>]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (*x - *y).norm())
+            .fold(0.0_f64, f64::max)
+    }
+
+    #[test]
+    fn test_convolve_fft_path_even_lengths_f64() {
+        let a: Vec<f64> = (0..40).map(|i| (f64::from(i) * 0.37).sin()).collect();
+        let b: Vec<f64> = (0..36).map(|i| (f64::from(i) * 0.61).cos()).collect();
+        assert!(a.len() >= 32 && b.len() >= 32, "must exercise FFT path");
+        assert!(a.len().is_multiple_of(2) && b.len().is_multiple_of(2));
+
+        let result = convolve(&a, &b);
+        let reference = naive_convolve_full_f64(&a, &b);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff(&result, &reference);
+        assert!(
+            err < 1e-9,
+            "even-length FFT convolution error {err:.2e} > 1e-9"
+        );
+    }
+
+    #[test]
+    fn test_convolve_fft_path_odd_lengths_f64() {
+        let a: Vec<f64> = (0..41).map(|i| (f64::from(i) * 0.23).sin()).collect();
+        let b: Vec<f64> = (0..35).map(|i| (f64::from(i) * 0.53).cos()).collect();
+        assert!(a.len() >= 32 && b.len() >= 32, "must exercise FFT path");
+        assert!(!a.len().is_multiple_of(2) && !b.len().is_multiple_of(2));
+
+        let result = convolve(&a, &b);
+        let reference = naive_convolve_full_f64(&a, &b);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff(&result, &reference);
+        assert!(
+            err < 1e-9,
+            "odd-length FFT convolution error {err:.2e} > 1e-9"
+        );
+    }
+
+    #[test]
+    fn test_convolve_fft_path_f32() {
+        let a: Vec<f32> = (0..50).map(|i| (i as f32 * 0.17).sin()).collect();
+        let b: Vec<f32> = (0..45).map(|i| (i as f32 * 0.29).cos()).collect();
+        assert!(a.len() >= 32 && b.len() >= 32, "must exercise FFT path");
+
+        let result = convolve(&a, &b);
+        let reference = naive_convolve_full_f32(&a, &b);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff_f32(&result, &reference);
+        // f32 FFT convolution accumulates more rounding than f64; the
+        // dynamic range here (~50-tap convolution of O(1) values) stays
+        // well within a 1e-3 absolute budget.
+        assert!(err < 1e-3, "f32 FFT convolution error {err:.2e} > 1e-3");
+    }
+
+    #[test]
+    fn test_convolve_complex_fft_path_f64() {
+        let a: Vec<Complex<f64>> = (0..48)
+            .map(|i| Complex::new((f64::from(i) * 0.11).sin(), (f64::from(i) * 0.19).cos()))
+            .collect();
+        let b: Vec<Complex<f64>> = (0..37)
+            .map(|i| Complex::new((f64::from(i) * 0.31).cos(), (f64::from(i) * 0.41).sin()))
+            .collect();
+        assert!(a.len() >= 32 && b.len() >= 32, "must exercise FFT path");
+
+        let result = convolve_complex(&a, &b);
+        let reference = naive_convolve_full_complex_f64(&a, &b);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff_complex(&result, &reference);
+        assert!(err < 1e-9, "complex FFT convolution error {err:.2e} > 1e-9");
+    }
+
+    #[test]
+    fn test_convolve_circular_fft_path_f64() {
+        // `convolve_circular` always uses the FFT path (no small-size direct
+        // fallback other than on plan-construction failure), but existing
+        // coverage only used a 4-element identity kernel; use a real N>=32
+        // kernel here.
+        let n = 64;
+        let a: Vec<f64> = (0..n).map(|i| (f64::from(i) * 0.15).sin()).collect();
+        let b: Vec<f64> = (0..n).map(|i| (f64::from(i) * 0.27).cos() * 0.5).collect();
+
+        let result = convolve_circular(&a, &b);
+        let reference = naive_circular_convolve_f64(&a, &b);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff(&result, &reference);
+        assert!(
+            err < 1e-9,
+            "circular FFT convolution error {err:.2e} > 1e-9"
+        );
+    }
+
+    #[test]
+    fn test_convolve_circular_fft_path_odd_length_f64() {
+        let n = 33; // odd, still >= 32
+        let a: Vec<f64> = (0..n).map(|i| (f64::from(i) * 0.19).sin()).collect();
+        let b: Vec<f64> = (0..n).map(|i| (f64::from(i) * 0.33).cos()).collect();
+
+        let result = convolve_circular(&a, &b);
+        let reference = naive_circular_convolve_f64(&a, &b);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff(&result, &reference);
+        assert!(
+            err < 1e-8,
+            "odd-length circular FFT convolution error {err:.2e} > 1e-8"
+        );
+    }
+
+    #[test]
+    fn test_correlate_fft_path_f64() {
+        let a: Vec<f64> = (0..45).map(|i| (f64::from(i) * 0.12).sin()).collect();
+        let b: Vec<f64> = (0..38).map(|i| (f64::from(i) * 0.22).cos()).collect();
+        assert!(a.len() >= 32 && b.len() >= 32, "must exercise FFT path");
+
+        let result = correlate(&a, &b);
+
+        // Independent reference: correlation = convolution of a with
+        // reversed b (definition used throughout this module).
+        let b_rev: Vec<f64> = b.iter().rev().copied().collect();
+        let reference = naive_convolve_full_f64(&a, &b_rev);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff(&result, &reference);
+        assert!(err < 1e-9, "FFT correlation error {err:.2e} > 1e-9");
+    }
+
+    #[test]
+    fn test_correlate_complex_fft_path_f64() {
+        let a: Vec<Complex<f64>> = (0..40)
+            .map(|i| Complex::new((f64::from(i) * 0.08).sin(), (f64::from(i) * 0.14).cos()))
+            .collect();
+        let b: Vec<Complex<f64>> = (0..33)
+            .map(|i| Complex::new((f64::from(i) * 0.18).cos(), (f64::from(i) * 0.26).sin()))
+            .collect();
+        assert!(a.len() >= 32 && b.len() >= 32, "must exercise FFT path");
+
+        let result = correlate_complex(&a, &b);
+
+        // Independent reference: correlation = convolution of a with
+        // conj(reversed(b)) (definition used throughout this module).
+        let b_conj_rev: Vec<Complex<f64>> = b.iter().rev().map(|c| c.conj()).collect();
+        let reference = naive_convolve_full_complex_f64(&a, &b_conj_rev);
+        assert_eq!(result.len(), reference.len());
+
+        let err = max_abs_diff_complex(&result, &reference);
+        assert!(err < 1e-9, "complex FFT correlation error {err:.2e} > 1e-9");
+    }
+
+    #[test]
+    fn test_convolve_mode_same_and_valid_fft_path_f64() {
+        // Verify Same/Valid extraction is correct (not just length) once the
+        // FFT path is actually taken.
+        let a: Vec<f64> = (0..50).map(|i| (f64::from(i) * 0.09).sin()).collect();
+        let b: Vec<f64> = (0..32).map(|i| (f64::from(i) * 0.21).cos()).collect();
+        assert!(a.len() >= 32 && b.len() >= 32, "must exercise FFT path");
+
+        let full = naive_convolve_full_f64(&a, &b);
+
+        let same = convolve_with_mode(&a, &b, ConvMode::Same);
+        let start_same = (b.len() - 1) / 2;
+        let len_same = a.len().max(b.len());
+        let expected_same = &full[start_same..start_same + len_same];
+        assert_eq!(same.len(), expected_same.len());
+        assert!(max_abs_diff(&same, expected_same) < 1e-9);
+
+        let valid = convolve_with_mode(&a, &b, ConvMode::Valid);
+        let start_valid = a.len().min(b.len()) - 1;
+        let len_valid = a.len().max(b.len()) - a.len().min(b.len()) + 1;
+        let expected_valid = &full[start_valid..start_valid + len_valid];
+        assert_eq!(valid.len(), expected_valid.len());
+        assert!(max_abs_diff(&valid, expected_valid) < 1e-9);
     }
 }

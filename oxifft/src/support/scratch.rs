@@ -6,12 +6,11 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```
 //! use oxifft::support::scratch::with_scratch;
-//! use oxifft::Complex;
 //!
-//! // Borrow a scratch buffer of at least 1024 elements.
-//! with_scratch::<Complex<f64>, _, _>(1024, |buf| {
+//! // Borrow a scratch buffer of at least 1024 `Complex<f64>` elements.
+//! with_scratch::<f64, _, _>(1024, |buf| {
 //!     // buf is &mut [Complex<f64>] with len == 1024, zero-initialized.
 //!     assert_eq!(buf.len(), 1024);
 //! });

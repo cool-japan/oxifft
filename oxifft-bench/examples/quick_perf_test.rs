@@ -4,6 +4,7 @@
 
 use oxifft::api::{Direction, Flags, Plan};
 use oxifft::Complex;
+use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
@@ -21,8 +22,9 @@ fn main() {
     for _ in 0..iterations {
         let mut output = vec![Complex::zero(); size];
         if let Some(plan) = Plan::dft_1d(size, Direction::Forward, Flags::ESTIMATE) {
-            plan.execute(&input, &mut output);
+            plan.execute(black_box(&input), black_box(&mut output));
         }
+        black_box(&output);
     }
     let duration_with_planning = start.elapsed();
 
@@ -32,7 +34,8 @@ fn main() {
     let start = Instant::now();
     for _ in 0..iterations {
         let mut output = vec![Complex::zero(); size];
-        plan.execute(&input, &mut output);
+        plan.execute(black_box(&input), black_box(&mut output));
+        black_box(&output);
     }
     let duration_without_planning = start.elapsed();
 

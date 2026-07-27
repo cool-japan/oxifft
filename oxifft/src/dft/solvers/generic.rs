@@ -264,7 +264,7 @@ impl<T: Float> GenericSolver<T> {
     /// Apply twiddle factors for f64 with SIMD acceleration.
     #[cfg(target_arch = "x86_64")]
     fn apply_twiddles_f64(temp: &mut [Complex<f64>], twiddles: &[Complex<f64>]) {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
             // Safety: We've verified AVX2+FMA are available
             unsafe { Self::apply_twiddles_avx2(temp, twiddles) }
         } else {

@@ -34,9 +34,10 @@ pub fn fftw_forward(input: &[Complex<f64>]) -> Vec<Complex<f64>> {
         input_vec[i] = to_fftw_complex(*c);
     }
 
-    let mut plan: C2CPlan64 =
-        C2CPlan::aligned(&[n], Sign::Forward, fftw::types::Flag::ESTIMATE).unwrap();
-    plan.c2c(&mut input_vec, &mut output_vec).unwrap();
+    let mut plan: C2CPlan64 = C2CPlan::aligned(&[n], Sign::Forward, fftw::types::Flag::ESTIMATE)
+        .expect("fftw_forward: FFTW plan creation failed");
+    plan.c2c(&mut input_vec, &mut output_vec)
+        .expect("fftw_forward: FFTW c2c execution failed");
 
     output_vec.iter().map(|c| from_fftw_complex(*c)).collect()
 }
@@ -57,9 +58,10 @@ pub fn fftw_inverse(input: &[Complex<f64>]) -> Vec<Complex<f64>> {
         input_vec[i] = to_fftw_complex(*c);
     }
 
-    let mut plan: C2CPlan64 =
-        C2CPlan::aligned(&[n], Sign::Backward, fftw::types::Flag::ESTIMATE).unwrap();
-    plan.c2c(&mut input_vec, &mut output_vec).unwrap();
+    let mut plan: C2CPlan64 = C2CPlan::aligned(&[n], Sign::Backward, fftw::types::Flag::ESTIMATE)
+        .expect("fftw_inverse: FFTW plan creation failed");
+    plan.c2c(&mut input_vec, &mut output_vec)
+        .expect("fftw_inverse: FFTW c2c execution failed");
 
     // FFTW doesn't normalize, so we do it here
     let scale = 1.0 / n as f64;

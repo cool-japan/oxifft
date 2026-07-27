@@ -1,7 +1,7 @@
 # oxifft
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://crates.io/crates/oxifft)
-[![Tests](https://img.shields.io/badge/tests-1360%20passing-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://crates.io/crates/oxifft)
+[![Tests](https://img.shields.io/badge/tests-1345%20passing-brightgreen.svg)](#)
 [![API Items](https://img.shields.io/badge/API%20items-1544-blue.svg)](#)
 [![Features](https://img.shields.io/badge/features-18-orange.svg)](#features)
 
@@ -9,7 +9,7 @@ Pure Rust implementation of FFTW - the Fastest Fourier Transform in the West.
 
 ## Overview
 
-OxiFFT v0.3.0 is a production-ready FFT library with **1360 passing tests**, **1544 public API items**, and **zero unimplemented features**. It provides:
+OxiFFT v0.4.0 is a production-ready FFT library with **1345 passing tests**, **1544 public API items**, and **zero unimplemented features**. It provides:
 
 - **Complex DFT** (Discrete Fourier Transform) - forward & inverse
 - **Real FFT** (R2C/C2R) - optimized real-valued transforms
@@ -197,7 +197,7 @@ OxiFFT provides 18 configurable feature flags:
 
 ```toml
 [dependencies]
-oxifft = { version = "0.3.0", features = ["sparse", "streaming", "signal"] }
+oxifft = { version = "0.4.0", features = ["sparse", "streaming", "signal"] }
 ```
 
 ## API Overview
@@ -279,7 +279,7 @@ See the `examples/` directory for complete examples:
 
 OxiFFT has comprehensive test coverage:
 
-- **1360 tests passing** across unit, integration, and property-based tests
+- **1345 tests passing** across unit, integration, and property-based tests (plus 93 passing doc tests)
 - **0 unimplemented items** - all features are fully implemented
 - Fuzz testing with `proptest` and `cargo-fuzz`
 - Comparison tests against `rustfft` and FFTW

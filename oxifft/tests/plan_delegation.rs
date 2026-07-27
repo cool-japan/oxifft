@@ -215,3 +215,115 @@ fn plan_creation_methods_are_callable() {
     let _ = Plan::<f64>::r2c_1d(8, Flags::ESTIMATE);
     let _ = Plan::<f64>::c2r_1d(8, Flags::ESTIMATE);
 }
+
+// ── Planning-mode delegation (MEASURE / PATIENT / EXHAUSTIVE) ─────────────────
+//
+// The delegation paths must keep working under every planning mode, not just
+// ESTIMATE.  MEASURE/PATIENT/EXHAUSTIVE additionally exercise the runtime
+// wisdom cache + benchmarking path in the underlying `Plan::dft_1d`.
+
+const MEASURED_MODES: [Flags; 3] = [Flags::MEASURE, Flags::PATIENT, Flags::EXHAUSTIVE];
+
+#[test]
+fn plan_dft_2d_delegates_in_all_planning_modes() {
+    for flags in MEASURED_MODES {
+        let plan = Plan::<f64>::dft_2d(4, 8, Direction::Forward, flags);
+        assert!(plan.is_some(), "dft_2d must delegate under {flags:?}");
+    }
+}
+
+#[test]
+fn plan_dft_3d_delegates_in_all_planning_modes() {
+    for flags in MEASURED_MODES {
+        let plan = Plan::<f64>::dft_3d(2, 4, 8, Direction::Forward, flags);
+        assert!(plan.is_some(), "dft_3d must delegate under {flags:?}");
+    }
+}
+
+#[test]
+fn plan_r2c_c2r_delegate_in_all_planning_modes() {
+    for flags in MEASURED_MODES {
+        assert!(
+            Plan::<f64>::r2c_1d(64, flags).is_some(),
+            "r2c_1d must delegate under {flags:?}"
+        );
+        assert!(
+            Plan::<f64>::c2r_1d(64, flags).is_some(),
+            "c2r_1d must delegate under {flags:?}"
+        );
+    }
+}
+
+#[test]
+fn plan_dft_2d_measure_roundtrip_is_correct() {
+    // Correctness must not depend on the planning mode: a MEASURE-planned 2D
+    // transform must round-trip just like the ESTIMATE one.
+    let (n0, n1) = (8, 8);
+    let fwd = Plan::<f64>::dft_2d(n0, n1, Direction::Forward, Flags::MEASURE).unwrap();
+    let bwd = Plan::<f64>::dft_2d(n0, n1, Direction::Backward, Flags::PATIENT).unwrap();
+
+    let mut input = vec![Complex::new(0.0, 0.0); n0 * n1];
+    input[0] = Complex::new(1.0, 0.0);
+    let mut spectrum = vec![Complex::new(0.0, 0.0); n0 * n1];
+    let mut recovered = vec![Complex::new(0.0, 0.0); n0 * n1];
+
+    fwd.execute(&input, &mut spectrum);
+    bwd.execute(&spectrum, &mut recovered);
+
+    let scale = (n0 * n1) as f64;
+    assert!((recovered[0].re - scale).abs() < 1e-9);
+}
+
+// ── Runtime wisdom cache: MEASURE must not re-benchmark every call ────────────
+
+#[test]
+fn measure_caches_winner_and_second_call_is_fast() {
+    use std::time::Instant;
+
+    // A size exclusive to this test so no other test pre-populates its wisdom.
+    let n = 8192;
+
+    // First MEASURE benchmarks several real candidates (ct-dit, ct-dif,
+    // stockham, cache-oblivious) — comparatively slow.
+    let t0 = Instant::now();
+    let p1 = Plan::<f64>::dft_1d(n, Direction::Forward, Flags::MEASURE).expect("first plan");
+    let first = t0.elapsed();
+
+    // Second MEASURE must hit the cached wisdom entry and reconstruct without
+    // benchmarking.  Previously the tuner re-ran on every call for zero payoff.
+    let t1 = Instant::now();
+    let p2 = Plan::<f64>::dft_1d(n, Direction::Forward, Flags::MEASURE).expect("second plan");
+    let second = t1.elapsed();
+
+    assert_eq!(
+        p1.algorithm_name(),
+        p2.algorithm_name(),
+        "cached plan must match the measured winner"
+    );
+    assert!(
+        second * 4 < first,
+        "second MEASURE ({second:?}) should be far faster than the first ({first:?}); \
+         re-benchmarking on every call is the bug being guarded against"
+    );
+
+    // Having measured the size, WISDOM_ONLY must now succeed for it.
+    assert!(
+        Plan::<f64>::dft_1d(n, Direction::Forward, Flags::WISDOM_ONLY).is_some(),
+        "WISDOM_ONLY must succeed once the size has been measured"
+    );
+}
+
+// ── WISDOM_ONLY failure path ─────────────────────────────────────────────────
+
+#[test]
+fn wisdom_only_fails_when_no_wisdom_exists() {
+    // A prime size used by no other test: with the default (empty) build-time
+    // baseline and no prior measurement, WISDOM_ONLY has nothing to use and must
+    // fail rather than silently falling back to the heuristic.
+    let n = 1013;
+    let plan = Plan::<f64>::dft_1d(n, Direction::Forward, Flags::WISDOM_ONLY);
+    assert!(
+        plan.is_none(),
+        "WISDOM_ONLY must return None when no wisdom exists for n={n}"
+    );
+}

@@ -18,7 +18,7 @@
 //!
 //! # Generated function signature
 //!
-//! ```rust,ignore
+//! ```text
 //! pub unsafe fn notw_2_v8_avx2_f32_soa(
 //!     re_in: *const f32, im_in: *const f32,
 //!     re_out: *mut f32, im_out: *mut f32,

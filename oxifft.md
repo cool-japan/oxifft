@@ -25,17 +25,28 @@ oxifft/src/
 ├── frft/           Fractional Fourier Transform
 ├── conv/           FFT-based convolution and correlation
 ├── autodiff/       Automatic differentiation (forward/backward mode)
-├── gpu/            GPU acceleration (CUDA, Metal)
-├── mpi/            MPI distributed computing
+├── conv/ ntt/      FFT convolution; number-theoretic transform
+├── chirp_z/        Chirp-Z transform
+├── compat/         FFTW-compatible (fftw_*) API surface
+├── gpu/            GPU acceleration (Metal = real GPU; CUDA = CPU-fallback today)
 └── wasm/           WebAssembly bindings
 ```
 
-## Core Traits
+> MPI distributed computing is **not** an `oxifft/src/` module — it lives in the
+> separate `oxifft-adapter-mpi` crate (system MPI FFI, quarantined out of the
+> pure-Rust core).
+
+## Core Types
+
+The public surface is concrete `Send + Sync` plan structs (`Plan`, `Plan2D`,
+`Plan3D`, `PlanND`, `RealPlan*`, `R2rPlan*`, `SplitPlan*`, `GuruPlan`). The
+internal planning contract centres on `kernel::Problem` and `kernel::Planner`:
 
 ```rust
 pub trait Problem: Hash + Debug + Clone + Send + Sync { ... }
-pub trait Plan: Send + Sync { ... }
-pub trait Solver: Send + Sync { ... }
+// Solver selection is driven by `kernel::Planner` + `wisdom::WisdomEntry`;
+// there is no public `Plan`/`Solver` trait (the old zero-implementor
+// `kernel::Solver` trait was removed in v0.4.0).
 ```
 
 ## Planning System
@@ -81,10 +92,10 @@ flowchart LR
     B --> C{Size Check}
     C -->|n le 1| D["Algorithm::Nop<br/>NopSolver"]
     C -->|is_power_of_2| E["Algorithm::CooleyTukey<br/>CooleyTukeySolver<br/>O(n log n)"]
-    C -->|has_composite_codelet| F["Algorithm::Composite<br/>sizes 12-4096<br/>execute_composite_codelet"]
-    C -->|n le 16| G["Algorithm::Direct<br/>O(n^2) naive DFT"]
-    C -->|composite_factorizable| H["Algorithm::Generic<br/>Mixed-radix N=N1*N2<br/>GenericSolver"]
-    C -->|prime or arbitrary| I["Algorithm::Bluestein<br/>Chirp-Z transform<br/>O(n log n) fallback"]
+    C -->|has_composite_codelet| F["Algorithm::Composite<br/>e.g. 12,24,36,48,60,72,96,100<br/>execute_composite_codelet"]
+    C -->|small prime 3..=13 / 15,21,35| G["Algorithm::Winograd /<br/>WinogradPfa"]
+    C -->|composite_factorizable| H["Algorithm::MixedRadix / Generic<br/>N = N1 x N2"]
+    C -->|prime 17..=1021| I["Algorithm::Rader<br/>(else Bluestein Chirp-Z)"]
     D --> J["plan.execute()"]
     E --> J
     F --> J
@@ -136,14 +147,23 @@ graph TD
 
 ## Algorithm Selection
 
+The `ESTIMATE` heuristic (`select_algorithm`) picks as follows; `MEASURE`/
+`PATIENT`/`EXHAUSTIVE` instead consult the runtime wisdom cache and, on a miss,
+benchmark candidates and cache the winner.
+
 | Transform Size | Algorithm |
 |----------------|-----------|
 | Power of 2 | Cooley-Tukey DIT (radix-2/4/8, split-radix) |
-| Power of 2 (large) | Stockham (cache-friendly, auto-sort) |
-| Prime | Rader's algorithm or Bluestein |
-| Composite | Mixed-radix or Cooley-Tukey generic |
-| Small (≤8) | Direct O(n²) codelet |
-| Any size | Bluestein (Chirp-Z, fallback) |
+| Power of 2 (large) | Stockham (cache-friendly, auto-sort) — reachable via measured wisdom |
+| Small prime 3–13 | Winograd (hand-optimized) |
+| Coprime composite 15/21/35 | Winograd PFA |
+| Prime 17–1021 | Rader's algorithm (else Bluestein) |
+| Larger prime / arbitrary | Bluestein (Chirp-Z) |
+| Composite | Composite codelet, then Mixed-radix, then Generic |
+| n ≤ 1 | Nop |
+
+> `Algorithm::Direct` (O(n²)) is **no longer** chosen by the heuristic; it stays
+> reachable only through measured or imported wisdom.
 
 ## SIMD Architecture
 

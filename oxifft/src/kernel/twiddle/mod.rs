@@ -330,19 +330,25 @@ fn compute_twiddle_table_soa_f64(size: usize, direction: TwiddleDirection) -> Tw
     TwiddleTableSoA { re, im }
 }
 
-/// Compute an aligned-capacity SoA f32 twiddle table directly from cos/sin.
+/// Compute an aligned-capacity SoA f32 twiddle table.
+///
+/// The phase and its sin/cos are computed in `f64` and then rounded to `f32`,
+/// matching reference FFT implementations (FFTW's `trig.c`, PocketFFT). Native
+/// `f32` trig loses accuracy because `k as f32` is inexact once `k` exceeds
+/// 2^24 and per-entry rounding error compounds across the O(N) twiddle
+/// multiplies of a large transform.
 fn compute_twiddle_table_soa_f32(size: usize, direction: TwiddleDirection) -> TwiddleTableSoA<f32> {
     let sign = match direction {
-        TwiddleDirection::Forward => -1.0_f32,
-        TwiddleDirection::Inverse => 1.0_f32,
+        TwiddleDirection::Forward => -1.0_f64,
+        TwiddleDirection::Inverse => 1.0_f64,
     };
     let capacity = (size + 7) & !7;
     let mut re = Vec::with_capacity(capacity);
     let mut im = Vec::with_capacity(capacity);
     for k in 0..size {
-        let angle = sign * 2.0 * core::f32::consts::PI * k as f32 / size as f32;
-        re.push(angle.cos());
-        im.push(angle.sin());
+        let angle = sign * 2.0 * core::f64::consts::PI * k as f64 / size as f64;
+        re.push(angle.cos() as f32);
+        im.push(angle.sin() as f32);
     }
     TwiddleTableSoA { re, im }
 }
@@ -361,15 +367,19 @@ fn compute_twiddle_table_f64(size: usize, direction: TwiddleDirection) -> Twiddl
     TwiddleTable { factors }
 }
 
+/// Compute an f32 twiddle table.
+///
+/// As with [`compute_twiddle_table_soa_f32`], the phase and its sin/cos are
+/// computed in `f64` and then rounded to `f32` for accuracy on large sizes.
 fn compute_twiddle_table_f32(size: usize, direction: TwiddleDirection) -> TwiddleTable<f32> {
     let sign = match direction {
-        TwiddleDirection::Forward => -1.0_f32,
-        TwiddleDirection::Inverse => 1.0_f32,
+        TwiddleDirection::Forward => -1.0_f64,
+        TwiddleDirection::Inverse => 1.0_f64,
     };
     let factors = (0..size)
         .map(|k| {
-            let angle = sign * 2.0 * core::f32::consts::PI * k as f32 / size as f32;
-            Complex::new(angle.cos(), angle.sin())
+            let angle = sign * 2.0 * core::f64::consts::PI * k as f64 / size as f64;
+            Complex::new(angle.cos() as f32, angle.sin() as f32)
         })
         .collect();
     TwiddleTable { factors }
@@ -396,16 +406,16 @@ pub fn twiddle_mul_simd_f64(data: &mut [Complex<f64>], twiddles: &[Complex<f64>]
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
             // SAFETY: avx2 and fma features confirmed above
             return unsafe { twiddle_mul_avx2_f64(data, twiddles) };
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::detect_x86_feature!("sse2") {
             // SAFETY: sse2 feature confirmed above
             return unsafe { twiddle_mul_sse2_f64(data, twiddles) };
         }
         // Fallback if somehow no x86 SIMD is available at runtime
-        return twiddle_mul_scalar_f64(data, twiddles);
+        twiddle_mul_scalar_f64(data, twiddles)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -621,15 +631,15 @@ pub fn twiddle_mul_soa_simd_f64(data: &mut [Complex<f64>], twiddle_re: &[f64], t
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
             // SAFETY: avx2 and fma confirmed above
             return unsafe { twiddle_mul_soa_avx2_f64(data, twiddle_re, twiddle_im) };
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::detect_x86_feature!("sse2") {
             // SAFETY: sse2 confirmed above
             return unsafe { twiddle_mul_soa_sse2_f64(data, twiddle_re, twiddle_im) };
         }
-        return twiddle_mul_soa_scalar_f64(data, twiddle_re, twiddle_im);
+        twiddle_mul_soa_scalar_f64(data, twiddle_re, twiddle_im)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -849,13 +859,13 @@ pub fn twiddle_mul_soa_simd_f32(data: &mut [Complex<f32>], twiddle_re: &[f32], t
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
             return unsafe { twiddle_mul_soa_avx2_f32(data, twiddle_re, twiddle_im) };
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::detect_x86_feature!("sse2") {
             return unsafe { twiddle_mul_soa_sse2_f32(data, twiddle_re, twiddle_im) };
         }
-        return twiddle_mul_soa_scalar_f32(data, twiddle_re, twiddle_im);
+        twiddle_mul_soa_scalar_f32(data, twiddle_re, twiddle_im)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1051,16 +1061,16 @@ pub fn twiddle_mul_simd_f32(data: &mut [Complex<f32>], twiddles: &[Complex<f32>]
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
             // SAFETY: avx2 and fma features confirmed above
             return unsafe { twiddle_mul_avx2_f32(data, twiddles) };
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::detect_x86_feature!("sse2") {
             // SAFETY: sse2 feature confirmed above
             return unsafe { twiddle_mul_sse2_f32(data, twiddles) };
         }
         // Fallback if somehow no x86 SIMD is available at runtime
-        return twiddle_mul_scalar_f32(data, twiddles);
+        twiddle_mul_scalar_f32(data, twiddles)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1338,9 +1348,11 @@ pub fn twiddles_mixed_radix_f32(
         "twiddles_mixed_radix_f32: product of factors ({product}) must equal n ({n})"
     );
 
+    // Compute phases and sin/cos in f64, then round to f32 (see
+    // `compute_twiddle_table_f32` for the accuracy rationale).
     let sign = match direction {
-        TwiddleDirection::Forward => -1.0_f32,
-        TwiddleDirection::Inverse => 1.0_f32,
+        TwiddleDirection::Forward => -1.0_f64,
+        TwiddleDirection::Inverse => 1.0_f64,
     };
 
     let mut tables: Vec<Vec<Complex<f32>>> = Vec::with_capacity(factors.len());
@@ -1355,8 +1367,8 @@ pub fn twiddles_mixed_radix_f32(
 
         for j in 1..r {
             for s in 0..stride {
-                let angle = sign * 2.0 * core::f32::consts::PI * (j * s) as f32 / current_n as f32;
-                table.push(Complex::new(angle.cos(), angle.sin()));
+                let angle = sign * 2.0 * core::f64::consts::PI * (j * s) as f64 / current_n as f64;
+                table.push(Complex::new(angle.cos() as f32, angle.sin() as f32));
             }
         }
 

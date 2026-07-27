@@ -29,6 +29,14 @@ exclude = [
     "TESTING.md",
     "TODO.md",
     "oxifft.md",
+    # Prebuilt wasm-pack artifacts (`.wasm`/`.js`/`.d.ts`). These are still
+    # tracked in git from before this exclude rule existed (`.gitignore`
+    # cannot retroactively untrack already-committed files), so `exclude`
+    # here is the belt-and-suspenders defense that actually keeps them out
+    # of the published crates.io tarball. Rebuild locally with `wasm-pack`.
+    "pkg/",
+    "pkg_simd/",
+    "pkg_node/",
 ]
 
 [dependencies]
@@ -36,15 +44,12 @@ num-complex.workspace = true
 num-traits.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
-seahash.workspace = true
 hashbrown.workspace = true
 spin.workspace = true
 libm.workspace = true
 rayon = { workspace = true, optional = true }
-mpi = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
-js-sys = { workspace = true, optional = true }
-oxifft-codegen = { version = "0.3.1", path = "../oxifft-codegen" }
+oxifft-codegen.workspace = true
 oxicuda-driver = { workspace = true, optional = true }
 oxicuda-fft = { workspace = true, optional = true }
 oxicuda-metal = { workspace = true, optional = true }
@@ -62,38 +67,42 @@ default = ["std", "threading"]
 std = ["dep:serde_json", "num-complex/std", "num-traits/std", "serde/std"]
 # Threading support (requires std)
 threading = ["std", "dep:rayon"]
-simd = []
+# AVX-512 SIMD tier (x86_64). Runtime feature detection is std-gated; on no_std
+# it degrades to compile-time (`target_feature`) selection. no_std + alloc capable.
 avx512 = []
-# Quad-precision (128-bit) floating-point support (pure Rust)
-f128-support = []
-# Half-precision (16-bit) floating-point support (pure Rust)
-f16-support = []
-# MPI distributed computing support (requires MPI library)
-mpi = ["dep:mpi"]
-# Sparse FFT support (O(k log n) for k-sparse signals)
-sparse = []
-# Pruned FFT support (partial input/output computation)
-pruned = []
-# ARM SVE (Scalable Vector Extension) support
-sve = []
-# WebAssembly support
-wasm = ["dep:wasm-bindgen", "dep:js-sys"]
-# Streaming FFT support (STFT, window functions, overlap-add)
-streaming = []
-# Compile-time FFT with const generics
+# Experimental portable SIMD backend built on `core::simd`.
+# NIGHTLY-ONLY: enabling this requires a nightly toolchain because it turns on the
+# unstable `#![feature(portable_simd)]` crate attribute. no_std + alloc capable.
+portable_simd = []
+# Quad-precision (128-bit) floating-point support (pure Rust). Requires std.
+f128-support = ["std"]
+# Half-precision (16-bit) floating-point support (pure Rust). Requires std.
+f16-support = ["std"]
+# Sparse FFT support (O(k log n) for k-sparse signals). Requires std.
+sparse = ["std"]
+# Pruned FFT support (partial input/output computation). Requires std.
+pruned = ["std"]
+# ARM SVE (Scalable Vector Extension) support. SVE length detection uses
+# `std::arch::is_aarch64_feature_detected!`, so this feature requires std.
+sve = ["std"]
+# WebAssembly support (wasm-bindgen glue). Requires std.
+wasm = ["std", "dep:wasm-bindgen"]
+# Streaming FFT support (STFT, window functions, overlap-add). Requires std.
+streaming = ["std"]
+# Compile-time FFT with const generics. no_std + alloc capable.
 const-fft = []
-# GPU support (CUDA backend for NVIDIA GPUs)
-cuda = ["dep:oxicuda-driver", "dep:oxicuda-fft"]
-# GPU support (Metal backend for Apple GPUs)
-metal = ["dep:oxicuda-metal"]
-# GPU support (enables both CUDA and Metal when available)
-gpu = ["cuda", "metal"]
+# GPU support (CUDA backend for NVIDIA GPUs). Driver bindings require an OS, so std.
+cuda = ["std", "dep:oxicuda-driver", "dep:oxicuda-fft"]
+# GPU support (Metal backend for Apple GPUs). Driver bindings require an OS, so std.
+metal = ["std", "dep:oxicuda-metal"]
+# GPU support (enables both CUDA and Metal when available). Requires std.
+gpu = ["std", "cuda", "metal"]
 # Signal processing: Hilbert transform, PSD (Welch's method), cepstral analysis
 signal = ["std"]
-# FFTW-compatible API surface (thin wrappers with FFTW-style names)
+# FFTW-compatible API surface (thin wrappers with FFTW-style names). no_std + alloc capable.
 fftw-compat = []
-# ndarray integration — FFT extension traits for ndarray arrays
-ndarray = ["dep:ndarray"]
+# ndarray integration — FFT extension traits for ndarray arrays. ndarray needs std.
+ndarray = ["std", "dep:ndarray"]
 
 [lints]
 workspace = true
@@ -101,6 +110,35 @@ workspace = true
 [package.metadata.cargo-udeps.ignore]
 normal = ["oxifft-codegen", "spin"]
 development = ["approx", "proptest"]
+
+[package.metadata.docs.rs]
+# Curated feature list (NOT `all-features = true`): `cuda`/`metal`/`gpu` pull in
+# `oxicuda-driver`/`oxicuda-fft`/`oxicuda-metal`, and `oxicuda-metal` in turn
+# depends on the `metal` crate (Apple Metal framework bindings), which does not
+# compile on docs.rs's Linux build container. `portable_simd` is excluded too:
+# it requires a nightly toolchain (`#![feature(portable_simd)]`) and has not
+# been verified to build warning-free on docs.rs's nightly container; revisit
+# once that is confirmed. Every feature below was verified with a clean,
+# zero-warning `cargo check -p oxifft --no-default-features --features
+# "<this list>"`.
+features = [
+    "std",
+    "threading",
+    "avx512",
+    "f128-support",
+    "f16-support",
+    "sparse",
+    "pruned",
+    "sve",
+    "wasm",
+    "streaming",
+    "const-fft",
+    "signal",
+    "fftw-compat",
+    "ndarray",
+]
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [[bin]]
 name = "oxifft_tune"

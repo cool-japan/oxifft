@@ -13,6 +13,22 @@
 //! is stored in row-major order: element `(i₁, i₂)` lives at flat index
 //! `i₁ * n2 + i₂`.
 //!
+//! # Frequency-index convention
+//!
+//! Output index `k` along each dimension corresponds to the **centered**
+//! frequency `freq = k - n/2` — the same convention documented and used by
+//! the 1D [`crate::nufft::Nufft::type1`] / [`crate::nufft::Nufft::type2`]
+//! API (and the FINUFFT Type 1/2 convention):
+//!
+//! ```text
+//! k=0      -> freq = -n/2   (most negative)
+//! k=n/2    -> freq = 0      (DC)
+//! k=n-1    -> freq = n/2-1  (most positive)
+//! ```
+//!
+//! This applies independently to each axis, so `result[k1 * n2 + k2]`
+//! corresponds to the 2-D frequency `(k1 - n1/2, k2 - n2/2)`.
+//!
 //! # References
 //!
 //! Greengard, L. & Lee, J.-Y. (2004). Accelerating the nonuniform fast
@@ -22,8 +38,8 @@ use crate::api::{Direction, Flags, Plan2D};
 use crate::kernel::{Complex, Float};
 
 use super::{
-    compute_kernel_width, next_smooth_number, precompute_deconv_factors, NufftError, NufftOptions,
-    NufftResult,
+    centered_freq_indices, compute_kernel_width, next_smooth_number, precompute_deconv_factors,
+    NufftError, NufftOptions, NufftResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -112,7 +128,7 @@ fn normalize_coord(p: f64) -> Result<f64, NufftError> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::nufft::{nufft2d_type1, NufftOptions};
 /// use oxifft::kernel::Complex;
 ///
@@ -202,9 +218,6 @@ pub fn nufft2d_type1<T: Float>(
     let deconv1 = precompute_deconv_factors::<T>(n1, n_over1, kernel_width);
     let deconv2 = precompute_deconv_factors::<T>(n2, n_over2, kernel_width);
 
-    let half1 = n1 / 2;
-    let half2 = n2 / 2;
-
     // Cap deconvolution to prevent exponential blowup at high-frequency
     // corner bins.  The Gaussian kernel's FT decays to near-zero there, so
     // amplifying beyond 1/tolerance only magnifies rounding noise.
@@ -213,24 +226,26 @@ pub fn nufft2d_type1<T: Float>(
     let mut result = Vec::with_capacity(n1 * n2);
 
     for k1 in 0..n1 {
-        // Map output k1 to oversampled grid index
-        let grid_idx1 = if k1 < half1 { k1 } else { n_over1 - (n1 - k1) };
+        // Map output index k1 to the oversampled grid index and FFT-order
+        // deconvolution index using the centered frequency convention
+        // (freq = k1 - n1/2), shared with the 1D and 3D NUFFT APIs.
+        let (grid_idx1, deconv_idx1) = centered_freq_indices(k1, n1, n_over1);
+        let d1 = if deconv1[deconv_idx1].re > max_deconv {
+            Complex::new(max_deconv, T::ZERO)
+        } else {
+            deconv1[deconv_idx1]
+        };
 
         for k2 in 0..n2 {
-            let grid_idx2 = if k2 < half2 { k2 } else { n_over2 - (n2 - k2) };
+            let (grid_idx2, deconv_idx2) = centered_freq_indices(k2, n2, n_over2);
 
             let flat_grid = grid_idx1 * n_over2 + grid_idx2;
             // Product of 1-D deconvolution factors; cap each factor individually
             // to avoid double-exponential blowup in 2-D corner bins.
-            let d1 = if deconv1[k1].re > max_deconv {
+            let d2 = if deconv2[deconv_idx2].re > max_deconv {
                 Complex::new(max_deconv, T::ZERO)
             } else {
-                deconv1[k1]
-            };
-            let d2 = if deconv2[k2].re > max_deconv {
-                Complex::new(max_deconv, T::ZERO)
-            } else {
-                deconv2[k2]
+                deconv2[deconv_idx2]
             };
             result.push(fft_result[flat_grid] * d1 * d2);
         }
@@ -269,7 +284,7 @@ pub fn nufft2d_type1<T: Float>(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::nufft::{nufft2d_type2, NufftOptions};
 /// use oxifft::kernel::Complex;
 ///
@@ -335,34 +350,41 @@ pub fn nufft2d_type2<T: Float>(
     let deconv1 = precompute_deconv_factors::<T>(n1, n_over1, kernel_width);
     let deconv2 = precompute_deconv_factors::<T>(n2, n_over2, kernel_width);
 
-    let half1 = n1 / 2;
-    let half2 = n2 / 2;
-
     // Cap individual 1-D deconvolution factors to prevent exponential blowup
     // at high-frequency corner bins of the oversampled 2-D grid.
     let max_deconv = T::from_f64(1.0 / options.tolerance);
 
+    // Type 2 deconvolution differs from Type 1 by a factor equal to the total
+    // oversampled grid size (same derivation as the 1D `type2` in
+    // `crate::nufft::Nufft`, extended to 2D): after the properly-normalised
+    // IFFT (1/(n_over1*n_over2)) and kernel interpolation, the output would
+    // otherwise be too small by exactly that factor.  Multiplying the
+    // deconvolution product by `n_over1*n_over2` here cancels it.
+    let n_os_scale = T::from_usize(n_over1 * n_over2);
+
     let mut grid = vec![Complex::<T>::zero(); n_over1 * n_over2];
 
     for k1 in 0..n1 {
-        let grid_idx1 = if k1 < half1 { k1 } else { n_over1 - (n1 - k1) };
-        let d1 = if deconv1[k1].re > max_deconv {
+        // Centered frequency convention (freq = k1 - n1/2), matching
+        // nufft2d_type1 and the 1D NUFFT API.
+        let (grid_idx1, deconv_idx1) = centered_freq_indices(k1, n1, n_over1);
+        let d1 = if deconv1[deconv_idx1].re > max_deconv {
             Complex::new(max_deconv, T::ZERO)
         } else {
-            deconv1[k1]
+            deconv1[deconv_idx1]
         };
 
         for k2 in 0..n2 {
-            let grid_idx2 = if k2 < half2 { k2 } else { n_over2 - (n2 - k2) };
+            let (grid_idx2, deconv_idx2) = centered_freq_indices(k2, n2, n_over2);
 
             let flat_in = k1 * n2 + k2;
             let flat_grid = grid_idx1 * n_over2 + grid_idx2;
-            let d2 = if deconv2[k2].re > max_deconv {
+            let d2 = if deconv2[deconv_idx2].re > max_deconv {
                 Complex::new(max_deconv, T::ZERO)
             } else {
-                deconv2[k2]
+                deconv2[deconv_idx2]
             };
-            grid[flat_grid] = f[flat_in] * d1 * d2;
+            grid[flat_grid] = f[flat_in] * d1 * d2 * n_os_scale;
         }
     }
 
@@ -468,16 +490,106 @@ mod tests {
         NufftOptions::default()
     }
 
-    /// Single-point source at the origin.
+    // -----------------------------------------------------------------------
+    // Dense NDFT reference (O(n1*n2*m)), used to numerically validate the
+    // Gaussian-gridding NUFFT against ground truth rather than only checking
+    // shape/finiteness.  Uses the same centered frequency convention
+    // (freq = k - n/2) documented on the module and implemented via
+    // `centered_freq_indices`.
+    // -----------------------------------------------------------------------
+
+    /// Dense 2-D NDFT Type 1 (non-uniform -> uniform).
     ///
-    /// The 2-D DFT of a unit delta at the origin is a constant for all (k1,k2).
-    /// The Gaussian NUFFT approximates this; we verify:
-    /// 1. The output length is correct.
-    /// 2. All values are finite and non-zero.
-    /// 3. Low-frequency bins are approximately equal to the DC bin (checking
-    ///    that the spectrum is indeed approximately flat near the origin).
+    /// `f_hat[k1,k2] = sum_j c[j] * exp(-i*(freq1*x[j] + freq2*y[j]))`
+    fn dense_ndft2d_type1(
+        x: &[f64],
+        y: &[f64],
+        c: &[Complex<f64>],
+        n1: usize,
+        n2: usize,
+    ) -> Vec<Complex<f64>> {
+        let half1 = (n1 / 2) as isize;
+        let half2 = (n2 / 2) as isize;
+        let mut out = Vec::with_capacity(n1 * n2);
+        for k1 in 0..n1 {
+            let freq1 = (k1 as isize - half1) as f64;
+            for k2 in 0..n2 {
+                let freq2 = (k2 as isize - half2) as f64;
+                let mut acc = Complex::new(0.0_f64, 0.0);
+                for (j, &cj) in c.iter().enumerate() {
+                    let angle = -(freq1 * x[j] + freq2 * y[j]);
+                    acc = acc + cj * Complex::new(angle.cos(), angle.sin());
+                }
+                out.push(acc);
+            }
+        }
+        out
+    }
+
+    /// Dense 2-D NDFT Type 2 (uniform -> non-uniform).
+    ///
+    /// `f[j] = sum_{k1,k2} f_hat[k1,k2] * exp(+i*(freq1*x[j] + freq2*y[j]))`
+    fn dense_ndft2d_type2(
+        f: &[Complex<f64>],
+        x: &[f64],
+        y: &[f64],
+        n1: usize,
+        n2: usize,
+    ) -> Vec<Complex<f64>> {
+        let half1 = (n1 / 2) as isize;
+        let half2 = (n2 / 2) as isize;
+        x.iter()
+            .zip(y.iter())
+            .map(|(&xj, &yj)| {
+                let mut acc = Complex::new(0.0_f64, 0.0);
+                for k1 in 0..n1 {
+                    let freq1 = (k1 as isize - half1) as f64;
+                    for k2 in 0..n2 {
+                        let freq2 = (k2 as isize - half2) as f64;
+                        let angle = freq1 * xj + freq2 * yj;
+                        acc = acc + f[k1 * n2 + k2] * Complex::new(angle.cos(), angle.sin());
+                    }
+                }
+                acc
+            })
+            .collect()
+    }
+
+    /// Maximum `|nufft[i] - ref[i]| / max(|ref[i]|)` over all bins.
+    fn max_relative_error(nufft_out: &[Complex<f64>], reference: &[Complex<f64>]) -> f64 {
+        let ref_max = reference.iter().map(|c| c.norm()).fold(0.0_f64, f64::max);
+        if ref_max < 1e-30 {
+            return 0.0;
+        }
+        nufft_out
+            .iter()
+            .zip(reference.iter())
+            .map(|(n, r)| (*n - *r).norm() / ref_max)
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// Relative-error headroom for the default `opts()` (tol=1e-6, os=2.0).
+    ///
+    /// Empirically the 2-D Gaussian-gridding error is of the same order as
+    /// the 1-D case (see `oxifft/tests/nufft_tolerance_sweep.rs`) since the
+    /// kernel is separable per axis; `tol * 10` gives comfortable headroom
+    /// without masking real regressions.
+    fn headroom() -> f64 {
+        opts().tolerance * 10.0
+    }
+
+    // -----------------------------------------------------------------------
+    // Type 1 numeric correctness
+    // -----------------------------------------------------------------------
+
+    /// Single-point source at the origin: the dense 2-D NDFT of a unit delta
+    /// at the origin is exactly `1.0` for every (k1,k2) bin (all phases are
+    /// zero).  This directly validates the frequency-index convention: a bug
+    /// in the k-to-frequency mapping would leave the *set* of output values
+    /// unchanged (still all equal) but this test additionally cross-checks
+    /// magnitude against the dense reference at every bin.
     #[test]
-    fn test_2d_type1_single_point_correctness() {
+    fn test_2d_type1_single_point_matches_dense_ndft() {
         let x = vec![0.0f64];
         let y = vec![0.0f64];
         let c = vec![Complex::new(1.0f64, 0.0)];
@@ -485,78 +597,229 @@ mod tests {
         let n2 = 16;
 
         let result = nufft2d_type1(&x, &y, &c, n1, n2, &opts()).expect("2D Type 1 failed");
-        assert_eq!(result.len(), n1 * n2);
+        let reference = dense_ndft2d_type1(&x, &y, &c, n1, n2);
+        assert_eq!(result.len(), reference.len());
 
-        // DC bin must be real and positive (delta at origin → real-valued DFT)
-        let dc_mag = result[0].norm();
-        assert!(dc_mag > 0.0, "DC bin must be non-zero");
-
-        // All values must be finite
-        for (idx, &v) in result.iter().enumerate() {
-            assert!(
-                v.re.is_finite() && v.im.is_finite(),
-                "Bin {idx} is non-finite: {v:?}"
-            );
-        }
-
-        // All bins should be finite non-zero values.  The Gaussian gridding
-        // introduces amplitude variation across bins; we don't check exact
-        // magnitude equality here, only that the implementation doesn't diverge.
-        let mut any_near_dc = false;
-        for &v in &result {
-            if v.norm() > 0.0 {
-                any_near_dc = true;
-                break;
-            }
-        }
-        assert!(any_near_dc, "At least one non-zero bin is expected");
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "single-point-at-origin rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
     }
 
-    /// Type 2 of a delta-function grid (single non-zero DC coefficient)
-    /// should produce a constant value at every evaluation point.
+    /// Random (deterministic) non-uniform points, Type 1 vs. dense NDFT.
     #[test]
-    fn test_2d_type2_dc_constant() {
+    fn test_2d_type1_random_points_matches_dense_ndft() {
+        let n1 = 16;
+        let n2 = 16;
+        let m = 12;
+
+        let x: Vec<f64> = (0..m).map(|i| -2.9 + (i as f64) * 0.5).collect();
+        let y: Vec<f64> = (0..m).map(|i| -2.5 + (i as f64) * 0.43).collect();
+        let c: Vec<Complex<f64>> = (0..m)
+            .map(|i| Complex::new(((i as f64) * 0.37).cos(), ((i as f64) * 0.61).sin()))
+            .collect();
+
+        let result = nufft2d_type1(&x, &y, &c, n1, n2, &opts()).expect("2D Type 1 failed");
+        let reference = dense_ndft2d_type1(&x, &y, &c, n1, n2);
+
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "random-points rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
+    }
+
+    /// Points exactly at the domain edges (`-π`, `π`) must not panic and
+    /// must still match the dense reference.
+    #[test]
+    fn test_2d_type1_edge_points_matches_dense_ndft() {
+        let pi = core::f64::consts::PI;
+        let x = vec![-pi, pi, 0.0];
+        let y = vec![pi, -pi, 0.0];
+        let c = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.5, -0.5),
+            Complex::new(-0.3, 0.2),
+        ];
+        let n1 = 16;
+        let n2 = 16;
+
+        let result =
+            nufft2d_type1(&x, &y, &c, n1, n2, &opts()).expect("edge-point 2D Type 1 failed");
+        let reference = dense_ndft2d_type1(&x, &y, &c, n1, n2);
+
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "edge-points rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
+    }
+
+    /// Two coincident non-uniform points with values `c1`,`c2` must produce
+    /// exactly the same result (up to floating rounding) as a single point
+    /// at the same location with value `c1+c2` — the spreading kernel is
+    /// linear in the input strengths and depends only on point location.
+    #[test]
+    fn test_2d_type1_coincident_points_linearity() {
+        let n1 = 16;
+        let n2 = 16;
+        let x_single = vec![0.4f64];
+        let y_single = vec![-0.3f64];
+        let c_combined = vec![Complex::new(1.7, -0.5)];
+
+        let x_dup = vec![0.4f64, 0.4f64];
+        let y_dup = vec![-0.3f64, -0.3f64];
+        let c_dup = vec![Complex::new(1.0, -0.2), Complex::new(0.7, -0.3)];
+
+        let result_single = nufft2d_type1(&x_single, &y_single, &c_combined, n1, n2, &opts())
+            .expect("single failed");
+        let result_dup =
+            nufft2d_type1(&x_dup, &y_dup, &c_dup, n1, n2, &opts()).expect("dup failed");
+
+        for (a, b) in result_single.iter().zip(result_dup.iter()) {
+            assert!(
+                (*a - *b).norm() < 1e-9,
+                "coincident-point linearity violated: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    /// Empty non-uniform input must yield an all-zero uniform grid (not a
+    /// panic or garbage output).
+    #[test]
+    fn test_2d_type1_empty_input_returns_zero_grid() {
+        let x: Vec<f64> = vec![];
+        let y: Vec<f64> = vec![];
+        let c: Vec<Complex<f64>> = vec![];
         let n1 = 8;
         let n2 = 8;
+
+        let result = nufft2d_type1(&x, &y, &c, n1, n2, &opts()).expect("empty 2D Type 1 failed");
+        assert_eq!(result.len(), n1 * n2);
+        for v in &result {
+            assert_eq!(v.re, 0.0);
+            assert_eq!(v.im, 0.0);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Type 2 numeric correctness
+    // -----------------------------------------------------------------------
+
+    /// Type 2 of a delta-function grid (single non-zero DC coefficient, at
+    /// the centered-convention DC index `(n1/2, n2/2)`) must produce exactly
+    /// the coefficient value at every evaluation point (DC has zero phase
+    /// everywhere).
+    #[test]
+    fn test_2d_type2_dc_constant_matches_dense_ndft() {
+        let n1 = 8;
+        let n2 = 8;
+        let (half1, half2) = (n1 / 2, n2 / 2);
         let mut f = vec![Complex::<f64>::zero(); n1 * n2];
-        f[0] = Complex::new(1.0, 0.0); // DC only
+        f[half1 * n2 + half2] = Complex::new(1.0, 0.0); // DC (centered convention)
 
         let x = vec![-1.0, 0.0, 1.0, 2.0];
         let y = vec![-1.0, 0.0, 1.0, 2.0];
 
         let result = nufft2d_type2(&f, &x, &y, n1, n2, &opts()).expect("2D Type 2 failed");
         assert_eq!(result.len(), x.len());
+
+        for (j, v) in result.iter().enumerate() {
+            assert!(
+                (v.re - 1.0).abs() <= headroom(),
+                "point {j}: expected re~1.0, got {v:?}"
+            );
+            assert!(
+                v.im.abs() <= headroom(),
+                "point {j}: expected im~0, got {v:?}"
+            );
+        }
     }
 
-    /// Round-trip: Type2(Type1(delta)) should approximate identity up to
-    /// normalisation.  We use a single non-uniform source and check that
-    /// evaluating at the same point recovers the original value.
+    /// Random (deterministic) uniform coefficients, Type 2 vs. dense NDFT.
     #[test]
-    fn test_2d_type1_type2_roundtrip() {
+    fn test_2d_type2_random_points_matches_dense_ndft() {
+        let n1 = 16;
+        let n2 = 16;
+        let f: Vec<Complex<f64>> = (0..n1 * n2)
+            .map(|i| {
+                Complex::new(
+                    ((i as f64) * 0.017).sin() * 0.1,
+                    ((i as f64) * 0.013).cos() * 0.1,
+                )
+            })
+            .collect();
+
+        let m = 10;
+        let x: Vec<f64> = (0..m).map(|i| -2.7 + (i as f64) * 0.55).collect();
+        let y: Vec<f64> = (0..m).map(|i| -2.2 + (i as f64) * 0.41).collect();
+
+        let result = nufft2d_type2(&f, &x, &y, n1, n2, &opts()).expect("2D Type 2 failed");
+        let reference = dense_ndft2d_type2(&f, &x, &y, n1, n2);
+
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "type2 random-points rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
+    }
+
+    /// Empty evaluation-point input must yield an empty result (not a panic).
+    #[test]
+    fn test_2d_type2_empty_points_returns_empty() {
+        let n1 = 8;
+        let n2 = 8;
+        let f = vec![Complex::<f64>::zero(); n1 * n2];
+        let x: Vec<f64> = vec![];
+        let y: Vec<f64> = vec![];
+
+        let result = nufft2d_type2(&f, &x, &y, n1, n2, &opts()).expect("empty 2D Type 2 failed");
+        assert!(result.is_empty());
+    }
+
+    /// Type2(Type1(x)) is not an exact identity in general (Type 1 is the
+    /// adjoint, not the inverse, of Type 2), but for a well-resolved signal
+    /// (few, well-separated points on a moderately oversampled grid) it
+    /// should recover values that are finite and of comparable magnitude to
+    /// the input — used here as a numerical-stability smoke test in addition
+    /// to the independent dense-NDFT comparisons above.
+    #[test]
+    fn test_2d_type1_type2_roundtrip_bounded() {
         let n1 = 16;
         let n2 = 16;
         let m = 5;
 
-        // Random-like non-uniform points (deterministic)
-        let x: Vec<f64> = (0..m).map(|i| -1.5 + i as f64 * 0.7).collect();
-        let y: Vec<f64> = (0..m).map(|i| -1.0 + i as f64 * 0.5).collect();
+        let x: Vec<f64> = (0..m).map(|i| -1.5 + (i as f64) * 0.7).collect();
+        let y: Vec<f64> = (0..m).map(|i| -1.0 + (i as f64) * 0.5).collect();
         let c: Vec<Complex<f64>> = (0..m)
-            .map(|i| Complex::new((i as f64 * 0.5).cos(), (i as f64 * 0.5).sin()))
+            .map(|i| Complex::new(((i as f64) * 0.5).cos(), ((i as f64) * 0.5).sin()))
             .collect();
+        let input_sum: f64 = c.iter().map(|c| c.norm()).sum();
 
-        // Type 1: non-uniform → uniform
         let f = nufft2d_type1(&x, &y, &c, n1, n2, &opts()).expect("2D Type 1 failed");
-
-        // Type 2: uniform → same non-uniform points
         let recovered = nufft2d_type2(&f, &x, &y, n1, n2, &opts()).expect("2D Type 2 failed");
 
-        // Check length and that the output is finite (exact values depend on
-        // the NUFFT normalisation, so we only check structural correctness here)
         assert_eq!(recovered.len(), m);
+        // Very loose upper bound (order of magnitude, not tight accuracy):
+        // this is a numerical-stability smoke test guarding against gross
+        // scaling errors (e.g. an accidental extra factor of the oversampled
+        // grid size or of `max_deconv`), not a precision check — the
+        // dense-NDFT comparisons above cover precision.
+        let loose_bound = (input_sum * (n1 * n2) as f64).max(1.0) * 10.0;
         for (j, &v) in recovered.iter().enumerate() {
             assert!(
                 v.re.is_finite() && v.im.is_finite(),
                 "Recovered value {j} is non-finite"
+            );
+            assert!(
+                v.norm() <= loose_bound,
+                "Recovered value {j} magnitude {} unexpectedly large (bound {loose_bound})",
+                v.norm()
             );
         }
     }

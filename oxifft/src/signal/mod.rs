@@ -9,17 +9,19 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::signal::{hilbert, envelope, welch, WelchConfig, SpectralWindow};
 //!
 //! // Analytic signal
 //! let signal: Vec<f64> = (0..1024).map(|i| (i as f64 * 0.1).sin()).collect();
 //! let analytic = hilbert(&signal);
 //! let env = envelope(&signal);
+//! # let _ = (analytic, env);
 //!
 //! // Power spectral density
 //! let config = WelchConfig { segment_len: 256, overlap: 128, window: SpectralWindow::Hann };
 //! let psd = welch(&signal, &config);
+//! # let _ = psd;
 //! ```
 
 mod cepstrum;

@@ -1,38 +1,81 @@
 //! Sparse FFT plan.
+//!
+//! Implements an aliasing-based sparse FFT with a *certified* fast path and a
+//! guaranteed-correct dense fallback.  See [`super`] for the algorithm and its
+//! accuracy guarantees.
 
 use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
 use crate::prelude::*;
 
-use super::bucket::BucketArray;
-use super::decoder::PeelingDecoder;
-use super::filter::{create_optimal_filter, AliasingFilter};
-use super::hash::{generate_coprime_factors, FrequencyHash};
+use super::decoder::{certified_peel, AliasStage};
 use super::problem::SparseProblem;
 use super::result::SparseResult;
 
+/// Select the bucket counts (one per aliasing stage) for a signal of length
+/// `n` given a target bucket count.
+///
+/// Each stage's bucket count must **divide `n`** (so the downsampling is exact)
+/// and must be at most `n / 2` (so the downsampling factor `L = n / B` is at
+/// least 2 and the phase-shift measurement is well defined).  We choose the
+/// smallest few such divisors that are `>= target`; using several distinct
+/// bucket counts lets the peeling decoder separate frequencies that happen to
+/// collide under one bucketization but not another.
+///
+/// Returns an empty vector when `n` has no suitable divisor (e.g. `n` prime, or
+/// `target > n / 2`), in which case the plan uses the dense path exclusively.
+fn select_stage_sizes(n: usize, target: usize) -> Vec<usize> {
+    const MAX_STAGES: usize = 3;
+
+    if n < 4 {
+        return Vec::new();
+    }
+    let max_b = n / 2;
+    let target = target.clamp(2, max_b.max(2));
+
+    // Enumerate all divisors of n in [target, n/2].
+    let mut divisors: Vec<usize> = Vec::new();
+    let mut i = 1usize;
+    while i * i <= n {
+        if n.is_multiple_of(i) {
+            let j = n / i;
+            if (target..=max_b).contains(&i) {
+                divisors.push(i);
+            }
+            if j != i && (target..=max_b).contains(&j) {
+                divisors.push(j);
+            }
+        }
+        i += 1;
+    }
+
+    divisors.sort_unstable();
+    divisors.dedup();
+    divisors.truncate(MAX_STAGES);
+    divisors
+}
+
 /// Sparse FFT plan for k-sparse signals.
 ///
-/// Pre-computes subsampling factors, filters, and internal FFT plans
-/// for efficient repeated sparse FFT computation.
+/// Pre-computes the aliasing-stage bucket counts and their internal FFT plans
+/// for efficient repeated sparse FFT computation.  Every call is guaranteed to
+/// return a correct result: the certified fast path runs first, and if it
+/// cannot certify its solution the plan falls back to a full FFT plus top-`k`
+/// selection.
 pub struct SparsePlan<T: Float> {
     /// Signal length.
     n: usize,
     /// Expected sparsity.
     k: usize,
-    /// Number of buckets per stage.
+    /// Largest stage bucket count (0 when the fast path is unavailable).
     num_buckets: usize,
-    /// Number of stages (hash functions).
-    num_stages: usize,
-    /// Subsampling factors (coprime).
-    subsample_factors: Vec<usize>,
-    /// Hash functions for each stage.
-    hash_functions: Vec<FrequencyHash>,
-    /// Aliasing filter.
-    filter: AliasingFilter<T>,
-    /// Internal FFT plans for bucket computation.
+    /// Bucket count of each aliasing stage (each divides `n`, ascending).
+    stage_bucket_sizes: Vec<usize>,
+    /// Internal FFT plans, one per stage bucket count.
     bucket_plans: Vec<Plan<T>>,
-    /// Detection threshold.
+    /// Full-size FFT plan used by the dense fallback.
+    full_plan: Plan<T>,
+    /// Absolute detection threshold: energy below this is treated as noise.
     threshold: T,
     /// Planning flags.
     flags: Flags,
@@ -49,59 +92,41 @@ impl<T: Float> SparsePlan<T> {
     ///
     /// # Returns
     ///
-    /// `None` if plan creation fails (e.g., invalid parameters).
+    /// `None` if `n == 0`, `k == 0`, `k > n`, or a full-size FFT plan for `n`
+    /// cannot be created.
     pub fn new(n: usize, k: usize, flags: Flags) -> Option<Self> {
         if n == 0 || k == 0 || k > n {
             return None;
         }
 
+        // The dense fallback must always be available.
+        let full_plan = Plan::dft_1d(n, Direction::Forward, flags)?;
+
         let problem: SparseProblem<T> = SparseProblem::new(n, k, Direction::Forward);
+        let target = problem.optimal_buckets();
+        let candidate_sizes = select_stage_sizes(n, target);
 
-        // Calculate optimal parameters
-        let num_buckets = problem.optimal_buckets();
-        let num_stages = problem.optimal_repetitions().max(2);
-
-        // Generate coprime subsampling factors
-        let subsample_factors = generate_coprime_factors(num_buckets, n / 2);
-        let num_stages = num_stages.min(subsample_factors.len());
-
-        // Create hash functions for each stage
-        let hash_functions: Vec<_> = (0..num_stages)
-            .map(|i| {
-                let bucket_count = if i < subsample_factors.len() {
-                    subsample_factors[i]
-                } else {
-                    num_buckets
-                };
-                FrequencyHash::new(bucket_count, n)
-            })
-            .collect();
-
-        // Create aliasing filter
-        let filter = create_optimal_filter(n, k, num_buckets);
-
-        // Create internal FFT plans for each stage
-        let bucket_plans: Vec<_> = hash_functions
-            .iter()
-            .filter_map(|h| Plan::dft_1d(h.num_buckets(), Direction::Forward, flags))
-            .collect();
-
-        if bucket_plans.len() != num_stages {
-            return None; // Failed to create some plans
+        // Build a bucket FFT plan for each candidate stage, dropping any stage
+        // whose plan cannot be created so the two vectors stay aligned.
+        let mut stage_bucket_sizes = Vec::with_capacity(candidate_sizes.len());
+        let mut bucket_plans = Vec::with_capacity(candidate_sizes.len());
+        for &b in &candidate_sizes {
+            if let Some(plan) = Plan::dft_1d(b, Direction::Forward, flags) {
+                stage_bucket_sizes.push(b);
+                bucket_plans.push(plan);
+            }
         }
 
-        // Set detection threshold based on expected signal magnitude
+        let num_buckets = stage_bucket_sizes.iter().copied().max().unwrap_or(0);
         let threshold = T::from_f64(1e-10);
 
         Some(Self {
             n,
             k,
             num_buckets,
-            num_stages,
-            subsample_factors,
-            hash_functions,
-            filter,
+            stage_bucket_sizes,
             bucket_plans,
+            full_plan,
             threshold,
             flags,
         })
@@ -115,118 +140,97 @@ impl<T: Float> SparsePlan<T> {
     ///
     /// # Returns
     ///
-    /// `SparseResult` containing detected frequencies and values.
+    /// `SparseResult` containing detected frequencies and values.  The fast
+    /// path is used only when it can certify its answer; otherwise the result
+    /// comes from a full FFT plus top-`k` selection, so the returned pairs are
+    /// always the correct top-`k` bins.
     pub fn execute(&self, input: &[Complex<T>]) -> SparseResult<T> {
         if input.len() != self.n {
             return SparseResult::empty();
         }
 
-        // Stage 1: Subsampling and bucket FFTs
-        let mut bucket_stages = self.compute_bucket_stages(input);
-
-        // Stage 2: Singleton detection and peeling
-        let mut decoder = PeelingDecoder::new(self.n, self.k, self.threshold);
-        decoder.decode(&mut bucket_stages)
+        if let Some(result) = self.try_fast(input) {
+            return result;
+        }
+        self.dense_topk(input)
     }
 
-    /// Compute bucket stages from input signal.
-    fn compute_bucket_stages(&self, input: &[Complex<T>]) -> Vec<BucketArray<T>> {
-        let mut stages = Vec::with_capacity(self.num_stages);
-
-        for stage_idx in 0..self.num_stages {
-            let hash = &self.hash_functions[stage_idx];
-            let bucket_count = hash.num_buckets();
-
-            // Subsample the input
-            let subsample_factor = if stage_idx < self.subsample_factors.len() {
-                self.subsample_factors[stage_idx]
-            } else {
-                1
-            };
-
-            let subsampled = self.subsample(input, subsample_factor, bucket_count);
-
-            // Apply filter (in frequency domain)
-            let filtered = self.apply_filter(&subsampled);
-
-            // FFT to get bucket values
-            let bucket_fft = self.bucket_fft(&filtered, stage_idx);
-
-            // Create bucket array
-            let mut buckets = BucketArray::new(bucket_count, subsample_factor, self.n);
-            buckets.fill_from_fft(&bucket_fft);
-
-            stages.push(buckets);
+    /// Attempt the certified fast path.  Returns `None` when the fast path is
+    /// unavailable or cannot certify its solution.
+    fn try_fast(&self, input: &[Complex<T>]) -> Option<SparseResult<T>> {
+        if self.stage_bucket_sizes.is_empty() {
+            return None;
         }
 
-        // Analyze singletons across stages
-        if stages.len() >= 2 {
-            let (first, rest) = stages.split_at_mut(1);
-            if !rest.is_empty() {
-                first[0].analyze_singletons(&rest[0], self.threshold);
+        // Build one aliasing stage per bucket count.
+        let mut stages: Vec<AliasStage<T>> = Vec::with_capacity(self.stage_bucket_sizes.len());
+        for (si, &b_count) in self.stage_bucket_sizes.iter().enumerate() {
+            let l = self.n / b_count;
+
+            // Downsample by L at offsets 0 and 1 (each reads only `b_count`
+            // samples — this is what makes the fast path sub-linear).
+            let z0_in: Vec<Complex<T>> = (0..b_count).map(|j| input[(j * l) % self.n]).collect();
+            let z1_in: Vec<Complex<T>> =
+                (0..b_count).map(|j| input[(j * l + 1) % self.n]).collect();
+
+            let mut z0 = vec![Complex::<T>::zero(); b_count];
+            let mut z1 = vec![Complex::<T>::zero(); b_count];
+            self.bucket_plans[si].execute(&z0_in, &mut z0);
+            self.bucket_plans[si].execute(&z1_in, &mut z1);
+
+            // Convert to coefficient space (multiply by L) so a singleton
+            // bucket holds X[f] directly.
+            let l_scale = T::from_usize(l);
+            for v in z0.iter_mut() {
+                *v = *v * l_scale;
             }
+            for v in z1.iter_mut() {
+                *v = *v * l_scale;
+            }
+
+            stages.push(AliasStage {
+                b_count,
+                coeff0: z0,
+                coeff1: z1,
+            });
         }
 
-        stages
+        let abs_threshold = self.threshold.to_f64().unwrap_or(0.0);
+        let recovered = certified_peel(&mut stages, self.n, self.n, abs_threshold)?;
+
+        Some(Self::top_k(recovered, self.k, self.n))
     }
 
-    /// Subsample the input signal.
-    fn subsample(&self, input: &[Complex<T>], factor: usize, output_len: usize) -> Vec<Complex<T>> {
-        let mut output = vec![Complex::<T>::zero(); output_len];
+    /// Dense fallback: full FFT then top-`k` bins by magnitude.
+    fn dense_topk(&self, input: &[Complex<T>]) -> SparseResult<T> {
+        let mut output = vec![Complex::<T>::zero(); self.n];
+        self.full_plan.execute(input, &mut output);
 
-        // Sum elements that alias to each output bin
-        for (i, &val) in input.iter().enumerate() {
-            let out_idx = i % output_len;
-            output[out_idx] = output[out_idx] + val;
-        }
-
-        // Apply phase correction based on subsampling factor
-        let two_pi = <T as Float>::PI + <T as Float>::PI;
-        for (i, out) in output.iter_mut().enumerate() {
-            let phase = two_pi * T::from_usize(i * factor) / T::from_usize(self.n);
-            let (sin_p, cos_p) = Float::sin_cos(phase);
-            let twiddle = Complex::new(cos_p, -sin_p);
-            *out = *out * twiddle;
-        }
-
-        output
-    }
-
-    /// Apply aliasing filter.
-    fn apply_filter(&self, signal: &[Complex<T>]) -> Vec<Complex<T>> {
-        // For simplicity, apply filter element-wise with periodic extension
-        let filter_len = self.filter.coeffs.len();
-
-        signal
+        let mut magnitudes: Vec<(usize, T)> = output
             .iter()
             .enumerate()
-            .map(|(i, &val)| {
-                let filter_idx = i % filter_len;
-                val * self.filter.coeffs[filter_idx]
-            })
-            .collect()
+            .map(|(i, c)| (i, c.norm_sqr()))
+            .collect();
+        magnitudes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
+
+        let k_actual = self.k.min(self.n);
+        let indices: Vec<usize> = magnitudes[..k_actual].iter().map(|(i, _)| *i).collect();
+        let values: Vec<Complex<T>> = indices.iter().map(|&i| output[i]).collect();
+        SparseResult::new(indices, values, self.n)
     }
 
-    /// Compute bucket FFT for a stage.
-    fn bucket_fft(&self, input: &[Complex<T>], stage_idx: usize) -> Vec<Complex<T>> {
-        let bucket_count = self.hash_functions[stage_idx].num_buckets();
-
-        // Ensure input matches expected size
-        let input_adjusted: Vec<Complex<T>> = if input.len() >= bucket_count {
-            input[..bucket_count].to_vec()
-        } else {
-            let mut adjusted = input.to_vec();
-            adjusted.resize(bucket_count, Complex::<T>::zero());
-            adjusted
-        };
-
-        let mut output = vec![Complex::<T>::zero(); bucket_count];
-
-        if stage_idx < self.bucket_plans.len() {
-            self.bucket_plans[stage_idx].execute(&input_adjusted, &mut output);
-        }
-
-        output
+    /// Sort recovered `(freq, value)` pairs by descending magnitude and keep
+    /// the top `k`.
+    fn top_k(mut pairs: Vec<(usize, Complex<T>)>, k: usize, n: usize) -> SparseResult<T> {
+        pairs.sort_by(|a, b| {
+            b.1.norm_sqr()
+                .partial_cmp(&a.1.norm_sqr())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        let k_actual = k.min(pairs.len());
+        let indices: Vec<usize> = pairs[..k_actual].iter().map(|(i, _)| *i).collect();
+        let values: Vec<Complex<T>> = pairs[..k_actual].iter().map(|(_, v)| *v).collect();
+        SparseResult::new(indices, values, n)
     }
 
     /// Get signal length.
@@ -239,14 +243,15 @@ impl<T: Float> SparsePlan<T> {
         self.k
     }
 
-    /// Get number of buckets.
+    /// Get the largest aliasing-stage bucket count (0 when only the dense path
+    /// is available).
     pub fn num_buckets(&self) -> usize {
         self.num_buckets
     }
 
-    /// Get number of stages.
+    /// Get the number of aliasing stages.
     pub fn num_stages(&self) -> usize {
-        self.num_stages
+        self.stage_bucket_sizes.len()
     }
 
     /// Get the planning flags.
@@ -254,7 +259,7 @@ impl<T: Float> SparsePlan<T> {
         self.flags
     }
 
-    /// Set the detection threshold.
+    /// Set the detection threshold (absolute magnitude floor).
     pub fn set_threshold(&mut self, threshold: T) {
         self.threshold = threshold;
     }
@@ -264,90 +269,30 @@ impl<T: Float> SparsePlan<T> {
         self.threshold
     }
 
-    /// Analyze bucket occupancy across all FFAST stages and suggest an
-    /// adjusted sparsity estimate.
+    /// Estimate the computational complexity of the fast path, in operations.
     ///
-    /// Computes the fraction of non-zero buckets (those whose energy exceeds
-    /// `threshold²`) across every stage and maps it to a suggested k:
-    ///
-    /// - occupancy > 50 % → increase k (buckets are crowded, true sparsity
-    ///   is likely higher than estimated).
-    /// - occupancy < 5 %  → decrease k (buckets are nearly empty, true
-    ///   sparsity is likely lower).
-    /// - 5 % – 50 %       → current k estimate is reasonable.
-    ///
-    /// # Arguments
-    ///
-    /// * `bucket_stages` - Bucket arrays already populated for the current signal.
-    ///
-    /// # Returns
-    ///
-    /// Suggested k value (clamped to `[1, n]`).
-    pub fn suggest_k(&self, bucket_stages: &[BucketArray<T>]) -> usize {
-        if bucket_stages.is_empty() {
-            return self.k;
-        }
-
-        let threshold_sq = self.threshold * self.threshold;
-        let mut total_buckets: usize = 0;
-        let mut occupied_buckets: usize = 0;
-
-        for stage in bucket_stages {
-            for bucket_idx in 0..stage.len() {
-                total_buckets += 1;
-                if let Some(bucket) = stage.get(bucket_idx) {
-                    if bucket.value.norm_sqr() >= threshold_sq {
-                        occupied_buckets += 1;
-                    }
-                }
-            }
-        }
-
-        if total_buckets == 0 {
-            return self.k;
-        }
-
-        // Use cross-multiplication to avoid integer-division rounding bias.
-        //   occupancy > 50 %  ⟺  2 * occupied > total
-        //   occupancy < 5 %   ⟺  20 * occupied < total
-        let is_crowded = 2 * occupied_buckets > total_buckets;
-        let is_sparse = 20 * occupied_buckets < total_buckets;
-
-        let suggested_k = if is_crowded {
-            // Crowded buckets — raise k by 50 % (at least +1).
-            let increase = (self.k / 2).max(1);
-            self.k.saturating_add(increase)
-        } else if is_sparse {
-            // Sparse buckets — lower k by 25 % (at least -1 but floor at 1).
-            let decrease = (self.k / 4).max(1);
-            self.k.saturating_sub(decrease).max(1)
-        } else {
-            self.k
-        };
-
-        // Clamp to valid range [1, n].
-        suggested_k.max(1).min(self.n)
-    }
-
-    /// Estimate the computational complexity.
-    ///
-    /// Returns estimated number of operations.
+    /// When the fast path is available this reflects the O(k log n)-style cost
+    /// of the aliasing stages; otherwise it reports the dense O(n log n) cost.
     pub fn estimated_ops(&self) -> usize {
-        // Sparse FFT: O(k log n) operations
-        // More precisely: O(B log B * num_stages + k * num_stages)
-        let b = self.num_buckets;
-        let log_b = libm::ceil(libm::log2(b as f64)) as usize;
+        let log_n = libm::ceil(libm::log2(self.n.max(2) as f64)) as usize;
 
-        // Bucket FFTs
-        let bucket_fft_ops = self.num_stages * b * log_b;
+        if self.stage_bucket_sizes.is_empty() {
+            // Dense path only.
+            return self.n.saturating_mul(log_n.max(1));
+        }
 
-        // Subsampling
-        let subsample_ops = self.n;
+        // Bucket FFTs (two offset measurements per stage).
+        let mut bucket_fft_ops = 0usize;
+        for &b in &self.stage_bucket_sizes {
+            let log_b = libm::ceil(libm::log2(b.max(2) as f64)) as usize;
+            bucket_fft_ops += 2 * b * log_b.max(1);
+        }
 
-        // Decoding
-        let decode_ops = self.k * self.num_stages;
+        // Downsampling reads plus peeling.
+        let sample_ops: usize = self.stage_bucket_sizes.iter().map(|&b| 2 * b).sum();
+        let decode_ops = self.k.saturating_mul(self.stage_bucket_sizes.len());
 
-        bucket_fft_ops + subsample_ops + decode_ops
+        bucket_fft_ops + sample_ops + decode_ops
     }
 }
 
@@ -363,146 +308,94 @@ mod tests {
         let plan = plan.expect("plan creation should succeed for valid params");
         assert_eq!(plan.n(), 1024);
         assert_eq!(plan.k(), 10);
-        assert!(plan.num_stages() >= 2);
+        assert!(plan.num_stages() >= 1);
     }
 
     #[test]
     fn test_sparse_plan_invalid() {
-        // Zero length
         assert!(SparsePlan::<f64>::new(0, 10, Flags::ESTIMATE).is_none());
-
-        // Zero sparsity
         assert!(SparsePlan::<f64>::new(1024, 0, Flags::ESTIMATE).is_none());
-
-        // k > n
         assert!(SparsePlan::<f64>::new(10, 100, Flags::ESTIMATE).is_none());
     }
 
+    /// Plan-based execution must recover a planted single tone exactly.
     #[test]
-    fn test_sparse_plan_execute() {
+    fn test_sparse_plan_execute_single_tone() {
         let n = 256;
-        let k = 5;
-
+        let freq = 37;
         let plan =
-            SparsePlan::<f64>::new(n, k, Flags::ESTIMATE).expect("plan creation should succeed");
+            SparsePlan::<f64>::new(n, 4, Flags::ESTIMATE).expect("plan creation should succeed");
 
-        // Create a simple sparse signal
-        let mut input = vec![Complex::new(0.0_f64, 0.0); n];
-
-        // Add a few frequency components
         let two_pi = core::f64::consts::PI * 2.0;
-        for i in 0..n {
-            let t = i as f64 / n as f64;
-            // Frequency at bin 10
-            input[i].re += (two_pi * 10.0 * t).cos();
-            input[i].im += (two_pi * 10.0 * t).sin();
-        }
+        let input: Vec<Complex<f64>> = (0..n)
+            .map(|t| {
+                let angle = two_pi * (freq as f64) * (t as f64) / (n as f64);
+                Complex::new(angle.cos(), angle.sin())
+            })
+            .collect();
 
         let result = plan.execute(&input);
-        assert!(!result.is_empty());
+        assert_eq!(result.indices.len(), 1, "exactly one tone");
+        assert_eq!(result.indices[0], freq);
+        // X[freq] = n for a unit-amplitude exponential.
+        assert!((result.values[0].re - n as f64).abs() < 1e-6);
+        assert!(result.values[0].im.abs() < 1e-6);
     }
 
     #[test]
     fn test_estimated_ops() {
         let plan = SparsePlan::<f64>::new(1024, 10, Flags::ESTIMATE)
             .expect("plan creation should succeed");
-
         let ops = plan.estimated_ops();
-        // Should be much less than O(n log n) = 10240
-        assert!(ops < 5000);
+        // Fast path must be far cheaper than dense O(n log n) = 10240.
+        assert!(ops < 5000, "estimated_ops = {ops}");
     }
 
     #[test]
     fn test_threshold() {
         let mut plan =
             SparsePlan::<f64>::new(256, 5, Flags::ESTIMATE).expect("plan creation should succeed");
-
         plan.set_threshold(0.001);
         assert_eq!(plan.threshold(), 0.001);
     }
 
-    /// suggest_k with empty stages returns the current k unchanged.
     #[test]
-    fn test_suggest_k_no_stages() {
-        let plan =
-            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
-        let stages: Vec<BucketArray<f64>> = Vec::new();
-        assert_eq!(plan.suggest_k(&stages), 8);
+    fn test_select_stage_sizes_power_of_two() {
+        // n = 1024, target = 30 -> smallest divisors >= 30 and <= 512.
+        let sizes = select_stage_sizes(1024, 30);
+        assert_eq!(sizes, vec![32, 64, 128]);
+        for &b in &sizes {
+            assert_eq!(1024 % b, 0);
+            assert!(b <= 512);
+        }
     }
 
-    /// suggest_k should increase k when more than 50 % of buckets are occupied.
     #[test]
-    fn test_suggest_k_crowded_buckets() {
-        let plan =
-            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
-        let threshold = plan.threshold();
-        let num_buckets = 16;
-        let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
-
-        // Fill 14 out of 16 buckets (87.5 % > 50 % threshold).
-        for i in 0..14 {
-            if let Some(b) = stage.get_mut(i) {
-                // Ensure energy well above threshold².
-                b.value = Complex::new(threshold * 100.0, 0.0);
-            }
-        }
-        let stages = vec![stage];
-
-        let suggested = plan.suggest_k(&stages);
-        assert!(
-            suggested > 8,
-            "Crowded buckets should increase k beyond {}: got {}",
-            8,
-            suggested
-        );
+    fn test_select_stage_sizes_prime_is_empty() {
+        // A prime n has no divisor in [target, n/2].
+        let sizes = select_stage_sizes(257, 16);
+        assert!(sizes.is_empty());
     }
 
-    /// suggest_k should decrease k when fewer than 5 % of buckets are occupied.
+    /// When no fast stage exists the plan still returns correct dense results.
     #[test]
-    fn test_suggest_k_sparse_buckets() {
+    fn test_prime_length_falls_back_to_dense() {
+        let n = 257; // prime
+        let freq = 40;
         let plan =
-            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
-        let threshold = plan.threshold();
-        let num_buckets = 32;
-        let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
+            SparsePlan::<f64>::new(n, 3, Flags::ESTIMATE).expect("plan creation should succeed");
+        assert_eq!(plan.num_stages(), 0, "prime length has no fast stage");
 
-        // Fill exactly 1 out of 32 buckets (3.1 % < 5 % threshold).
-        if let Some(b) = stage.get_mut(0) {
-            b.value = Complex::new(threshold * 100.0, 0.0);
-        }
-        let stages = vec![stage];
+        let two_pi = core::f64::consts::PI * 2.0;
+        let input: Vec<Complex<f64>> = (0..n)
+            .map(|t| {
+                let angle = two_pi * (freq as f64) * (t as f64) / (n as f64);
+                Complex::new(angle.cos(), angle.sin())
+            })
+            .collect();
 
-        let suggested = plan.suggest_k(&stages);
-        assert!(
-            suggested < 8,
-            "Sparse buckets should decrease k below {}: got {}",
-            8,
-            suggested
-        );
-    }
-
-    /// suggest_k should leave k unchanged when occupancy is in the 5-50 % range.
-    #[test]
-    fn test_suggest_k_normal_occupancy() {
-        let plan =
-            SparsePlan::<f64>::new(256, 8, Flags::ESTIMATE).expect("plan creation should succeed");
-        let threshold = plan.threshold();
-        let num_buckets = 20;
-        let mut stage: BucketArray<f64> = BucketArray::new(num_buckets, 1, 256);
-
-        // Fill 4 out of 20 buckets (20 % — well within [5%, 50%]).
-        for i in 0..4 {
-            if let Some(b) = stage.get_mut(i) {
-                b.value = Complex::new(threshold * 100.0, 0.0);
-            }
-        }
-        let stages = vec![stage];
-
-        let suggested = plan.suggest_k(&stages);
-        assert_eq!(
-            suggested, 8,
-            "Normal occupancy should leave k unchanged at {}: got {}",
-            8, suggested
-        );
+        let result = plan.execute(&input);
+        // Dense top-k still recovers the dominant bin.
+        assert!(result.indices.contains(&freq));
     }
 }

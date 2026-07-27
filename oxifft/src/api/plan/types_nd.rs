@@ -204,6 +204,8 @@ impl<T: Float> PlanND<T> {
 pub struct RealPlanND<T: Float> {
     dims: Vec<usize>,
     kind: RealPlanKind,
+    /// Planning flags, forwarded to the internal real sub-transforms.
+    flags: Flags,
     _marker: core::marker::PhantomData<T>,
 }
 impl<T: Float> RealPlanND<T> {
@@ -225,25 +227,27 @@ impl<T: Float> RealPlanND<T> {
     /// assert!((output[0].re - 8.0_f64).abs() < 1e-9);
     /// ```
     #[must_use]
-    pub fn r2c(dims: &[usize], _flags: Flags) -> Option<Self> {
+    pub fn r2c(dims: &[usize], flags: Flags) -> Option<Self> {
         if dims.is_empty() || dims.contains(&0) {
             return None;
         }
         Some(Self {
             dims: dims.to_vec(),
             kind: RealPlanKind::R2C,
+            flags,
             _marker: core::marker::PhantomData,
         })
     }
     /// Create an N-dimensional C2R plan.
     #[must_use]
-    pub fn c2r(dims: &[usize], _flags: Flags) -> Option<Self> {
+    pub fn c2r(dims: &[usize], flags: Flags) -> Option<Self> {
         if dims.is_empty() || dims.contains(&0) {
             return None;
         }
         Some(Self {
             dims: dims.to_vec(),
             kind: RealPlanKind::C2R,
+            flags,
             _marker: core::marker::PhantomData,
         })
     }
@@ -263,17 +267,17 @@ impl<T: Float> RealPlanND<T> {
         match self.dims.len() {
             1 => {
                 use crate::rdft::solvers::R2cSolver;
-                let solver = R2cSolver::new(last);
+                let solver = R2cSolver::new_with_flags(last, self.flags);
                 solver.execute(input, output);
             }
             2 => {
-                let plan = RealPlan2D::<T>::r2c(self.dims[0], self.dims[1], Flags::ESTIMATE)
+                let plan = RealPlan2D::<T>::r2c(self.dims[0], self.dims[1], self.flags)
                     .expect("Failed to create internal 2D R2C plan");
                 plan.execute_r2c(input, output);
             }
             3 => {
                 let plan =
-                    RealPlan3D::<T>::r2c(self.dims[0], self.dims[1], self.dims[2], Flags::ESTIMATE)
+                    RealPlan3D::<T>::r2c(self.dims[0], self.dims[1], self.dims[2], self.flags)
                         .expect("Failed to create internal 3D R2C plan");
                 plan.execute_r2c(input, output);
             }
@@ -281,7 +285,7 @@ impl<T: Float> RealPlanND<T> {
                 let out_last = last / 2 + 1;
                 let inner_size = last;
                 use crate::rdft::solvers::R2cSolver;
-                let r2c_solver = R2cSolver::new(last);
+                let r2c_solver = R2cSolver::new_with_flags(last, self.flags);
                 let mut temp = vec![Complex::zero(); prefix * out_last];
                 for row in 0..prefix {
                     let in_start = row * inner_size;
@@ -294,13 +298,27 @@ impl<T: Float> RealPlanND<T> {
                 use crate::dft::solvers::GenericSolver;
                 let remaining_dims = &self.dims[..self.dims.len() - 1];
                 for (dim_idx, &dim_size) in remaining_dims.iter().enumerate().rev() {
-                    let solver = GenericSolver::new(dim_size);
+                    // Flag-aware inter-dimension FFT: honour the plan's flags via
+                    // `Plan::dft_1d`, falling back to the always-applicable
+                    // `GenericSolver`. Same unnormalized sign convention either way.
+                    let plan = Plan::<T>::dft_1d(dim_size, Direction::Forward, self.flags);
+                    let fallback = if plan.is_none() {
+                        Some(GenericSolver::<T>::new(dim_size))
+                    } else {
+                        None
+                    };
                     let mut col_in = vec![Complex::zero(); dim_size];
                     let mut col_out = vec![Complex::zero(); dim_size];
+                    // In `temp` the last (real) axis has length `out_last`, while
+                    // every other trailing axis keeps its full size. Replace only
+                    // the actual last dimension with `out_last` — using `last`
+                    // there over-counts the stride and indexes out of bounds for
+                    // rank >= 4 (e.g. dims = [2, 2, 2, 4]).
                     let inner_stride: usize = self.dims[dim_idx + 1..]
                         .iter()
-                        .map(|&d| {
-                            if dim_idx == self.dims.len() - 2 {
+                        .enumerate()
+                        .map(|(pos, &d)| {
+                            if dim_idx + 1 + pos == self.dims.len() - 1 {
                                 out_last
                             } else {
                                 d
@@ -316,7 +334,11 @@ impl<T: Float> RealPlanND<T> {
                                     outer * (dim_size * inner_stride) + k * inner_stride + inner;
                                 col_in[k] = temp[idx];
                             }
-                            solver.execute(&col_in, &mut col_out, Sign::Forward);
+                            if let Some(ref p) = plan {
+                                p.execute(&col_in, &mut col_out);
+                            } else if let Some(ref g) = fallback {
+                                g.execute(&col_in, &mut col_out, Sign::Forward);
+                            }
                             for k in 0..dim_size {
                                 let idx =
                                     outer * (dim_size * inner_stride) + k * inner_stride + inner;
@@ -329,8 +351,34 @@ impl<T: Float> RealPlanND<T> {
             }
         }
     }
-    /// Execute C2R transform.
+    /// Execute the N-dimensional C2R transform **with** normalization.
+    ///
+    /// The output is divided by `product(dims)`, so an N-D `r2c` -> `c2r` round
+    /// trip is the identity. See [`RealPlan::execute_c2r`](super::types_real::RealPlan::execute_c2r) for the crate-wide
+    /// normalization convention (it deliberately differs from FFTW). Use
+    /// [`execute_c2r_unnormalized`](Self::execute_c2r_unnormalized) for the raw,
+    /// FFTW-style result.
     pub fn execute_c2r(&self, input: &[Complex<T>], output: &mut [T]) {
+        self.c2r_into_raw(input, output);
+        let total: usize = self.dims.iter().product();
+        let scale = T::one() / T::from_usize(total);
+        for x in output.iter_mut() {
+            *x = *x * scale;
+        }
+    }
+    /// Execute the N-dimensional C2R transform **without** normalization
+    /// (FFTW convention).
+    ///
+    /// The result is scaled by `product(dims)` relative to
+    /// [`execute_c2r`](Self::execute_c2r).
+    pub fn execute_c2r_unnormalized(&self, input: &[Complex<T>], output: &mut [T]) {
+        self.c2r_into_raw(input, output);
+    }
+    /// Raw (unnormalized) N-D C2R pipeline shared by the normalized and
+    /// unnormalized entry points. Lower ranks delegate to the corresponding
+    /// [`RealPlan2D`]/[`RealPlan3D`] raw pipeline so normalization is applied
+    /// exactly once, by the public [`execute_c2r`](Self::execute_c2r).
+    fn c2r_into_raw(&self, input: &[Complex<T>], output: &mut [T]) {
         assert_eq!(self.kind, RealPlanKind::C2R);
         let expected_out: usize = self.dims.iter().product();
         let last = *self
@@ -345,19 +393,19 @@ impl<T: Float> RealPlanND<T> {
         match self.dims.len() {
             1 => {
                 use crate::rdft::solvers::C2rSolver;
-                let solver = C2rSolver::new(last);
+                let solver = C2rSolver::new_with_flags(last, self.flags);
                 solver.execute(input, output);
             }
             2 => {
-                let plan = RealPlan2D::<T>::c2r(self.dims[0], self.dims[1], Flags::ESTIMATE)
+                let plan = RealPlan2D::<T>::c2r(self.dims[0], self.dims[1], self.flags)
                     .expect("Failed to create internal 2D C2R plan");
-                plan.execute_c2r(input, output);
+                plan.c2r_into_raw(input, output);
             }
             3 => {
                 let plan =
-                    RealPlan3D::<T>::c2r(self.dims[0], self.dims[1], self.dims[2], Flags::ESTIMATE)
+                    RealPlan3D::<T>::c2r(self.dims[0], self.dims[1], self.dims[2], self.flags)
                         .expect("Failed to create internal 3D C2R plan");
-                plan.execute_c2r(input, output);
+                plan.c2r_into_raw(input, output);
             }
             _ => {
                 let out_last = last / 2 + 1;
@@ -365,13 +413,25 @@ impl<T: Float> RealPlanND<T> {
                 use crate::dft::solvers::GenericSolver;
                 let remaining_dims = &self.dims[..self.dims.len() - 1];
                 for (dim_idx, &dim_size) in remaining_dims.iter().enumerate() {
-                    let solver = GenericSolver::new(dim_size);
+                    // Flag-aware inter-dimension inverse FFT (see `execute_r2c`).
+                    let plan = Plan::<T>::dft_1d(dim_size, Direction::Backward, self.flags);
+                    let fallback = if plan.is_none() {
+                        Some(GenericSolver::<T>::new(dim_size))
+                    } else {
+                        None
+                    };
                     let mut col_in = vec![Complex::zero(); dim_size];
                     let mut col_out = vec![Complex::zero(); dim_size];
+                    // In `temp` the last (real) axis has length `out_last`, while
+                    // every other trailing axis keeps its full size. Replace only
+                    // the actual last dimension with `out_last` — using `last`
+                    // there over-counts the stride and indexes out of bounds for
+                    // rank >= 4 (e.g. dims = [2, 2, 2, 4]).
                     let inner_stride: usize = self.dims[dim_idx + 1..]
                         .iter()
-                        .map(|&d| {
-                            if dim_idx == self.dims.len() - 2 {
+                        .enumerate()
+                        .map(|(pos, &d)| {
+                            if dim_idx + 1 + pos == self.dims.len() - 1 {
                                 out_last
                             } else {
                                 d
@@ -387,7 +447,11 @@ impl<T: Float> RealPlanND<T> {
                                     outer * (dim_size * inner_stride) + k * inner_stride + inner;
                                 col_in[k] = temp[idx];
                             }
-                            solver.execute(&col_in, &mut col_out, Sign::Backward);
+                            if let Some(ref p) = plan {
+                                p.execute(&col_in, &mut col_out);
+                            } else if let Some(ref g) = fallback {
+                                g.execute(&col_in, &mut col_out, Sign::Backward);
+                            }
                             for k in 0..dim_size {
                                 let idx =
                                     outer * (dim_size * inner_stride) + k * inner_stride + inner;
@@ -397,7 +461,7 @@ impl<T: Float> RealPlanND<T> {
                     }
                 }
                 use crate::rdft::solvers::C2rSolver;
-                let c2r_solver = C2rSolver::new(last);
+                let c2r_solver = C2rSolver::new_with_flags(last, self.flags);
                 for row in 0..prefix {
                     let in_start = row * out_last;
                     let out_start = row * last;

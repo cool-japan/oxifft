@@ -1,0 +1,33 @@
+[package]
+name = "oxifft-adapter-mpi"
+description = "MPI distributed-FFT adapter for OxiFFT (FFTW-MPI-style slab & pencil decomposition)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/cool-japan/oxifft"
+documentation = "https://docs.rs/oxifft-adapter-mpi"
+readme = "README.md"
+rust-version.workspace = true
+keywords = ["fft", "mpi", "distributed", "fftw", "hpc"]
+categories = ["algorithms", "science", "concurrency"]
+
+[dependencies]
+oxifft.workspace = true
+mpi.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+# `mpi` requires a real MPI implementation (OpenMPI/MPICH headers/libs) plus
+# libclang for `bindgen` at build time, neither of which is available on the
+# docs.rs build container. There is no Cargo-level way to make this crate's
+# single, non-optional `mpi` dependency skip that requirement, so a docs.rs
+# build of this crate is expected to fail; this stanza is kept for parity with
+# the other three published crates and so `--cfg docsrs` doc_cfg badges (if
+# added later) render consistently. Build docs locally instead, on a host with
+# MPI installed: `cargo doc --no-deps -p oxifft-adapter-mpi`.
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]

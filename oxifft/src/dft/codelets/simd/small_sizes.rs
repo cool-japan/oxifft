@@ -18,7 +18,6 @@ pub fn notw_2_simd_f64(x: &mut [Complex<f64>]) {
             unsafe {
                 super::backends::sse2_f64::notw_2_sse2(x);
             }
-            return;
         }
     }
 
@@ -54,7 +53,6 @@ pub fn notw_4_simd_f64(x: &mut [Complex<f64>], sign: i32) {
             unsafe {
                 super::backends::sse2_f64::notw_4_sse2(x, sign);
             }
-            return;
         }
     }
 
@@ -85,7 +83,6 @@ pub fn notw_8_simd_f64(x: &mut [Complex<f64>], sign: i32) {
             unsafe {
                 super::backends::sse2_f64::notw_8_sse2(x, sign);
             }
-            return;
         }
     }
 

@@ -33,7 +33,20 @@ impl LocalPartition {
     ///
     /// Uses block distribution: each process gets n / num_procs elements,
     /// with the first (n % num_procs) processes getting one extra element.
+    ///
+    /// A `num_procs` of 0 is degenerate (no processes own any data); it returns
+    /// an empty partition rather than panicking on a divide-by-zero.
     pub fn new(global_n: usize, num_procs: usize, proc_idx: usize) -> Self {
+        if num_procs == 0 {
+            return Self {
+                local_n: 0,
+                local_start: 0,
+                global_n,
+                num_procs,
+                proc_idx,
+            };
+        }
+
         let base_size = global_n / num_procs;
         let remainder = global_n % num_procs;
 
@@ -159,5 +172,21 @@ mod tests {
         // 2D array: 100 x 64, distributed along first dimension
         let p = LocalPartition::new(100, 4, 0);
         assert_eq!(p.alloc_size(64), 25 * 64);
+    }
+
+    #[test]
+    fn test_local_partition_zero_procs_no_panic() {
+        // Regression: num_procs == 0 must not divide-by-zero panic.
+        let p = LocalPartition::new(10, 0, 0);
+        assert_eq!(p.local_n, 0);
+        assert_eq!(p.local_start, 0);
+        assert!(!p.has_data());
+        assert_eq!(p.global_range(), 0..0);
+    }
+
+    #[test]
+    fn test_distribution_default_is_slab() {
+        assert_eq!(Distribution::default(), Distribution::Slab);
+        assert_ne!(Distribution::Slab, Distribution::Pencil);
     }
 }

@@ -91,8 +91,8 @@
 //!
 //! # Example: Using SIMD Traits
 //!
-//! ```ignore
-//! use oxifft::simd::{SimdVector, SimdComplex};
+//! ```
+//! use oxifft::simd::SimdComplex;
 //!
 //! fn complex_butterfly<V: SimdComplex>(a: V, b: V) -> (V, V) {
 //!     V::butterfly(a, b) // Returns (a+b, a-b)
@@ -127,6 +127,10 @@ mod neon;
 #[cfg(feature = "sve")]
 mod sve;
 
+// Portable SIMD backend built on `core::simd` (nightly-only, opt-in).
+#[cfg(oxifft_portable_simd)]
+mod portable;
+
 #[cfg(all(target_arch = "aarch64", target_os = "linux", feature = "sve"))]
 pub use detect::has_sve_runtime;
 pub use detect::{detect_simd_level, SimdLevel};
@@ -155,3 +159,6 @@ pub use sve::{
     has_sve, sve_f32_lanes, sve_f64_lanes, sve_vector_length_bytes, Sve256F32, Sve256F64,
     SvePredicate,
 };
+
+#[cfg(oxifft_portable_simd)]
+pub use portable::{PortableF32x4, PortableF32x8, PortableF64x2, PortableF64x4};

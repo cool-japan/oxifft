@@ -9,14 +9,15 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::const_fft::{fft_fixed, ifft_fixed};
 //! use oxifft::Complex;
 //!
-//! // All sizes known at compile time
-//! let mut input: [Complex<f64>; 8] = [Complex::new(1.0, 0.0); 8];
+//! // All sizes known at compile time.
+//! let input: [Complex<f64>; 8] = [Complex::new(1.0, 0.0); 8];
 //! let output = fft_fixed(&input);
 //! let recovered = ifft_fixed(&output);
+//! # let _ = recovered;
 //! ```
 
 #[cfg(not(feature = "std"))]

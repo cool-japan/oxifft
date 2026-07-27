@@ -1,7 +1,7 @@
 # oxifft-codegen TODO
 
-**Current Version:** 0.3.0  
-**Last Updated:** 2026-04-14
+**Current Version:** 0.4.0  
+**Last Updated:** 2026-07-27
 
 ## Version Cross-Reference
 
@@ -11,8 +11,8 @@
 | Phase 2: Non-Twiddle Codelets (16/32/64) | v0.2.x–v0.3.0 | ✅ Generation complete (2–64 done, tests pending) |
 | Phase 3: Twiddle Codelets (radix-8/16/split) | v0.2.x–v0.3.0 | ⚙️ Radix 2/4/8/16 done, split-radix & tests pending |
 | Phase 4: Optimization Passes | v0.3.0–v0.4.0 | ✅ Complete (CSE, folding, DCE, strength reduction) |
-| Phase 5: SIMD Code Generation | v0.4.0 | 📋 Infrastructure exists, generation logic pending |
-| Phase 6: RDFT Code Generation | v0.4.0 | 📋 Pending |
+| Phase 5: SIMD Code Generation | v0.4.0 | ✅ Complete (SSE2/AVX/AVX2/AVX-512/NEON, f64+f32) |
+| Phase 6: RDFT Code Generation | v0.4.0 | ✅ Complete (R2HC/HC2R codelets) |
 | Phase 7: Testing & Validation | v0.3.0–v0.6.0 | ⚙️ Mostly complete (correctness + accuracy done, code size pending) |
 | Future Enhancements | Post-1.0 | 💡 Aspirational |
 
@@ -96,7 +96,7 @@
   - **Risk:** Scheduling pass correctness is subtle → unit tests with small graphs validate topological correctness; compiler may already auto-reorder, so measure codegen assembly before/after on a representative size-8 codelet to confirm impact.
 
 ## Phase 5: SIMD Code Generation (target: v0.4.0)
-**Infrastructure:** ✅ `gen_simd_codelet!` macro exists, placeholder implementation
+**Status:** ✅ Complete — all target ISAs (SSE2/AVX/AVX2/AVX-512/NEON) implemented for f64 and f32.
 
 
 - [x] Split `gen_simd.rs` into per-ISA submodules (simd-phase5-refactor) (completed 2026-04-17)
@@ -154,7 +154,7 @@
   - **Risk:** R2HC output layout mismatch — subagent reads hand-written codelets first to derive exact layout.
 - [x] HC2R (Half-Complex to Real) codelets (completed 2026-04-17) → covered by R2HC plan block above (HC2R is the second kind in gen_rdft_codelet!)
 
-**Priority:** High for v0.3.0 release
+**Status:** Complete — delivered by v0.4.0.
 
 - [x] Correctness tests vs reference implementation (DFT comparison for sizes 2-64)
 - [x] Numerical accuracy tests (epsilon tolerance checks)
@@ -206,18 +206,18 @@
 
 ## Developer Notes
 
-**Current State (v0.3.0):**
-- All 4 public proc macros functional
-- Generation logic for sizes 2–64 and radixes 2/4/8/16 + split-radix implemented
-- Full optimization pipeline: CSE, constant folding, strength reduction, dead code elimination
-- 112 tests across codegen + oxifft crates, correctness verified against DFT reference
-- Integration tests via codegen_tests.rs in oxifft main crate
+**Current State (v0.4.0):**
+- All 11 public proc macros functional (see the macro table in `README.md`)
+- Generation logic for sizes 2–64, radixes 2/4/8/16 + split-radix, odd sizes 3/5/7 (Winograd), and primes 11/13 (Rader)
+- SIMD code generation across SSE2, AVX, AVX2+FMA, AVX-512 (feature-gated), and NEON, with a cached runtime dispatcher
+- RDFT (R2HC/HC2R) codelet generation for sizes 2/4/8
+- Full optimization pipeline: CSE, constant folding, strength reduction, dead code elimination, instruction scheduling
+- Span-based `syn::Error` diagnostics on every macro entry point (no panics reach compiler output), covered by trybuild compile-fail tests
+- Performance, compilation-time, and code-size analysis in place (`benches/codegen_time.rs`, `examples/code_size_report.rs`)
+- 83 tests passing in this crate (`cargo nextest run -p oxifft-codegen --all-features`) plus 11 passing doc tests, correctness verified against DFT reference; further integration coverage lives in the oxifft main crate via `codegen_tests.rs`
 
-**Next Milestone (v0.4.0):**
-- SIMD code generation (SSE2, AVX, NEON)
-- RDFT codelet generation
-- Code size analysis and compilation time benchmarks
-- Comprehensive error messages
+**Next Milestone:**
+- No pending items remain in this document — all tracked phases (1–7) and Future Enhancements are checked off as of v0.4.0. See the workspace-root `CHANGELOG.md` for what shipped in 0.4.0 and what's tracked next at the workspace level.
 
 **Build Commands:**
 ```bash

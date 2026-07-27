@@ -14,16 +14,17 @@
 //!
 //! ## Quick Start
 //!
-//! ```ignore
+//! ```
 //! use oxifft::{Complex, Direction, Flags, Plan};
 //!
-//! // Create a plan for 256-point forward FFT
-//! let plan = Plan::dft_1d(256, Direction::Forward, Flags::MEASURE)?;
+//! // Create a plan for a 256-point forward FFT.
+//! let plan = Plan::dft_1d(256, Direction::Forward, Flags::MEASURE)
+//!     .expect("256 is a supported transform size");
 //!
-//! // Execute the transform
-//! let mut input = vec![Complex::new(1.0, 0.0); 256];
+//! // Execute the transform.
+//! let input = vec![Complex::new(1.0, 0.0); 256];
 //! let mut output = vec![Complex::zero(); 256];
-//! plan.execute(&mut input, &mut output);
+//! plan.execute(&input, &mut output);
 //! ```
 
 // Allow pedantic/nursery warnings that are intentional in FFT code:
@@ -105,9 +106,54 @@
 // Compiler-enforced invariant: every fallible public fn must have a `# Errors` section.
 #![warn(clippy::missing_errors_doc)]
 #![cfg_attr(not(feature = "std"), no_std)]
+// The `portable_simd` feature turns on the unstable `core::simd` API, which is
+// only available on nightly Rust. The `oxifft_portable_simd` cfg (emitted by
+// build.rs) is set only when the Cargo feature is enabled AND the toolchain
+// accepts `#![feature]`, so `--all-features` builds on stable never see this
+// attribute — the portable tier degrades to a no-op there instead of failing.
+#![cfg_attr(oxifft_portable_simd, feature(portable_simd))]
+
+// wasm32 targets cannot spawn OS threads on the plain `wasm32-unknown-unknown`
+// ABI, so rayon's global thread pool would panic at first use. Fail fast with a
+// clear message instead of shipping a runtime panic. Disable `threading` (build
+// with `--no-default-features` and re-enable only the features you need) for
+// wasm32 targets, or depend on a threads-enabled wasm toolchain.
+#[cfg(all(feature = "threading", target_arch = "wasm32"))]
+compile_error!(
+    "the `threading` feature (rayon) is not supported on wasm32 targets; \
+     build with --no-default-features to drop it (rayon's OS-thread pool would \
+     panic at runtime on wasm32-unknown-unknown)"
+);
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
+
+/// x86/x86_64 CPU feature detection that works in both `std` and `no_std`.
+///
+/// Under `std` this delegates to the standard library's runtime detector
+/// (`is_x86_feature_detected!`). Under `no_std` — where OS-assisted runtime
+/// probing is unavailable — it falls back to compile-time detection via
+/// `cfg!(target_feature = ...)`, which is `true` only when the crate was built
+/// with that target feature statically enabled (e.g. via `-C target-feature`).
+///
+/// All call sites live inside `#[cfg(target_arch = "x86_64")]` blocks, so the
+/// macro is only ever expanded on x86 targets.
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+macro_rules! detect_x86_feature {
+    ($feature:tt) => {
+        is_x86_feature_detected!($feature)
+    };
+}
+
+#[cfg(all(not(feature = "std"), any(target_arch = "x86", target_arch = "x86_64")))]
+macro_rules! detect_x86_feature {
+    ($feature:tt) => {
+        cfg!(target_feature = $feature)
+    };
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub(crate) use detect_x86_feature;
 
 // Internal prelude for no_std compatibility
 pub(crate) mod prelude;
@@ -124,8 +170,6 @@ pub mod dft;
 #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 pub mod gpu;
 pub mod kernel;
-#[cfg(feature = "mpi")]
-pub mod mpi;
 #[cfg(feature = "pruned")]
 pub mod pruned;
 pub mod rdft;
@@ -161,9 +205,9 @@ pub use api::{
     fft, fft2d, fft2d_split, fft3d_split, fft_batch, fft_nd, fft_nd_split, fft_split, ifft, ifft2d,
     ifft2d_split, ifft3d_split, ifft_batch, ifft_nd, ifft_nd_split, ifft_split, irfft, irfft2d,
     irfft3d, irfft_batch, irfft_nd, rfft, rfft2d, rfft3d, rfft_batch, rfft_nd, Direction, Flags,
-    GuruPlan, InvalidDirection, Plan, Plan2D, Plan3D, PlanND, R2rKind, R2rPlan, RealPlan,
-    RealPlan2D, RealPlan3D, RealPlanKind, RealPlanND, SplitPlan, SplitPlan2D, SplitPlan3D,
-    SplitPlanND,
+    GuruPlan, InvalidDirection, Plan, Plan2D, Plan3D, PlanND, R2rPlan, R2rPlan2D, R2rPlan3D,
+    RealPlan, RealPlan2D, RealPlan3D, RealPlanKind, RealPlanND, SplitPlan, SplitPlan2D,
+    SplitPlan3D, SplitPlanND,
 };
 pub use kernel::{Complex, Float, IoDim, Tensor};
 
@@ -182,7 +226,8 @@ pub use sparse::{sparse_fft, sparse_ifft, SparsePlan, SparseResult};
 // Re-export pruned FFT when pruned feature is enabled
 #[cfg(feature = "pruned")]
 pub use pruned::{
-    fft_pruned_input, fft_pruned_output, goertzel, goertzel_multi, PrunedPlan, PruningMode,
+    fft_pruned_input, fft_pruned_output, fft_pruned_output_butterfly, goertzel, goertzel_multi,
+    PrunedPlan, PruningMode,
 };
 
 // Re-export WASM bindings when wasm feature is enabled
@@ -208,8 +253,8 @@ pub use const_fft::{
 // Re-export GPU FFT when gpu/cuda/metal feature is enabled
 #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 pub use gpu::{
-    best_backend, is_gpu_available, query_capabilities, GpuBackend, GpuBatchFft, GpuBuffer,
-    GpuCapabilities, GpuDirection, GpuError, GpuFft, GpuFftEngine, GpuPlan, GpuResult,
+    best_backend, is_gpu_available, query_capabilities, ExecutionTarget, GpuBackend, GpuBatchFft,
+    GpuBuffer, GpuCapabilities, GpuDirection, GpuError, GpuFft, GpuFftEngine, GpuPlan, GpuResult,
 };
 
 // Re-export low-level DFT functions for advanced users
@@ -221,8 +266,9 @@ pub use dft::solvers::{
     nop::dft_nop,
 };
 
-// Re-export DCT/DST/DHT convenience functions
-pub use rdft::solvers::{dct1, dct2, dct3, dct4, dht, dst1, dst2, dst3, dst4};
+// Re-export DCT/DST/DHT convenience functions and the real-to-real transform
+// kind (FFTW `REDFT`/`RODFT`/`DHT` naming) accepted by every `R2rPlan*`.
+pub use rdft::solvers::{dct1, dct2, dct3, dct4, dht, dst1, dst2, dst3, dst4, R2rKind};
 
 // Re-export memory allocation utilities
 pub use api::{

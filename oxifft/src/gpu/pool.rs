@@ -1,9 +1,18 @@
 //! Thread-safe, LRU-evicting GPU buffer pool.
 //!
-//! Provides `GpuBufferPool`, a bounded pool of GPU buffers keyed by
-//! `(backend_id, rounded_size, buffer_kind)`.  Same-size GPU transforms
-//! reuse pre-allocated device buffers instead of allocating/freeing on
-//! every call.
+//! Provides `GpuBufferPool`, a bounded pool of type-erased buffers keyed by
+//! `(backend_id, rounded_size, buffer_kind)`, so that same-size transforms can
+//! reuse a pre-allocated buffer instead of allocating/freeing on every call.
+//!
+//! # What is pooled today
+//!
+//! oxifft routes each [`crate::gpu::GpuBuffer`]'s CPU **staging** allocation
+//! (`Vec<Complex<T>>`) through the process-global pool (see
+//! [`crate::gpu::global_gpu_pool`]), which is the one allocation oxifft
+//! controls directly.  Device-resident buffers are currently allocated inside
+//! the backend (`oxicuda-metal`) per call and are **not** yet pooled; the pool
+//! is deliberately generic (it stores `Box<dyn Any + Send>`) so those device
+//! allocations can be added later without changing this type.
 //!
 //! # Design
 //!

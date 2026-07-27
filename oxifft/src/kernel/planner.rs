@@ -216,16 +216,17 @@ impl<T: Float> Planner<T> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use std::time::Duration;
+    /// use oxifft::kernel::{Planner, PlannerFlags};
     ///
-    /// let mut planner = Planner::with_flags(PlannerFlags::MEASURE);
+    /// let mut planner = Planner::<f64>::with_flags(PlannerFlags::MEASURE);
     /// let time_budget = Duration::from_millis(100);
     ///
-    /// // Plan multiple sizes within a time budget
+    /// // Plan multiple sizes within a time budget.
     /// let mut remaining = time_budget;
     /// for size in [64, 128, 256, 512, 1024] {
-    ///     let (solver, new_remaining) = planner.select_solver_timed(size, remaining);
+    ///     let (_solver, new_remaining) = planner.select_solver_timed(size, remaining);
     ///     remaining = new_remaining;
     ///     if remaining.is_zero() {
     ///         break; // Time budget exhausted
@@ -766,17 +767,20 @@ impl<T: Float> Planner<T> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// // First run: measure and export
-    /// let mut planner = Planner::with_flags(PlannerFlags::MEASURE);
-    /// planner.select_solver_measured(1024);
-    /// std::fs::write("wisdom.txt", planner.wisdom_export())?;
+    /// ```no_run
+    /// use oxifft::kernel::{Planner, PlannerFlags};
     ///
-    /// // Subsequent runs: import and recreate
-    /// let mut planner = Planner::new();
-    /// planner.wisdom_import(&std::fs::read_to_string("wisdom.txt")?)?;
-    /// if let Some(solver) = planner.recreate_from_wisdom(1024) {
-    ///     // Use the pre-determined optimal solver
+    /// // First run: measure and export.
+    /// let mut planner = Planner::<f64>::with_flags(PlannerFlags::MEASURE);
+    /// planner.select_solver_measured(1024);
+    /// std::fs::write("wisdom.txt", planner.wisdom_export()).expect("write wisdom");
+    ///
+    /// // Subsequent runs: import and recreate.
+    /// let mut planner = Planner::<f64>::new();
+    /// let text = std::fs::read_to_string("wisdom.txt").expect("read wisdom");
+    /// planner.wisdom_import(&text).expect("import wisdom");
+    /// if let Some(_solver) = planner.recreate_from_wisdom(1024) {
+    ///     // Use the pre-determined optimal solver.
     /// }
     /// ```
     #[must_use]
@@ -889,6 +893,25 @@ impl<T: Float> Planner<T> {
 
         Ok(count)
     }
+
+    /// Return the wisdom-format solver names of every candidate the planner
+    /// would consider benchmarking for size `n` under the current flags.
+    ///
+    /// This is the entry point through which the public flag-aware planning
+    /// path (`auto_tune::tune_size`) reuses the planner's candidate model — so
+    /// MEASURE/PATIENT/EXHAUSTIVE modes genuinely compare Rader, split-radix,
+    /// radix-4/8, Stockham, cache-oblivious, mixed-radix, … instead of timing a
+    /// single heuristic pick. The names are the same strings understood by the
+    /// public [`crate::api::Plan`] reconstruction path, so any winner can be
+    /// rebuilt from wisdom.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn candidate_solver_names(&self, n: usize) -> Vec<String> {
+        self.get_solver_candidates(n)
+            .iter()
+            .map(SolverChoice::wisdom_name)
+            .collect()
+    }
 }
 
 /// Simple hash for problem size.
@@ -915,7 +938,7 @@ fn try_factor_mixed_radix_heuristic(n: usize) -> Option<Vec<u16>> {
 
     'outer: while remaining > 1 {
         for &r in MIXED_RADIX_SUPPORTED {
-            if remaining % r as usize == 0 {
+            if remaining.is_multiple_of(r as usize) {
                 factors.push(r);
                 remaining /= r as usize;
                 continue 'outer;

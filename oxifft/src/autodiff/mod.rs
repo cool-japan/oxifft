@@ -11,6 +11,25 @@
 //! - Forward FFT derivative: FFT of the input tangent
 //! - Backward FFT gradient: IFFT of the output gradient (scaled)
 //!
+//! # Gradient conventions
+//!
+//! All `grad_*` / `backward*` functions compute the reverse-mode adjoint
+//! (vector-Jacobian product) of the corresponding transform, for a **real
+//! scalar** loss `L`. Cotangents use the PyTorch/autograd layout: the cotangent
+//! of a complex value `z = a + i·b` is `∂L/∂a + i·∂L/∂b`, and the cotangent of a
+//! real value `r` is `∂L/∂r`.
+//!
+//! Transform conventions (matching the crate's public API):
+//! - Forward DFT is unnormalised: `y[k] = Σ_n x[n]·exp(-2πi·kn/N)`; its adjoint
+//!   is the unnormalised inverse DFT (`Direction::Backward`, no `1/N`).
+//! - Inverse DFT is normalised: `y[n] = (1/N)·Σ_k x[k]·exp(+2πi·kn/N)`; its
+//!   adjoint is `(1/N)·`forward DFT.
+//! - Real transforms (`rfft`/`irfft`) additionally account for the discarded
+//!   conjugate-symmetric half: see [`real::grad_rfft`] and [`real::grad_irfft`].
+//!
+//! Every public gradient function in this module is validated against central
+//! finite differences (see the module tests).
+//!
 //! # Applications
 //!
 //! - Machine learning with spectral features
@@ -20,16 +39,19 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::autodiff::{DualComplex, fft_dual, grad_fft};
+//! use oxifft::Complex;
 //!
-//! // Forward mode: compute FFT and its directional derivative
+//! // Forward mode: compute FFT and its directional derivative.
 //! let x = vec![DualComplex::new(1.0, 0.0, 1.0, 0.0); 8];
-//! let (y, dy) = fft_dual(&x);
+//! let (y, dy) = fft_dual(&x).expect("size 8 is supported");
+//! # let _ = (y, dy);
 //!
-//! // Backward mode: compute gradient of loss w.r.t. FFT input
+//! // Backward mode: compute gradient of loss w.r.t. FFT input.
 //! let grad_output = vec![Complex::new(1.0, 0.0); 8];
-//! let grad_input = grad_fft(&grad_output);
+//! let grad_input = grad_fft(&grad_output).expect("size 8 is supported");
+//! # let _ = grad_input;
 //! ```
 
 #[cfg(not(feature = "std"))]
@@ -219,8 +241,35 @@ impl<T: Float> DiffFftPlan<T> {
     /// assert!((output[0].re - 28.0_f64).abs() < 1e-9);
     /// ```
     pub fn new(size: usize) -> Option<Self> {
-        let fwd_plan = Plan::dft_1d(size, Direction::Forward, Flags::MEASURE)?;
-        let inv_plan = Plan::dft_1d(size, Direction::Backward, Flags::MEASURE)?;
+        // Default to `ESTIMATE`: `DiffFftPlan` is the API most likely to be
+        // (re)constructed inside a training loop, once per step. `MEASURE`
+        // planning costs ~100µs-13ms per construction with no runtime benefit
+        // for the short-lived plans typical of autodiff use. Callers that keep
+        // a plan alive across many transforms and want the tuned schedule can
+        // opt in via [`DiffFftPlan::with_flags`].
+        Self::with_flags(size, Flags::ESTIMATE)
+    }
+
+    /// Create a new differentiable FFT plan with explicit planner flags.
+    ///
+    /// Use this when the plan is long-lived and the one-time `MEASURE`/`PATIENT`
+    /// planning cost is amortised over many transforms. For short-lived plans
+    /// (the common autodiff case) prefer [`DiffFftPlan::new`], which uses
+    /// [`Flags::ESTIMATE`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use oxifft::autodiff::DiffFftPlan;
+    /// use oxifft::Flags;
+    ///
+    /// let plan = DiffFftPlan::<f64>::with_flags(8, Flags::ESTIMATE)
+    ///     .expect("plan creation failed");
+    /// assert_eq!(plan.size(), 8);
+    /// ```
+    pub fn with_flags(size: usize, flags: Flags) -> Option<Self> {
+        let fwd_plan = Plan::dft_1d(size, Direction::Forward, flags)?;
+        let inv_plan = Plan::dft_1d(size, Direction::Backward, flags)?;
 
         Some(Self {
             fwd_plan,
@@ -380,60 +429,113 @@ pub fn fft_jacobian<T: Float>(n: usize) -> Vec<Vec<Complex<T>>> {
 }
 
 /// Differentiable real FFT functions.
+///
+/// # Conventions
+///
+/// These functions are the reverse-mode adjoints (vector-Jacobian products) of
+/// the crate's [`rfft`](crate::rfft) / [`irfft`](crate::irfft) transforms, for a
+/// **real scalar** loss `L`.
+///
+/// Cotangents use the PyTorch/autograd layout: the cotangent of a complex value
+/// `z = a + i·b` is `∂L/∂a + i·∂L/∂b`, and the cotangent of a real value `r` is
+/// `∂L/∂r`.
+///
+/// * `rfft`: `R^N → C^(N/2+1)`, `Y[k] = Σ_n x[n]·exp(-2πi·kn/N)` for `k = 0..=N/2`.
+/// * `irfft`: `C^(N/2+1) → R^N`, the normalised (÷N) Hermitian-completion inverse.
+///   Because the inverse assumes conjugate symmetry, the imaginary parts of the
+///   DC bin (and the Nyquist bin when `N` is even) are ignored.
 pub mod real {
     use super::*;
 
-    /// Compute gradient of a scalar loss with respect to real FFT input.
+    /// Gradient of a real scalar loss with respect to the input of a real FFT.
     ///
-    /// Real FFT: R^N → C^(N/2+1)
-    /// The gradient computation accounts for the conjugate symmetry.
+    /// Given the cotangent `grad_output` of the `N/2+1` half-spectrum bins of
+    /// `Y = rfft(x)` (layout: `∂L/∂Re + i·∂L/∂Im` per bin), returns the real
+    /// cotangent `∂L/∂x` (length `n`).
+    ///
+    /// Each returned rfft bin is an **independent** output of the forward
+    /// transform, so its contribution is counted exactly once — there is no
+    /// conjugate-symmetric completion and no `1/N` factor here. Concretely,
+    /// `x̄[m] = Re( Σ_{k=0}^{N/2} grad_output[k]·exp(+2πi·km/N) )`, which is the
+    /// real part of the *unnormalised* inverse DFT of the zero-padded cotangent
+    /// spectrum.
+    ///
+    /// Returns `None` if `grad_output.len() != n/2 + 1` or the plan cannot be
+    /// built.
     pub fn grad_rfft<T: Float>(grad_output: &[Complex<T>], n: usize) -> Option<Vec<T>> {
-        let fft_plan = Plan::<T>::dft_1d(n, Direction::Backward, Flags::ESTIMATE)?;
+        if grad_output.len() != n / 2 + 1 {
+            return None;
+        }
+        let ifft_plan = Plan::<T>::dft_1d(n, Direction::Backward, Flags::ESTIMATE)?;
 
-        // Reconstruct full spectrum from half (conjugate symmetry)
-        let mut full_grad = vec![Complex::<T>::zero(); n];
-        for (i, &g) in grad_output.iter().enumerate() {
-            full_grad[i] = g;
+        // Place the cotangent bins into a full-length spectrum, leaving the
+        // redundant (conjugate) half as zeros. The forward rfft returns only the
+        // first N/2+1 bins, so their adjoint must NOT re-add a mirrored copy.
+        let mut spectrum = vec![Complex::<T>::zero(); n];
+        for (dst, &g) in spectrum.iter_mut().zip(grad_output.iter()) {
+            *dst = g;
         }
 
-        // Fill in conjugate symmetric part
-        for i in 1..n / 2 {
-            full_grad[n - i] = grad_output[i].conj();
-        }
-
-        // IFFT
+        // Unnormalised inverse DFT (Direction::Backward, no 1/N scaling).
         let mut result = vec![Complex::<T>::zero(); n];
-        fft_plan.execute(&full_grad, &mut result);
+        ifft_plan.execute(&spectrum, &mut result);
 
-        // Scale and extract real part
-        let scale = T::ONE / T::from_usize(n);
-        Some(result.iter().map(|c| c.re * scale).collect())
+        // x is real, so its cotangent is the real part.
+        Some(result.iter().map(|c| c.re).collect())
     }
 
-    /// Compute gradient of a scalar loss with respect to inverse real FFT input.
+    /// Gradient of a real scalar loss with respect to the input of an inverse
+    /// real FFT.
+    ///
+    /// Given the real cotangent `grad_output = ∂L/∂x` of the length-`n_output`
+    /// output `x = irfft(X)`, returns the complex cotangent `∂L/∂X` of the
+    /// `n_output/2 + 1` half-spectrum input bins (layout `∂L/∂Re + i·∂L/∂Im`).
+    ///
+    /// Because `irfft` conjugate-mirrors the interior bins (each interior input
+    /// bin feeds both itself and its mirror), the adjoint of an interior bin
+    /// carries a factor of two. The DC bin — and the Nyquist bin when
+    /// `n_output` is even — are self-conjugate single real degrees of freedom:
+    /// they carry no factor of two and their imaginary cotangent is exactly zero
+    /// (the forward transform ignores it). Everything is scaled by `1/n_output`
+    /// to match the normalised inverse.
+    ///
+    /// Returns `None` if `grad_output.len() != n_output` or the plan cannot be
+    /// built.
     pub fn grad_irfft<T: Float>(grad_output: &[T], n_output: usize) -> Option<Vec<Complex<T>>> {
+        if grad_output.len() != n_output {
+            return None;
+        }
         let fft_plan = Plan::<T>::dft_1d(n_output, Direction::Forward, Flags::ESTIMATE)?;
 
-        // Convert real gradient to complex
+        // Unnormalised forward DFT of the real output-cotangent.
         let complex_grad: Vec<Complex<T>> = grad_output
             .iter()
             .map(|&r| Complex::new(r, T::ZERO))
             .collect();
+        let mut spectrum = vec![Complex::<T>::zero(); n_output];
+        fft_plan.execute(&complex_grad, &mut spectrum);
 
-        // FFT
-        let mut result = vec![Complex::<T>::zero(); n_output];
-        fft_plan.execute(&complex_grad, &mut result);
-
-        // Take first N/2+1 elements (due to conjugate symmetry of real input)
         let n_freq = n_output / 2 + 1;
         let scale = T::ONE / T::from_usize(n_output);
-        Some(
-            result
-                .into_iter()
-                .take(n_freq)
-                .map(|c| Complex::new(c.re * scale, c.im * scale))
-                .collect(),
-        )
+        let two = T::from_usize(2);
+
+        let grad_input = spectrum
+            .iter()
+            .take(n_freq)
+            .enumerate()
+            .map(|(k, c)| {
+                // Self-conjugate bins (DC, and Nyquist for even n_output) map to
+                // a single real degree of freedom in the forward transform.
+                if k == 0 || 2 * k == n_output {
+                    Complex::new(c.re * scale, T::ZERO)
+                } else {
+                    // Interior bins are conjugate-mirror-doubled by irfft.
+                    Complex::new(c.re * scale * two, c.im * scale * two)
+                }
+            })
+            .collect();
+
+        Some(grad_input)
     }
 }
 
@@ -642,5 +744,388 @@ mod tests {
             approx_eq(inner1.re, inner2.re, 1e-8),
             "VJP/JVP consistency failed"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Finite-difference validation of every public gradient function.
+    //
+    // Each transform is linear and every scalar loss below is linear in the
+    // transform output, so the loss is exactly linear in the (real) input
+    // components. A central finite difference of an exactly-linear function is
+    // therefore analytically exact; only floating-point round-off separates it
+    // from the analytic adjoint. This makes the checks a sharp regression gate:
+    // the historic missing/extra factor-of-two bugs are 100% errors and cannot
+    // hide under any reasonable tolerance.
+    // ---------------------------------------------------------------------
+
+    /// Small deterministic xorshift PRNG (keeps tests dependency-free).
+    struct Lcg {
+        state: u64,
+    }
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self {
+                state: seed | 1, // avoid the all-zero fixed point
+            }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.state = x;
+            x
+        }
+
+        /// Uniform sample in `[-1, 1)`.
+        fn sample<T: Float>(&mut self) -> T {
+            let u = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
+            T::from_f64(u * 2.0 - 1.0)
+        }
+    }
+
+    fn assert_close<T: Float>(got: T, want: T, tol: T, msg: &str) {
+        let diff = Float::abs(got - want);
+        let bound = tol * (T::ONE + Float::abs(want));
+        assert!(
+            diff <= bound,
+            "{msg}: got {got:?} want {want:?} (diff {diff:?} > bound {bound:?})"
+        );
+    }
+
+    // ---- Reference (naive O(n^2)) transforms, independent of the library ----
+
+    fn ref_fft<T: Float>(x: &[Complex<T>]) -> Vec<Complex<T>> {
+        let n = x.len();
+        let n_t = T::from_usize(n);
+        (0..n)
+            .map(|k| {
+                let mut acc = Complex::<T>::zero();
+                for (m, &xm) in x.iter().enumerate() {
+                    let ang = -T::TWO_PI * T::from_usize(k) * T::from_usize(m) / n_t;
+                    let (s, c) = Float::sin_cos(ang);
+                    acc = acc + xm * Complex::new(c, s);
+                }
+                acc
+            })
+            .collect()
+    }
+
+    fn ref_ifft<T: Float>(x: &[Complex<T>]) -> Vec<Complex<T>> {
+        let n = x.len();
+        let n_t = T::from_usize(n);
+        let scale = T::ONE / n_t;
+        (0..n)
+            .map(|m| {
+                let mut acc = Complex::<T>::zero();
+                for (k, &xk) in x.iter().enumerate() {
+                    let ang = T::TWO_PI * T::from_usize(k) * T::from_usize(m) / n_t;
+                    let (s, c) = Float::sin_cos(ang);
+                    acc = acc + xk * Complex::new(c, s);
+                }
+                Complex::new(acc.re * scale, acc.im * scale)
+            })
+            .collect()
+    }
+
+    fn ref_rfft<T: Float>(x: &[T]) -> Vec<Complex<T>> {
+        let n = x.len();
+        let n_t = T::from_usize(n);
+        (0..=n / 2)
+            .map(|k| {
+                let mut acc = Complex::<T>::zero();
+                for (m, &xm) in x.iter().enumerate() {
+                    let ang = -T::TWO_PI * T::from_usize(k) * T::from_usize(m) / n_t;
+                    let (s, c) = Float::sin_cos(ang);
+                    acc = acc + Complex::new(xm * c, xm * s);
+                }
+                acc
+            })
+            .collect()
+    }
+
+    fn ref_irfft<T: Float>(x_half: &[Complex<T>], n: usize) -> Vec<T> {
+        let n_freq = n / 2 + 1;
+        let mut full = vec![Complex::<T>::zero(); n];
+        for (dst, &src) in full.iter_mut().zip(x_half.iter()) {
+            *dst = src;
+        }
+        // irfft treats the self-conjugate bins as purely real.
+        full[0] = Complex::new(x_half[0].re, T::ZERO);
+        if n.is_multiple_of(2) {
+            full[n / 2] = Complex::new(x_half[n / 2].re, T::ZERO);
+        }
+        // Conjugate-mirror the interior bins.
+        for k in 1..n_freq {
+            if 2 * k != n {
+                full[n - k] = full[k].conj();
+            }
+        }
+        let n_t = T::from_usize(n);
+        let scale = T::ONE / n_t;
+        (0..n)
+            .map(|m| {
+                let mut acc = Complex::<T>::zero();
+                for (k, &fk) in full.iter().enumerate() {
+                    let ang = T::TWO_PI * T::from_usize(k) * T::from_usize(m) / n_t;
+                    let (s, c) = Float::sin_cos(ang);
+                    acc = acc + fk * Complex::new(c, s);
+                }
+                acc.re * scale
+            })
+            .collect()
+    }
+
+    fn ref_fft2d<T: Float>(x: &[Complex<T>], rows: usize, cols: usize) -> Vec<Complex<T>> {
+        let rows_t = T::from_usize(rows);
+        let cols_t = T::from_usize(cols);
+        let mut out = vec![Complex::<T>::zero(); rows * cols];
+        for p in 0..rows {
+            for q in 0..cols {
+                let mut acc = Complex::<T>::zero();
+                for a in 0..rows {
+                    for b in 0..cols {
+                        let ang = -T::TWO_PI
+                            * (T::from_usize(p) * T::from_usize(a) / rows_t
+                                + T::from_usize(q) * T::from_usize(b) / cols_t);
+                        let (s, c) = Float::sin_cos(ang);
+                        acc = acc + x[a * cols + b] * Complex::new(c, s);
+                    }
+                }
+                out[p * cols + q] = acc;
+            }
+        }
+        out
+    }
+
+    // ---- Generic finite-difference drivers ----
+
+    /// Validate a complex-input / complex-output VJP against finite differences.
+    fn check_complex_vjp<T, F, G>(sizes: &[usize], tol: T, h: T, forward: F, grad: G)
+    where
+        T: Float,
+        F: Fn(&[Complex<T>]) -> Vec<Complex<T>>,
+        G: Fn(&[Complex<T>]) -> Vec<Complex<T>>,
+    {
+        for &n in sizes {
+            let mut rng = Lcg::new(0x51ED_2701 ^ (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let x: Vec<Complex<T>> = (0..n)
+                .map(|_| Complex::new(rng.sample::<T>(), rng.sample::<T>()))
+                .collect();
+            let m = forward(&x).len();
+            let cr: Vec<T> = (0..m).map(|_| rng.sample::<T>()).collect();
+            let ci: Vec<T> = (0..m).map(|_| rng.sample::<T>()).collect();
+            let cot: Vec<Complex<T>> = (0..m).map(|k| Complex::new(cr[k], ci[k])).collect();
+
+            let analytic = grad(&cot);
+            assert_eq!(analytic.len(), n, "n={n}: gradient length mismatch");
+
+            let loss = |xx: &[Complex<T>]| -> T {
+                let yy = forward(xx);
+                let mut s = T::ZERO;
+                for (k, y) in yy.iter().enumerate() {
+                    s = s + cr[k] * y.re + ci[k] * y.im;
+                }
+                s
+            };
+            let two_h = h + h;
+            for idx in 0..n {
+                let mut xp = x.clone();
+                xp[idx].re = xp[idx].re + h;
+                let mut xm = x.clone();
+                xm[idx].re = xm[idx].re - h;
+                let d_re = (loss(&xp) - loss(&xm)) / two_h;
+
+                let mut xp = x.clone();
+                xp[idx].im = xp[idx].im + h;
+                let mut xm = x.clone();
+                xm[idx].im = xm[idx].im - h;
+                let d_im = (loss(&xp) - loss(&xm)) / two_h;
+
+                assert_close(analytic[idx].re, d_re, tol, &format!("n={n} re[{idx}]"));
+                assert_close(analytic[idx].im, d_im, tol, &format!("n={n} im[{idx}]"));
+            }
+        }
+    }
+
+    /// Validate `grad_rfft` (real input, complex half-spectrum output).
+    fn check_rfft_vjp<T: Float>(sizes: &[usize], tol: T, h: T) {
+        for &n in sizes {
+            let mut rng = Lcg::new(0x2718_2818 ^ (n as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            let x: Vec<T> = (0..n).map(|_| rng.sample::<T>()).collect();
+            let m = n / 2 + 1;
+            let cr: Vec<T> = (0..m).map(|_| rng.sample::<T>()).collect();
+            let ci: Vec<T> = (0..m).map(|_| rng.sample::<T>()).collect();
+            let cot: Vec<Complex<T>> = (0..m).map(|k| Complex::new(cr[k], ci[k])).collect();
+
+            let analytic = real::grad_rfft(&cot, n).expect("grad_rfft");
+            assert_eq!(analytic.len(), n, "n={n}: grad_rfft length");
+
+            let loss = |xx: &[T]| -> T {
+                let yy = ref_rfft(xx);
+                let mut s = T::ZERO;
+                for (k, y) in yy.iter().enumerate() {
+                    s = s + cr[k] * y.re + ci[k] * y.im;
+                }
+                s
+            };
+            let two_h = h + h;
+            for idx in 0..n {
+                let mut xp = x.clone();
+                xp[idx] = xp[idx] + h;
+                let mut xm = x.clone();
+                xm[idx] = xm[idx] - h;
+                let slope = (loss(&xp) - loss(&xm)) / two_h;
+                assert_close(analytic[idx], slope, tol, &format!("n={n} rfft[{idx}]"));
+            }
+        }
+    }
+
+    /// Validate `grad_irfft` (complex half-spectrum input, real output).
+    fn check_irfft_vjp<T: Float>(sizes: &[usize], tol: T, h: T) {
+        for &n in sizes {
+            let mut rng = Lcg::new(0x1414_2135 ^ (n as u64).wrapping_mul(0xA24B_AED4_963E_E407));
+            let n_freq = n / 2 + 1;
+            let x: Vec<Complex<T>> = (0..n_freq)
+                .map(|_| Complex::new(rng.sample::<T>(), rng.sample::<T>()))
+                .collect();
+            let w: Vec<T> = (0..n).map(|_| rng.sample::<T>()).collect();
+
+            let analytic = real::grad_irfft(&w, n).expect("grad_irfft");
+            assert_eq!(analytic.len(), n_freq, "n={n}: grad_irfft length");
+
+            let loss = |xx: &[Complex<T>]| -> T {
+                let yy = ref_irfft(xx, n);
+                let mut s = T::ZERO;
+                for (m, y) in yy.iter().enumerate() {
+                    s = s + w[m] * *y;
+                }
+                s
+            };
+            let two_h = h + h;
+            for k in 0..n_freq {
+                let mut xp = x.clone();
+                xp[k].re = xp[k].re + h;
+                let mut xm = x.clone();
+                xm[k].re = xm[k].re - h;
+                let d_re = (loss(&xp) - loss(&xm)) / two_h;
+
+                let mut xp = x.clone();
+                xp[k].im = xp[k].im + h;
+                let mut xm = x.clone();
+                xm[k].im = xm[k].im - h;
+                let d_im = (loss(&xp) - loss(&xm)) / two_h;
+
+                assert_close(analytic[k].re, d_re, tol, &format!("n={n} irfft re[{k}]"));
+                assert_close(analytic[k].im, d_im, tol, &format!("n={n} irfft im[{k}]"));
+            }
+        }
+    }
+
+    /// Validate forward-mode (JVP) against finite differences of the transform.
+    fn check_forward_mode<T: Float>(sizes: &[usize], tol: T, h: T) {
+        for &n in sizes {
+            let mut rng = Lcg::new(0x6022_1407 ^ (n as u64).wrapping_mul(0xB492_B66F_BE98_F273));
+            let x: Vec<Complex<T>> = (0..n)
+                .map(|_| Complex::new(rng.sample::<T>(), rng.sample::<T>()))
+                .collect();
+            let t: Vec<Complex<T>> = (0..n)
+                .map(|_| Complex::new(rng.sample::<T>(), rng.sample::<T>()))
+                .collect();
+
+            let dual: Vec<DualComplex<T>> = (0..n)
+                .map(|i| DualComplex::from_complex(x[i], t[i]))
+                .collect();
+            let (y, dy) = fft_dual(&dual).expect("fft_dual");
+
+            // Primal must match the reference forward transform.
+            let y_ref = ref_fft(&x);
+            for k in 0..n {
+                assert_close(y[k].re, y_ref[k].re, tol, &format!("n={n} y.re[{k}]"));
+                assert_close(y[k].im, y_ref[k].im, tol, &format!("n={n} y.im[{k}]"));
+            }
+
+            // Directional derivative via central difference along tangent t.
+            let two_h = h + h;
+            let xp: Vec<Complex<T>> = (0..n).map(|i| x[i] + t[i] * h).collect();
+            let xm: Vec<Complex<T>> = (0..n).map(|i| x[i] - t[i] * h).collect();
+            let yp = ref_fft(&xp);
+            let ym = ref_fft(&xm);
+            for k in 0..n {
+                let d = (yp[k] - ym[k]) / two_h;
+                assert_close(dy[k].re, d.re, tol, &format!("n={n} dy.re[{k}]"));
+                assert_close(dy[k].im, d.im, tol, &format!("n={n} dy.im[{k}]"));
+            }
+        }
+    }
+
+    const FD_SIZES: &[usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 12, 16];
+    const FD_SIZES_2D: &[(usize, usize)] =
+        &[(1, 1), (2, 2), (2, 3), (3, 2), (3, 3), (4, 4), (2, 5)];
+
+    #[test]
+    fn fd_grad_fft_f64() {
+        check_complex_vjp::<f64, _, _>(FD_SIZES, 1e-6, 0.125, ref_fft, |v| {
+            grad_fft(v).expect("grad_fft")
+        });
+    }
+
+    #[test]
+    fn fd_grad_ifft_f64() {
+        check_complex_vjp::<f64, _, _>(FD_SIZES, 1e-6, 0.125, ref_ifft, |v| {
+            grad_ifft(v).expect("grad_ifft")
+        });
+    }
+
+    #[test]
+    fn fd_grad_rfft_f64() {
+        check_rfft_vjp::<f64>(FD_SIZES, 1e-6, 0.125);
+    }
+
+    #[test]
+    fn fd_grad_irfft_f64() {
+        check_irfft_vjp::<f64>(FD_SIZES, 1e-6, 0.125);
+    }
+
+    #[test]
+    fn fd_forward_mode_f64() {
+        check_forward_mode::<f64>(FD_SIZES, 1e-6, 0.125);
+    }
+
+    #[test]
+    fn fd_grad_fft2d_f64() {
+        for &(rows, cols) in FD_SIZES_2D {
+            check_complex_vjp::<f64, _, _>(
+                &[rows * cols],
+                1e-6,
+                0.125,
+                move |x| ref_fft2d(x, rows, cols),
+                move |v| fft2d::grad_fft2d(v, rows, cols).expect("grad_fft2d"),
+            );
+        }
+    }
+
+    #[test]
+    fn fd_grad_fft_f32() {
+        check_complex_vjp::<f32, _, _>(&[1, 2, 3, 4, 5, 8], 2e-2, 0.125, ref_fft, |v| {
+            grad_fft(v).expect("grad_fft")
+        });
+    }
+
+    #[test]
+    fn fd_grad_rfft_f32() {
+        check_rfft_vjp::<f32>(&[1, 2, 3, 4, 5, 8], 2e-2, 0.125);
+    }
+
+    #[test]
+    fn fd_grad_irfft_f32() {
+        check_irfft_vjp::<f32>(&[1, 2, 3, 4, 5, 8], 2e-2, 0.125);
+    }
+
+    #[test]
+    fn fd_forward_mode_f32() {
+        check_forward_mode::<f32>(&[1, 2, 3, 4, 5, 8], 2e-2, 0.125);
     }
 }

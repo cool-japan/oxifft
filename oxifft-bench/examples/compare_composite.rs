@@ -1,8 +1,26 @@
+//! Indicative OxiFFT-vs-RustFFT micro-benchmark over composite sizes.
+//!
+//! This example is a quick, single-run wall-clock probe: it prints one ratio
+//! per size from a single averaged loop and is subject to run-to-run variance
+//! (the reported per-size win/loss counts are NOT stable across invocations).
+//! It is intended for a rough local sanity check only.
+//!
+//! The authoritative, statistically-controlled comparison is the criterion
+//! `fft_composite` group:
+//!
+//! ```text
+//! cargo bench -p oxifft-bench --bench fft_comparison -- fft_composite
+//! ```
+//!
+//! Any performance claim published in README/docs must be sourced from that
+//! criterion group (with CPU/OS/date), never from this example's output.
+
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::uninlined_format_args)]
 
 use oxifft::{Complex, Direction, Flags, Plan};
 use rustfft::FftPlanner;
+use std::hint::black_box;
 use std::time::Instant;
 
 fn bench_oxifft(n: usize, iterations: usize) -> f64 {
@@ -16,14 +34,18 @@ fn bench_oxifft(n: usize, iterations: usize) -> f64 {
 
     // Warmup
     for _ in 0..100 {
-        plan.execute(&input, &mut output);
+        plan.execute(black_box(&input), black_box(&mut output));
     }
 
     let start = Instant::now();
     for _ in 0..iterations {
-        plan.execute(&input, &mut output);
+        // `black_box` prevents the optimizer from hoisting or eliminating the
+        // transform if cross-crate LTO is ever enabled for this example.
+        plan.execute(black_box(&input), black_box(&mut output));
     }
-    start.elapsed().as_nanos() as f64 / iterations as f64
+    let elapsed = start.elapsed().as_nanos() as f64 / iterations as f64;
+    black_box(&output);
+    elapsed
 }
 
 fn bench_rustfft(n: usize, iterations: usize) -> f64 {
@@ -36,14 +58,16 @@ fn bench_rustfft(n: usize, iterations: usize) -> f64 {
 
     // Warmup
     for _ in 0..100 {
-        fft.process(&mut buffer);
+        fft.process(black_box(&mut buffer));
     }
 
     let start = Instant::now();
     for _ in 0..iterations {
-        fft.process(&mut buffer);
+        fft.process(black_box(&mut buffer));
     }
-    start.elapsed().as_nanos() as f64 / iterations as f64
+    let elapsed = start.elapsed().as_nanos() as f64 / iterations as f64;
+    black_box(&buffer);
+    elapsed
 }
 
 fn main() {

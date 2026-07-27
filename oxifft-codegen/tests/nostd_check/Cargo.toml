@@ -1,0 +1,38 @@
+[package]
+name = "oxifft-codegen-nostd-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Throwaway #![no_std] + alloc compile check proving oxifft-codegen's emitted dispatchers are no_std-safe; not part of the crates.io package (see oxifft-codegen/Cargo.toml exclude list)."
+
+# Detached from the parent `oxifft` Cargo workspace on purpose: this fixture
+# is built with a feature configuration (`std` disabled) that differs from
+# the rest of the repository, and it needs its own dependency-resolution
+# root to do that in isolation. Declaring an (empty) `[workspace]` table here
+# makes this crate its own workspace root instead of being swept into the
+# ancestor workspace's `members` list — no changes to the parent's
+# `Cargo.toml` are needed.
+[workspace]
+
+[lib]
+# A library target needs no `fn main` / panic handler / entry point, so
+# `cargo check` (which never links) is enough to prove the generated
+# dispatchers type-check under `#![no_std]` + `alloc` — no fragile bare-metal
+# entry-point plumbing required.
+crate-type = ["rlib"]
+
+[dependencies]
+oxifft-codegen = { path = "../..", default-features = false, features = ["avx512"] }
+
+[features]
+# Declared (but not enabled by default) purely so `#[cfg(feature = "std")]` /
+# `#[cfg(feature = "avx512")]` — spliced into *this* crate's body by the
+# `gen_simd_codelet!` / `gen_dispatcher_codelet!` macro expansions, and
+# therefore resolved against *this* crate's own known-features list, not
+# `oxifft-codegen`'s — do not trip rustc's `unexpected_cfgs` lint. `std` stays
+# off (the entire point of this check); `avx512` is turned on by default so
+# the AVX-512 dispatch arm is also exercised.
+default = ["avx512"]
+std = []
+avx512 = []

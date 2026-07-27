@@ -59,7 +59,11 @@
 
 use crate::api::{export_to_string, import_from_string};
 use crate::kernel::{Complex, Float, IoDim, Tensor};
-use crate::{Direction, Flags, GuruPlan, Plan, Plan2D, Plan3D, RealPlan};
+use crate::prelude::{vec, String, Vec};
+use crate::{
+    Direction, Flags, GuruPlan, Plan, Plan2D, Plan3D, R2rKind, R2rPlan, R2rPlan2D, R2rPlan3D,
+    RealPlan,
+};
 
 // ─── 1-D complex DFT (f64) ───────────────────────────────────────────────────
 
@@ -268,6 +272,62 @@ pub fn fftw_plan_dft_r2c_1d(n: usize, flags: Flags) -> Option<RealPlan<f64>> {
 #[must_use]
 pub fn fftw_plan_dft_c2r_1d(n: usize, flags: Flags) -> Option<RealPlan<f64>> {
     Plan::c2r_1d(n, flags)
+}
+
+// ─── Real-to-real transforms (DCT / DST / DHT) ────────────────────────────────
+
+/// Create a 1-D real-to-real transform plan (DCT / DST / DHT).
+///
+/// Corresponds to FFTW's `fftw_plan_r2r_1d`. [`R2rKind`] mirrors FFTW's
+/// `fftw_r2r_kind` (`REDFT00`..`REDFT11`, `RODFT00`..`RODFT11`, `DHT`) one to
+/// one, so the kind constant maps directly.
+///
+/// # Returns
+/// `Some(plan)` for a non-zero size, otherwise `None`.
+#[must_use]
+pub fn fftw_plan_r2r_1d(n: usize, kind: R2rKind, flags: Flags) -> Option<R2rPlan<f64>> {
+    R2rPlan::r2r_1d(n, kind, flags)
+}
+
+/// Create a 2-D real-to-real transform plan with a (possibly different) kind
+/// per axis.
+///
+/// Corresponds to FFTW's `fftw_plan_r2r_2d(n0, n1, in, out, kind0, kind1,
+/// flags)`. `kind0` applies along the first (outer) axis and `kind1` along the
+/// second (inner, contiguous) axis.
+///
+/// # Returns
+/// `Some(plan)` if both dimensions are non-zero, otherwise `None`.
+#[must_use]
+pub fn fftw_plan_r2r_2d(
+    n0: usize,
+    n1: usize,
+    kind0: R2rKind,
+    kind1: R2rKind,
+    flags: Flags,
+) -> Option<R2rPlan2D<f64>> {
+    R2rPlan2D::new(n0, n1, kind0, kind1, flags)
+}
+
+/// Create a 3-D real-to-real transform plan with a (possibly different) kind
+/// per axis.
+///
+/// Corresponds to FFTW's `fftw_plan_r2r_3d(n0, n1, n2, in, out, kind0, kind1,
+/// kind2, flags)`.
+///
+/// # Returns
+/// `Some(plan)` if all three dimensions are non-zero, otherwise `None`.
+#[must_use]
+pub fn fftw_plan_r2r_3d(
+    n0: usize,
+    n1: usize,
+    n2: usize,
+    kind0: R2rKind,
+    kind1: R2rKind,
+    kind2: R2rKind,
+    flags: Flags,
+) -> Option<R2rPlan3D<f64>> {
+    R2rPlan3D::new(n0, n1, n2, kind0, kind1, kind2, flags)
 }
 
 // ─── Guru interface (many DFT) ────────────────────────────────────────────────
@@ -646,6 +706,55 @@ mod tests {
                 exp.re
             );
         }
+    }
+
+    // ── Real-to-real (DCT/DST/DHT) plan wrappers ──────────────────────────────
+
+    #[test]
+    fn test_fftw_plan_r2r_1d_matches_direct() {
+        let n = 8;
+        let input: Vec<f64> = (0..n).map(|i| (i as f64 * 0.3).sin()).collect();
+        let plan = fftw_plan_r2r_1d(n, R2rKind::Redft10, Flags::ESTIMATE).expect("r2r 1d plan");
+        let mut got = vec![0.0_f64; n];
+        plan.execute(&input, &mut got);
+        let direct = R2rPlan::<f64>::r2r_1d(n, R2rKind::Redft10, Flags::ESTIMATE).expect("direct");
+        let mut want = vec![0.0_f64; n];
+        direct.execute(&input, &mut want);
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert!((g - w).abs() < 1e-12, "r2r 1d wrapper diverged: {g} vs {w}");
+        }
+    }
+
+    #[test]
+    fn test_fftw_plan_r2r_2d_and_3d_construct_and_run() {
+        // 2D: different kind per axis, matching FFTW's `fftw_plan_r2r_2d`.
+        let (n0, n1) = (4usize, 6usize);
+        let input2d: Vec<f64> = (0..n0 * n1).map(|i| (i as f64 * 0.11).cos()).collect();
+        let plan2d = fftw_plan_r2r_2d(n0, n1, R2rKind::Redft10, R2rKind::Rodft10, Flags::ESTIMATE)
+            .expect("r2r 2d plan");
+        let mut out2d = vec![0.0_f64; n0 * n1];
+        plan2d.execute(&input2d, &mut out2d);
+        assert!(out2d.iter().all(|v| v.is_finite()));
+
+        // 3D
+        let (a, b, c) = (2usize, 3usize, 4usize);
+        let input3d: Vec<f64> = (0..a * b * c).map(|i| (i as f64 * 0.07).sin()).collect();
+        let plan3d = fftw_plan_r2r_3d(
+            a,
+            b,
+            c,
+            R2rKind::Redft10,
+            R2rKind::Redft10,
+            R2rKind::Dht,
+            Flags::ESTIMATE,
+        )
+        .expect("r2r 3d plan");
+        let mut out3d = vec![0.0_f64; a * b * c];
+        plan3d.execute(&input3d, &mut out3d);
+        assert!(out3d.iter().all(|v| v.is_finite()));
+
+        // Zero dimensions return None.
+        assert!(fftw_plan_r2r_2d(0, n1, R2rKind::Dht, R2rKind::Dht, Flags::ESTIMATE).is_none());
     }
 
     // ── Destroy plan (no-op smoke test) ───────────────────────────────────────

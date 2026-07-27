@@ -111,7 +111,7 @@ fn ifft2_inplace<const N: usize>(data: &mut [Complex<f64>; N]) {
     }
     let a = data[0];
     let b = data[1];
-    data[0] = Complex::new((a.re + b.re) * 0.5, (a.im + b.im) * 0.5);
+    data[0] = Complex::new(f64::midpoint(a.re, b.re), f64::midpoint(a.im, b.im));
     data[1] = Complex::new((a.re - b.re) * 0.5, (a.im - b.im) * 0.5);
 }
 

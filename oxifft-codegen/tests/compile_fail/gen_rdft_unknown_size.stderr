@@ -1,0 +1,7 @@
+error: gen_rdft_codelet: unsupported size 3 for R2hc (expected 2, 4, or 8)
+ --> tests/compile_fail/gen_rdft_unknown_size.rs:3:1
+  |
+3 | gen_rdft_codelet!(size = 3, kind = R2hc);
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `gen_rdft_codelet` (in Nightly builds, run with -Z macro-backtrace for more info)

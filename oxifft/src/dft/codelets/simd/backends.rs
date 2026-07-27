@@ -3,6 +3,142 @@
 //! Each submodule contains low-level SIMD implementations gated by target architecture.
 
 // ============================================================================
+// Portable SIMD f64 codelets (`core::simd`, nightly-only, all architectures)
+// ============================================================================
+
+/// Portable SIMD f64 codelets built on `core::simd` via the [`PortableF64x2`]
+/// backend. These are architecture-independent and are wired into the size-2
+/// and size-4 dispatchers as a selectable tier when the `portable_simd`
+/// Cargo feature is enabled (nightly Rust only).
+///
+/// [`PortableF64x2`]: crate::simd::PortableF64x2
+#[cfg(oxifft_portable_simd)]
+pub mod portable_f64 {
+    use core::simd::Simd;
+
+    use crate::kernel::Complex;
+    use crate::simd::{PortableF64x2, SimdVector};
+
+    /// Portable size-2 butterfly for f64: `[x0 + x1, x0 - x1]`.
+    #[inline]
+    pub fn notw_2_portable(x: &mut [Complex<f64>]) {
+        debug_assert!(x.len() >= 2);
+        let ptr = x.as_mut_ptr().cast::<f64>();
+        // SAFETY: `x` holds at least 2 `Complex<f64>` (≥ 4 contiguous f64), so the
+        // loads/stores at offsets 0 and 2 stay within the slice.
+        unsafe {
+            let v0 = PortableF64x2::load_unaligned(ptr);
+            let v1 = PortableF64x2::load_unaligned(ptr.add(2));
+            v0.add(v1).store_unaligned(ptr);
+            v0.sub(v1).store_unaligned(ptr.add(2));
+        }
+    }
+
+    /// Portable size-4 DFT for f64 (radix-2 decimation-in-time).
+    ///
+    /// `sign < 0` selects the forward transform, `sign >= 0` the inverse
+    /// (unnormalized), matching the other `notw_4_*` codelets.
+    #[inline]
+    pub fn notw_4_portable(x: &mut [Complex<f64>], sign: i32) {
+        debug_assert!(x.len() >= 4);
+        let ptr = x.as_mut_ptr().cast::<f64>();
+        // SAFETY: `x` holds at least 4 `Complex<f64>` (≥ 8 contiguous f64), so the
+        // loads/stores at offsets 0, 2, 4, 6 stay within the slice.
+        unsafe {
+            let x0 = PortableF64x2::load_unaligned(ptr);
+            let x1 = PortableF64x2::load_unaligned(ptr.add(2));
+            let x2 = PortableF64x2::load_unaligned(ptr.add(4));
+            let x3 = PortableF64x2::load_unaligned(ptr.add(6));
+
+            // Stage 1: two radix-2 butterflies.
+            let t0 = x0.add(x2);
+            let t1 = x0.sub(x2);
+            let t2 = x1.add(x3);
+            let t3 = x1.sub(x3);
+
+            // Apply the ±i twiddle to t3: [re, im] -> [im, -re] (forward, -i)
+            // or [-im, re] (inverse, +i).
+            let a = t3.0.to_array();
+            let t3_rot = if sign < 0 {
+                PortableF64x2(Simd::from_array([a[1], -a[0]]))
+            } else {
+                PortableF64x2(Simd::from_array([-a[1], a[0]]))
+            };
+
+            // Stage 2: final butterflies (natural output order).
+            t0.add(t2).store_unaligned(ptr); // X[0]
+            t1.add(t3_rot).store_unaligned(ptr.add(2)); // X[1]
+            t0.sub(t2).store_unaligned(ptr.add(4)); // X[2]
+            t1.sub(t3_rot).store_unaligned(ptr.add(6)); // X[3]
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn naive_dft(x: &[Complex<f64>], sign: i32) -> Vec<Complex<f64>> {
+            let n = x.len();
+            let mut out = vec![Complex { re: 0.0, im: 0.0 }; n];
+            for (k, out_k) in out.iter_mut().enumerate() {
+                for (j, x_j) in x.iter().enumerate() {
+                    let angle =
+                        f64::from(sign) * 2.0 * core::f64::consts::PI * (k * j) as f64 / n as f64;
+                    let (s, c) = angle.sin_cos();
+                    out_k.re += x_j.re * c - x_j.im * s;
+                    out_k.im += x_j.re * s + x_j.im * c;
+                }
+            }
+            out
+        }
+
+        #[test]
+        fn portable_notw_2_matches_naive() {
+            let input = [Complex { re: 1.0, im: 2.0 }, Complex { re: 3.0, im: 4.0 }];
+            let expected = naive_dft(&input, -1);
+            let mut data = input;
+            notw_2_portable(&mut data);
+            for (g, e) in data.iter().zip(expected.iter()) {
+                assert!((g.re - e.re).abs() < 1e-10 && (g.im - e.im).abs() < 1e-10);
+            }
+        }
+
+        #[test]
+        fn portable_notw_4_forward_matches_naive() {
+            let input = [
+                Complex { re: 1.0, im: 0.0 },
+                Complex { re: 0.0, im: 1.0 },
+                Complex { re: -1.0, im: 0.0 },
+                Complex { re: 0.0, im: -1.0 },
+            ];
+            let expected = naive_dft(&input, -1);
+            let mut data = input;
+            notw_4_portable(&mut data, -1);
+            for (g, e) in data.iter().zip(expected.iter()) {
+                assert!((g.re - e.re).abs() < 1e-10 && (g.im - e.im).abs() < 1e-10);
+            }
+        }
+
+        #[test]
+        fn portable_notw_4_roundtrip() {
+            let original = [
+                Complex { re: 1.0, im: 2.0 },
+                Complex { re: 3.0, im: 4.0 },
+                Complex { re: 5.0, im: 6.0 },
+                Complex { re: 7.0, im: 8.0 },
+            ];
+            let mut data = original;
+            notw_4_portable(&mut data, -1);
+            notw_4_portable(&mut data, 1);
+            let n = original.len() as f64;
+            for (g, o) in data.iter().zip(original.iter()) {
+                assert!((g.re / n - o.re).abs() < 1e-10 && (g.im / n - o.im).abs() < 1e-10);
+            }
+        }
+    }
+}
+
+// ============================================================================
 // SSE2 f64 SIMD codelets
 // ============================================================================
 

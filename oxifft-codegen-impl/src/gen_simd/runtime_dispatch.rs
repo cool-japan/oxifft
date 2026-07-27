@@ -6,10 +6,23 @@
 //! # Motivation
 //!
 //! The basic dispatchers emitted by `super::gen_dispatcher` perform
-//! `is_x86_feature_detected!` / `is_aarch64_feature_detected!` on every call.
-//! While each call is cheap (typically one CPUID cache read), a hot codelet
-//! invoked millions of times per second may benefit from the cached path, which
-//! replaces repeated feature probes with a single `AtomicU8` load.
+//! `is_x86_feature_detected!` on every call for `x86_64` (NEON is assumed
+//! unconditionally on `aarch64` — see below). While each call is cheap
+//! (typically one CPUID cache read), a hot codelet invoked millions of times
+//! per second may benefit from the cached path, which replaces repeated
+//! feature probes with a single `AtomicU8` load.
+//!
+//! # `no_std` compatibility
+//!
+//! `is_x86_feature_detected!` is a `std`-only macro, so the emitted
+//! `detect_isa_{size}_{ty}` function routes `x86_64` detection through the
+//! same self-contained, locally scoped `macro_rules!` helper
+//! (`super::gen_x86_detect_macro`) that `super::gen_dispatcher` uses: under
+//! `#[cfg(feature = "std")]` it expands to the `std` runtime probe; under
+//! `#[cfg(not(feature = "std"))]` it falls back to the compile-time
+//! `cfg!(target_feature = ...)` check. NEON (`AdvSIMD`) is mandatory in the
+//! base `AArch64` architecture, so the `aarch64` arm needs no runtime probe (and
+//! hence no `std`-only `is_aarch64_feature_detected!`) at all.
 //!
 //! # Priority order (high → low)
 //!
@@ -29,7 +42,7 @@
 //!
 //! # Proc-macro entry
 //!
-//! ```ignore
+//! ```text
 //! // Generates a cached dispatcher for size-4 f32.
 //! gen_dispatcher_codelet!(size = 4, ty = f32);
 //! ```
@@ -122,21 +135,34 @@ pub fn detect_host_isa() -> u8 {
 // ============================================================================
 
 /// Build the `x86_64` ISA detection body emitted inside the detect function.
+///
+/// # `no_std` compatibility
+///
+/// `is_x86_feature_detected!` is `std`-only, so it is routed through the same
+/// self-contained [`super::gen_x86_detect_macro`] helper the uncached
+/// dispatcher (`super::gen_dispatcher`) uses: a locally scoped
+/// `macro_rules!` that expands to the `std` runtime probe under
+/// `#[cfg(feature = "std")]`, and to the compile-time
+/// `cfg!(target_feature = ...)` check otherwise.
 fn build_detect_x86_body() -> TokenStream {
+    let detect = format_ident!("__codegen_detect_isa_x86");
+    let detect_macro = super::gen_x86_detect_macro(&detect);
     quote! {
         #[cfg(target_arch = "x86_64")]
         {
+            #detect_macro
+
             #[cfg(feature = "avx512")]
-            if is_x86_feature_detected!("avx512f") {
+            if #detect!("avx512f") {
                 return ISA_AVX512_LEVEL;
             }
-            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            if #detect!("avx2") && #detect!("fma") {
                 return ISA_AVX2_FMA_LEVEL;
             }
-            if is_x86_feature_detected!("avx") {
+            if #detect!("avx") {
                 return ISA_AVX_LEVEL;
             }
-            if is_x86_feature_detected!("sse2") {
+            if #detect!("sse2") {
                 return ISA_SSE2_LEVEL;
             }
             return ISA_SCALAR_LEVEL;
@@ -145,102 +171,149 @@ fn build_detect_x86_body() -> TokenStream {
 }
 
 /// Build the aarch64 ISA detection body emitted inside the detect function.
+///
+/// NEON (`AdvSIMD`) is mandatory in the base `AArch64` architecture, so no
+/// runtime probe is emitted here at all — this matches the uncached
+/// dispatcher (`super::gen_dispatcher`), which calls the NEON codelet
+/// unconditionally on `aarch64` with no feature check. Beyond matching
+/// existing behavior, this also sidesteps `std::arch::is_aarch64_feature_detected!`,
+/// which (like its `x86` counterpart) is a `std`-only macro.
 fn build_detect_aarch64_body() -> TokenStream {
     quote! {
         #[cfg(target_arch = "aarch64")]
         {
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                return ISA_NEON_LEVEL;
-            }
-            return ISA_SCALAR_LEVEL;
+            return ISA_NEON_LEVEL;
         }
+    }
+}
+
+/// The concrete SIMD codelet tier the cached `x86_64` dispatcher invokes for a
+/// given detected ISA level, DFT size, and precision.
+///
+/// `Scalar` means no SIMD codelet exists for this configuration and the scalar
+/// fallback is the correct (not a downgraded) choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86Tier {
+    /// `codelet_simd_{size}_avx512_{ty}` (feature-gated behind `avx512`).
+    Avx512,
+    /// `codelet_simd_{size}_avx2_{ty}`.
+    Avx2Fma,
+    /// `codelet_simd_{size}_avx_f64` (f64 only — no pure-AVX f32 emitter exists).
+    Avx,
+    /// `codelet_simd_{size}_sse2_{ty}`.
+    Sse2,
+    /// Scalar fallback: no SIMD codelet for this `(size, precision)`.
+    Scalar,
+}
+
+/// Fallback lattice for the cached `x86_64` dispatcher: map a detected ISA level to
+/// the tier it must run.
+///
+/// Each SIMD level falls back to the next-lower **available** SIMD codelet, never
+/// straight to scalar when a faster codelet exists. In particular, because there
+/// is no pure-AVX f32 codelet, an AVX-only host running an f32 request maps to
+/// [`X86Tier::Sse2`] (AVX is a strict superset of SSE2), not to scalar.
+///
+/// The generated dispatch branches in `build_x86_64_branches` are derived
+/// directly from this function, and the unit tests pin every
+/// `(size, precision, level)` combination here so a silent scalar downgrade
+/// cannot regress unnoticed.
+#[must_use]
+pub fn x86_dispatch_tier(size: usize, precision: Precision, isa_level: u8) -> X86Tier {
+    if size == 16 {
+        // Size 16 only has an AVX-512 f32 emitter; everything else is scalar.
+        if precision == Precision::F32 && isa_level == ISA_AVX512 {
+            return X86Tier::Avx512;
+        }
+        return X86Tier::Scalar;
+    }
+    // Sizes 2, 4, 8: full SIMD ladder.
+    match isa_level {
+        ISA_AVX512 => X86Tier::Avx512,
+        ISA_AVX2_FMA => X86Tier::Avx2Fma,
+        ISA_AVX => match precision {
+            // f64 has a dedicated pure-AVX codelet; f32 does not, so fall to SSE2.
+            Precision::F64 => X86Tier::Avx,
+            Precision::F32 => X86Tier::Sse2,
+        },
+        ISA_SSE2 => X86Tier::Sse2,
+        // ISA_SCALAR / ISA_NEON (n/a on x86) / undetected.
+        _ => X86Tier::Scalar,
+    }
+}
+
+/// Resolve the inner codelet function identifier for a non-scalar [`X86Tier`].
+///
+/// Returns `None` for [`X86Tier::Scalar`] (the caller emits no branch and lets
+/// the trailing scalar fallback run).
+fn tier_fn_ident(tier: X86Tier, size: usize, ty_str: &str) -> Option<syn::Ident> {
+    match tier {
+        X86Tier::Avx512 => Some(format_ident!("codelet_simd_{}_avx512_{}", size, ty_str)),
+        X86Tier::Avx2Fma => Some(format_ident!("codelet_simd_{}_avx2_{}", size, ty_str)),
+        X86Tier::Avx => Some(format_ident!("codelet_simd_{}_avx_f64", size)),
+        X86Tier::Sse2 => Some(format_ident!("codelet_simd_{}_sse2_{}", size, ty_str)),
+        X86Tier::Scalar => None,
     }
 }
 
 /// Build the `x86_64` dispatch branches for the cached dispatcher body.
 ///
-/// For size-16 f32 only AVX-512 is available; for size-16 f64 no x86 SIMD
-/// path exists.  For all other sizes (2, 4, 8), all ISA levels are probed.
-///
-/// Each branch creates its own local `data_inner` reinterpretation so that
-/// the raw-pointer slice never aliases the original `data` borrow.
+/// Branches are generated from [`x86_dispatch_tier`] so the runtime behavior
+/// matches the tested lattice exactly. Each branch creates its own local
+/// `data_inner` reinterpretation so that the raw-pointer slice never aliases the
+/// original `data` borrow. The AVX-512 branch is additionally `avx512`-feature
+/// gated, matching the detection code.
 fn build_x86_64_branches(config: DispatcherConfig) -> TokenStream {
     let size = config.size;
     let ty_str = config.precision.type_str();
     let ty_tokens: TokenStream = ty_str
         .parse()
         .unwrap_or_else(|_| unreachable!("ty_str is always f32 or f64"));
-    let avx512_fn = format_ident!("codelet_simd_{}_avx512_{}", size, ty_str);
-    let avx2_fn = format_ident!("codelet_simd_{}_avx2_{}", size, ty_str);
-    let sse2_fn = format_ident!("codelet_simd_{}_sse2_{}", size, ty_str);
 
-    if size == 16 {
-        if config.precision == Precision::F32 {
-            return quote! {
-                #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
-                {
-                    if cached_level == ISA_AVX512_LEVEL {
-                        // Safety: avx512f detected at runtime.
-                        // Layout: Complex<f32> is #[repr(C)] (re, im) — same as [f32; 2*N].
-                        let data_len = data.len() * 2;
-                        let data_ptr = data.as_mut_ptr().cast::<#ty_tokens>();
-                        let data_inner = unsafe { core::slice::from_raw_parts_mut(data_ptr, data_len) };
-                        unsafe { super::#avx512_fn(data_inner, sign); }
-                        return;
-                    }
-                }
-            };
-        }
-        // size-16 f64: no dedicated SIMD on x86_64
-        return quote! {};
-    }
+    // Probe from highest to lowest ISA level.
+    let levels = [
+        (ISA_AVX512, quote! { ISA_AVX512_LEVEL }),
+        (ISA_AVX2_FMA, quote! { ISA_AVX2_FMA_LEVEL }),
+        (ISA_AVX, quote! { ISA_AVX_LEVEL }),
+        (ISA_SSE2, quote! { ISA_SSE2_LEVEL }),
+    ];
 
-    // Pure-AVX path only exists for f64 (no pure-AVX f32 emitter)
-    let avx_branch = if config.precision == Precision::F64 {
-        let avx_f64_fn = format_ident!("codelet_simd_{}_avx_f64", size);
-        quote! {
-            if cached_level == ISA_AVX_LEVEL {
-                // Safety: avx detected at runtime; function has #[target_feature(enable = "avx")].
+    let mut branches = TokenStream::new();
+    for (level, level_tok) in levels {
+        let tier = x86_dispatch_tier(size, config.precision, level);
+        let Some(fn_ident) = tier_fn_ident(tier, size, ty_str) else {
+            // Scalar tier for this level: no branch, fall through to scalar tail.
+            continue;
+        };
+        let call = quote! {
+            if cached_level == #level_tok {
+                // Safety: the corresponding feature was detected at runtime; the
+                // target function carries the matching `#[target_feature]`.
+                // Layout: Complex<T> is #[repr(C)] (re, im) — same as [T; 2*N].
                 let data_len = data.len() * 2;
                 let data_ptr = data.as_mut_ptr().cast::<#ty_tokens>();
                 let data_inner = unsafe { core::slice::from_raw_parts_mut(data_ptr, data_len) };
-                unsafe { super::#avx_f64_fn(data_inner, sign); }
+                unsafe { super::#fn_ident(data_inner, sign); }
                 return;
             }
+        };
+        // Only the AVX-512 tier is compiled behind the `avx512` feature.
+        if tier == X86Tier::Avx512 {
+            branches.extend(quote! { #[cfg(feature = "avx512")] #call });
+        } else {
+            branches.extend(call);
         }
-    } else {
-        quote! {}
-    };
+    }
+
+    if branches.is_empty() {
+        // No SIMD codelet for this (size, precision) on x86_64 (e.g. size-16 f64).
+        return quote! {};
+    }
 
     quote! {
         #[cfg(target_arch = "x86_64")]
         {
-            #[cfg(feature = "avx512")]
-            if cached_level == ISA_AVX512_LEVEL {
-                // Safety: avx512f detected at runtime.
-                let data_len = data.len() * 2;
-                let data_ptr = data.as_mut_ptr().cast::<#ty_tokens>();
-                let data_inner = unsafe { core::slice::from_raw_parts_mut(data_ptr, data_len) };
-                unsafe { super::#avx512_fn(data_inner, sign); }
-                return;
-            }
-            if cached_level == ISA_AVX2_FMA_LEVEL {
-                // Safety: avx2+fma detected at runtime.
-                let data_len = data.len() * 2;
-                let data_ptr = data.as_mut_ptr().cast::<#ty_tokens>();
-                let data_inner = unsafe { core::slice::from_raw_parts_mut(data_ptr, data_len) };
-                unsafe { super::#avx2_fn(data_inner, sign); }
-                return;
-            }
-            #avx_branch
-            if cached_level == ISA_SSE2_LEVEL {
-                // Safety: sse2 detected at runtime.
-                let data_len = data.len() * 2;
-                let data_ptr = data.as_mut_ptr().cast::<#ty_tokens>();
-                let data_inner = unsafe { core::slice::from_raw_parts_mut(data_ptr, data_len) };
-                unsafe { super::#sse2_fn(data_inner, sign); }
-                return;
-            }
+            #branches
         }
     }
 }
@@ -564,6 +637,77 @@ mod tests {
         );
     }
 
+    // ── no_std safety: self-contained cfg-gated feature detection ─────────
+
+    /// The cached dispatcher's `detect_isa_{size}_{ty}` function must carry
+    /// both halves of the self-contained `std`/`no_std` split for `x86_64`: the
+    /// `std` runtime probe under `#[cfg(feature = "std")]`, and the
+    /// `no_std`-safe `cfg!(target_feature)` fallback under
+    /// `#[cfg(not(feature = "std"))]`. Regression guard for the bug where the
+    /// cached dispatcher emitted an unconditional `is_x86_feature_detected!`
+    /// that could not compile under `#![no_std]`.
+    #[test]
+    fn generated_dispatcher_has_self_contained_std_and_no_std_branches() {
+        for &size in &[2_usize, 4, 8, 16] {
+            for &prec in &[Precision::F32, Precision::F64] {
+                let s = generate_dispatcher(DispatcherConfig {
+                    size,
+                    precision: prec,
+                })
+                .expect("should generate")
+                .to_string();
+                assert!(
+                    s.contains("feature = \"std\""),
+                    "size={size} prec={prec:?}: missing `feature = \"std\"` cfg gate: {s}"
+                );
+                assert!(
+                    s.contains("not (feature = \"std\")") || s.contains("not(feature = \"std\")"),
+                    "size={size} prec={prec:?}: missing `not(feature = \"std\")` cfg gate: {s}"
+                );
+                assert!(
+                    s.contains("target_feature"),
+                    "size={size} prec={prec:?}: missing cfg!(target_feature) no_std fallback: {s}"
+                );
+            }
+        }
+    }
+
+    /// The cached dispatcher must be fully self-contained and `no_std`-safe:
+    /// no `std ::`-qualified path anywhere (in particular, no
+    /// `std::arch::is_aarch64_feature_detected!`, which the aarch64 detect
+    /// arm used before NEON was treated as unconditionally available — the
+    /// same convention `super::gen_dispatcher` already used), and no
+    /// dependency on `oxifft` or its `detect_x86_feature!` macro.
+    #[test]
+    fn generated_dispatcher_has_no_qualified_std_path_and_no_oxifft_dependency() {
+        for &size in &[2_usize, 4, 8, 16] {
+            for &prec in &[Precision::F32, Precision::F64] {
+                let s = generate_dispatcher(DispatcherConfig {
+                    size,
+                    precision: prec,
+                })
+                .expect("should generate")
+                .to_string();
+                assert!(
+                    !s.contains("std ::"),
+                    "size={size} prec={prec:?}: found qualified `std ::` path: {s}"
+                );
+                assert!(
+                    !s.contains("is_aarch64_feature_detected"),
+                    "size={size} prec={prec:?}: aarch64 arm must not probe at runtime (NEON is mandatory): {s}"
+                );
+                assert!(
+                    !s.contains("oxifft"),
+                    "size={size} prec={prec:?}: generated code must not reference oxifft: {s}"
+                );
+                assert!(
+                    !s.contains("detect_x86_feature"),
+                    "size={size} prec={prec:?}: must not delegate to an external detect_x86_feature! macro: {s}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_generate_dispatcher_contains_atomic_u8() {
         let ts = generate_dispatcher(DispatcherConfig {
@@ -646,6 +790,148 @@ mod tests {
             precision: Precision::F32,
         });
         assert!(result.is_err(), "size 3 must return Err");
+    }
+
+    // ── x86 fallback lattice (task: pin the tier per capability combination) ──
+
+    #[test]
+    fn tier_avx_f32_falls_back_to_sse2_not_scalar() {
+        // The regression: an AVX-only host (no AVX2+FMA) running an f32 request
+        // must use SSE2, never the scalar codelet, because SSE2 is always present
+        // when AVX is and there is no pure-AVX f32 codelet.
+        for &size in &[2_usize, 4, 8] {
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F32, ISA_AVX),
+                X86Tier::Sse2,
+                "size {size} f32 at AVX level must fall back to SSE2, not scalar"
+            );
+        }
+    }
+
+    #[test]
+    fn tier_full_lattice_sizes_2_4_8() {
+        for &size in &[2_usize, 4, 8] {
+            // f64 ladder: avx512 > avx2 > avx > sse2.
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F64, ISA_AVX512),
+                X86Tier::Avx512
+            );
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F64, ISA_AVX2_FMA),
+                X86Tier::Avx2Fma
+            );
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F64, ISA_AVX),
+                X86Tier::Avx
+            );
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F64, ISA_SSE2),
+                X86Tier::Sse2
+            );
+            // f32 ladder: avx512 > avx2 > (avx→sse2) > sse2.
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F32, ISA_AVX512),
+                X86Tier::Avx512
+            );
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F32, ISA_AVX2_FMA),
+                X86Tier::Avx2Fma
+            );
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F32, ISA_AVX),
+                X86Tier::Sse2
+            );
+            assert_eq!(
+                x86_dispatch_tier(size, Precision::F32, ISA_SSE2),
+                X86Tier::Sse2
+            );
+        }
+    }
+
+    #[test]
+    fn tier_scalar_only_when_no_codelet_exists() {
+        // The only x86 levels that legitimately map to Scalar for sizes 2/4/8 are
+        // ISA_SCALAR itself and NEON (which never occurs on x86).
+        for &size in &[2_usize, 4, 8] {
+            for &prec in &[Precision::F32, Precision::F64] {
+                for &level in &[ISA_AVX512, ISA_AVX2_FMA, ISA_AVX, ISA_SSE2] {
+                    assert_ne!(
+                        x86_dispatch_tier(size, prec, level),
+                        X86Tier::Scalar,
+                        "size {size} {prec:?} level {level} must not downgrade to scalar"
+                    );
+                }
+                assert_eq!(x86_dispatch_tier(size, prec, ISA_SCALAR), X86Tier::Scalar);
+                assert_eq!(x86_dispatch_tier(size, prec, ISA_NEON), X86Tier::Scalar);
+            }
+        }
+    }
+
+    #[test]
+    fn tier_size16() {
+        // Size 16 has only an AVX-512 f32 codelet; everything else is scalar.
+        assert_eq!(
+            x86_dispatch_tier(16, Precision::F32, ISA_AVX512),
+            X86Tier::Avx512
+        );
+        assert_eq!(
+            x86_dispatch_tier(16, Precision::F32, ISA_AVX2_FMA),
+            X86Tier::Scalar
+        );
+        assert_eq!(
+            x86_dispatch_tier(16, Precision::F32, ISA_AVX),
+            X86Tier::Scalar
+        );
+        assert_eq!(
+            x86_dispatch_tier(16, Precision::F32, ISA_SSE2),
+            X86Tier::Scalar
+        );
+        for &level in &[ISA_AVX512, ISA_AVX2_FMA, ISA_AVX, ISA_SSE2, ISA_SCALAR] {
+            assert_eq!(
+                x86_dispatch_tier(16, Precision::F64, level),
+                X86Tier::Scalar
+            );
+        }
+    }
+
+    #[test]
+    fn generated_f32_contains_avx_level_sse2_fallback() {
+        // The generated size-4 f32 dispatcher must contain an ISA_AVX_LEVEL branch
+        // that calls the sse2 codelet — i.e. the AVX-only-host f32 path is wired
+        // and does not silently fall through to the scalar tail.
+        let src = generate_dispatcher(DispatcherConfig {
+            size: 4,
+            precision: Precision::F32,
+        })
+        .expect("generate")
+        .to_string();
+        // Both the AVX-level guard and the sse2 delegate must be present.
+        assert!(
+            src.contains("ISA_AVX_LEVEL"),
+            "missing ISA_AVX_LEVEL branch: {src}"
+        );
+        assert!(
+            src.contains("codelet_simd_4_sse2_f32"),
+            "AVX-level f32 branch must delegate to sse2 codelet: {src}"
+        );
+    }
+
+    #[test]
+    fn generated_f64_avx_level_uses_pure_avx_codelet() {
+        let src = generate_dispatcher(DispatcherConfig {
+            size: 4,
+            precision: Precision::F64,
+        })
+        .expect("generate")
+        .to_string();
+        assert!(
+            src.contains("ISA_AVX_LEVEL"),
+            "missing ISA_AVX_LEVEL branch: {src}"
+        );
+        assert!(
+            src.contains("codelet_simd_4_avx_f64"),
+            "AVX-level f64 branch must delegate to pure-AVX codelet: {src}"
+        );
     }
 
     #[test]

@@ -21,6 +21,25 @@ use oxifft::api::WisdomCache;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("OxiFFT tuner: profiles FFT algorithms across a range of transform sizes and writes a binary wisdom file that can be loaded by the library at startup.");
+        println!();
+        println!("Usage:");
+        println!("  oxifft_tune [--min-size N] [--max-size N] [--reps N] [--output PATH]");
+        println!();
+        println!("Defaults:");
+        println!("  --min-size 2");
+        println!("  --max-size 4096");
+        println!("  --reps 32");
+        println!("  --output wisdom_baseline.bin");
+        std::process::exit(0);
+    }
+
+    if args.iter().any(|a| a == "--version") {
+        println!("oxifft_tune {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
     let min_size = parse_arg(&args, "--min-size").unwrap_or(2);
     let max_size = parse_arg(&args, "--max-size").unwrap_or(4096);
     let reps = parse_arg(&args, "--reps").unwrap_or(32);
@@ -46,7 +65,7 @@ fn main() {
         progress_count += 1;
         // Print progress every 10% of the range.
         let pct_step = (total / 10).max(1);
-        if progress_count % pct_step == 0 {
+        if progress_count.is_multiple_of(pct_step) {
             // Use u64 arithmetic to avoid usize→f64 precision lint.
             let pct = progress_count as u64 * 100 / total as u64;
             eprintln!("  [{pct:3}%] tuned n={n}");

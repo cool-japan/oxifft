@@ -1,0 +1,182 @@
+# cargo-deny configuration for the OxiFFT workspace.
+#
+# Enforces the COOLJAPAN dependency-replacement policy (see the top-level
+# CLAUDE.md "Dependency Replacements" table): a small set of crates are banned
+# workspace-wide because a COOLJAPAN/oxi* equivalent exists, with narrow,
+# documented exceptions ONLY for `oxifft-bench` (publish = false), whose whole
+# purpose is comparing OxiFFT against real rustfft/FFTW.
+#
+# Run with:
+#   cargo deny check bans
+#
+# A note on scope: `wrappers` on a `[[bans.deny]]` entry only exempts the
+# crate's *direct* dependents (see cargo-deny's own docs: "allowed to have a
+# direct dependency on the banned crate but denies all transitive dependencies
+# on it"). Several banned crates here are reached multiple hops deep (e.g.
+# `oxifft-bench` -> `fftw` -> `fftw-sys` -> `fftw-src` -> `zip` -> `flate2` ->
+# `miniz_oxide`), so each hop in that chain gets its own `wrappers` entry
+# naming its actual immediate parent, verified against the real dependency
+# graph (`cargo tree -e no-dev -i <crate>`) rather than guessed.
+#
+# A note on "-sys" crates: the CLAUDE.md policy also calls for banning "most
+# -sys (FFI) crates" generally. cargo-deny's crate-spec matching is exact-name
+# (optionally with a semver predicate) with no glob/wildcard support on the
+# name itself, so a literal "any `*-sys` crate" rule cannot be expressed here.
+# That policy is instead enforced by verifying `oxifft`'s own default-feature
+# dependency closure is FFI-free (`cargo tree -p oxifft` / `cargo tree -p
+# oxifft --all-features` show zero `-sys` crates reachable from `oxifft`
+# itself; the only `-sys` crates anywhere in the workspace graph are
+# `fftw-sys`/`bzip2-sys`/`zstd-sys` behind oxifft-bench's non-default
+# `fftw-compare` feature, and `mpi-sys`/`libffi-sys` behind the standalone,
+# not-default-member `oxifft-adapter-mpi` crate, which necessarily needs real
+# MPI FFI to exist at all).
+
+[graph]
+all-features = true
+
+# This section is considered when running `cargo deny check advisories`.
+# Every ignored ID below is an "unmaintained crate" / low-severity advisory in
+# a transitive dependency this workspace does not control, reached only via
+# non-default features, verified against the real graph (`cargo tree
+# --all-features -i <crate>`) rather than assumed. Three distinct chains:
+#   - Five entries (RUSTSEC-2020-0159, 2023-0043, 2022-0013, 2022-0006,
+#     2020-0071) come from `fftw-src`'s old, unmaintained `ftp`/`chrono 0.2`
+#     chain, used only to download FFTW source archives behind
+#     oxifft-bench's non-default `fftw-compare` feature (oxifft-bench has
+#     `publish = false`).
+#   - RUSTSEC-2025-0058 (`custom_derive`) comes from the external `mpi` crate
+#     (via `conv`), a required dependency of `oxifft-adapter-mpi` for real
+#     MPI FFI bindings.
+#   - RUSTSEC-2024-0436 (`paste`) comes from the `metal` crate (Apple Metal
+#     FFI bindings) via `oxicuda-metal`, reachable only through `oxifft`'s
+#     optional, non-default `gpu`/`metal` feature.
+# None of this ever compiles into a default-feature build of any published
+# OxiFFT crate, and none of it is something this workspace can fix upstream.
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2020-0159", reason = "chrono 0.2.25, transitive via fftw-src's ftp dependency (fftw-compare feature only, oxifft-bench is publish = false)" },
+    { id = "RUSTSEC-2025-0058", reason = "custom_derive, transitive via mpi 0.8.2's conv dependency (oxifft-adapter-mpi only). Unmaintained-crate warning in an upstream MPI-binding dependency we don't control; not itself an exploitable vulnerability." },
+    { id = "RUSTSEC-2023-0043", reason = "ftp crate itself is unmaintained; used only by fftw-src (fftw-compare feature only) to fetch FFTW source archives" },
+    { id = "RUSTSEC-2024-0436", reason = "paste, transitive via the metal crate (Apple Metal FFI bindings pulled in by oxicuda-metal, oxifft's optional non-default gpu/metal feature). Unmaintained-crate warning in an upstream Apple-FFI dependency we don't control; not itself an exploitable vulnerability." },
+    { id = "RUSTSEC-2022-0013", reason = "regex 0.1.80, transitive via fftw-src's ftp dependency (fftw-compare feature only)" },
+    { id = "RUSTSEC-2022-0006", reason = "thread_local, transitive via fftw-src's ftp/regex 0.1 chain (fftw-compare feature only)" },
+    { id = "RUSTSEC-2020-0071", reason = "time 0.1.45, transitive via fftw-src's chrono 0.2 dependency (fftw-compare feature only)" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+allow-workspace = false
+
+deny = [
+    # --- openblas -> use oxiblas instead ---
+    { crate = "openblas-src", reason = "COOLJAPAN policy: use oxiblas instead of openblas" },
+    { crate = "openblas", reason = "COOLJAPAN policy: use oxiblas instead of openblas" },
+
+    # --- bincode -> use oxicode instead ---
+    { crate = "bincode", reason = "COOLJAPAN policy: use oxicode instead of bincode" },
+
+    # --- rustfft -> OxiFFT is itself the pure-Rust rustfft replacement ---
+    # Allowed as a direct dependency of oxifft-bench (publish = false, behind
+    # the non-default `rustfft-compare` feature) and as a `[dev-dependencies]`
+    # entry of `oxifft` itself (oxifft/tests/rustfft_comparison.rs only —
+    # dev-dependencies are never part of the published/compiled library
+    # artifact), purely for comparison against the crate this workspace exists
+    # to replace.
+    { crate = "rustfft", wrappers = ["oxifft-bench", "oxifft"], reason = "OxiFFT is the pure-Rust rustfft replacement; only used by oxifft-bench (publish = false, `rustfft-compare` feature) and oxifft's own dev-dependencies (tests/rustfft_comparison.rs) for comparison benchmarks" },
+
+    # --- Z3 -> use oxiz instead ---
+    { crate = "z3", reason = "COOLJAPAN policy: use oxiz instead of Z3" },
+    { crate = "z3-sys", reason = "COOLJAPAN policy: use oxiz instead of Z3" },
+
+    # --- rusqlite -> use oxisql-sqlite-compat instead ---
+    { crate = "rusqlite", reason = "COOLJAPAN policy: use oxisql-sqlite-compat instead of rusqlite" },
+    { crate = "libsqlite3-sys", reason = "COOLJAPAN policy: use oxisql-sqlite-compat instead of rusqlite" },
+
+    # --- zip / flate2 / zstd / bzip2 / miniz_oxide -> use oxiarc-* instead ---
+    # This whole chain is reached exclusively via:
+    #   oxifft-bench --(fftw-compare feature)--> fftw -> fftw-sys -> fftw-src
+    #   -> zip -> {bzip2, flate2 -> miniz_oxide, zstd}
+    # `fftw-src` bundles+builds the reference FFTW C library from a fetched
+    # archive; `zip`/friends are its archive-extraction dependencies, not
+    # anything OxiFFT itself chooses to compress/archive with.
+    { crate = "zip", wrappers = ["fftw-src"], reason = "COOLJAPAN policy: use oxiarc-zip instead of zip; only pulled in by fftw-src (oxifft-bench's non-default fftw-compare feature) to fetch the reference FFTW source" },
+    { crate = "flate2", wrappers = ["zip"], reason = "COOLJAPAN policy: use oxiarc-* instead of flate2; transitive dependency of zip (see above)" },
+    { crate = "zstd", wrappers = ["zip"], reason = "COOLJAPAN policy: use oxiarc-zstd instead of zstd; transitive dependency of zip (see above)" },
+    { crate = "bzip2", wrappers = ["zip"], reason = "COOLJAPAN policy: use oxiarc-bzip2 instead of bzip2; transitive dependency of zip (see above)" },
+    { crate = "miniz_oxide", wrappers = ["flate2"], reason = "COOLJAPAN policy: use oxiarc-* instead of miniz_oxide; transitive dependency of flate2 (see above)" },
+
+    # --- lz4 / tar / snap / brotli -> use oxiarc-* instead ---
+    # None of these are currently in the resolved dependency graph at all
+    # (verified: absent from Cargo.lock); listed proactively so they cannot be
+    # added later without a documented, reviewed exception.
+    { crate = "lz4", reason = "COOLJAPAN policy: use oxiarc-lz4 instead of lz4" },
+    { crate = "lz4-sys", reason = "COOLJAPAN policy: use oxiarc-lz4 instead of lz4" },
+    { crate = "tar", reason = "COOLJAPAN policy: use oxiarc-tar instead of tar" },
+    { crate = "snap", reason = "COOLJAPAN policy: use oxiarc-snap instead of snap" },
+    { crate = "brotli", reason = "COOLJAPAN policy: use oxiarc-brotli instead of brotli" },
+]
+
+# Certain crates/versions that will be skipped when doing duplicate-version
+# detection (`multiple-versions`). `syn` is unavoidably duplicated today: the
+# workspace's own proc-macro crates (oxifft-codegen / oxifft-codegen-impl) are
+# pinned to syn 2.0 (see the root Cargo.toml comment on why upgrading to the
+# new 3.0 major is deferred, not overlooked), while `serde_derive` already
+# pulls in syn 3.0 transitively.
+skip = [
+    { crate = "syn@2.0.119", reason = "oxifft-codegen / oxifft-codegen-impl deliberately deferred syn 3.0 migration; see root Cargo.toml" },
+]
+
+# This section is considered when running `cargo deny check licenses`.
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+]
+
+# `fftw-src` (behind oxifft-bench's non-default `fftw-compare` feature) fetches
+# and builds the real, upstream FFTW C library for comparison benchmarking; it
+# is itself licensed GPL-2.0-or-later, which is not acceptable for the rest of
+# the (Apache-2.0) workspace and so is intentionally NOT in the global `allow`
+# list above. It never links into, nor is distributed with, any published
+# OxiFFT crate (oxifft-bench has `publish = false`), so it is exempted here by
+# name rather than admitted workspace-wide.
+exceptions = [
+    { allow = ["GPL-2.0-or-later"], crate = "fftw-src" },
+]
+
+[licenses.private]
+ignore = true
+
+# `fftw` and `fftw-sys` (same non-default `fftw-compare` chain) each ship a
+# bundled `LICENSE.md` but no machine-readable `license`/`license-file`
+# manifest field, so cargo-deny cannot derive an SPDX expression
+# automatically; low-confidence (0.77) text matching identifies both as MIT,
+# which we confirm explicitly here.
+[[licenses.clarify]]
+crate = "fftw-sys"
+expression = "MIT"
+license-files = [
+    { path = "LICENSE.md", hash = 0xb3398f27 },
+]
+
+[[licenses.clarify]]
+crate = "fftw"
+expression = "MIT"
+license-files = [
+    { path = "LICENSE.md", hash = 0xb3398f27 },
+]
+
+# This section is considered when running `cargo deny check sources`.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

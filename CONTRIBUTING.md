@@ -13,7 +13,7 @@ Thank you for your interest in contributing to OxiFFT! This document provides gu
 
 ### Prerequisites
 
-- Rust 1.75 or later
+- Rust 1.87 or later (the project MSRV, verified empirically)
 - Cargo
 - Git
 

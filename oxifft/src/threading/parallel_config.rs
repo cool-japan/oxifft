@@ -208,6 +208,39 @@ pub fn set_global_parallel_config(config: ParallelConfig) -> Result<(), Parallel
     GLOBAL_CONFIG.set(config)
 }
 
+/// Should a parallel dispatch of `count` independent work items across
+/// `num_threads` threads be used, according to the global
+/// [`ParallelConfig`] (see [`global_parallel_config`])?
+///
+/// This is the single entry point the threading module's own execution
+/// helpers -- [`RayonPool::parallel_for`](super::RayonPool)
+/// and
+/// [`WorkStealingContext::par_map_slices_mut`](super::work_stealing::WorkStealingContext::par_map_slices_mut)
+/// -- consult before dispatching work in parallel, so that
+/// [`ParallelConfig`]'s size-aware thresholds (`min_fft_size`,
+/// `min_batch_chunk`, ...) actually take effect instead of merely being
+/// tested-but-unused configuration. Callers that already know a batch size
+/// and thread count can also call this directly to make the same decision.
+///
+/// Equivalent to
+/// `global_parallel_config().should_parallelize_batch(count, num_threads)`.
+///
+/// # Example
+///
+/// ```
+/// use oxifft::threading::should_parallelize;
+///
+/// // A tiny workload is never worth parallelising, regardless of how many
+/// // threads are available.
+/// assert!(!should_parallelize(2, 8));
+/// ```
+#[cfg(feature = "std")]
+#[inline]
+#[must_use]
+pub fn should_parallelize(count: usize, num_threads: usize) -> bool {
+    global_parallel_config().should_parallelize_batch(count, num_threads)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -314,5 +347,31 @@ mod tests {
         // global_parallel_config should return a valid reference
         let cfg = global_parallel_config();
         assert!(cfg.enabled);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_should_parallelize_matches_config_batch_logic() {
+        // should_parallelize must agree with should_parallelize_batch on the
+        // global (default) config for the same inputs -- it is meant to be
+        // a thin, consultable alias usable from execution helpers.
+        let cfg = global_parallel_config();
+        for (count, threads) in [(2usize, 8usize), (1000, 8), (32, 8), (31, 8), (100, 1)] {
+            assert_eq!(
+                should_parallelize(count, threads),
+                cfg.should_parallelize_batch(count, threads),
+                "mismatch for count={count}, threads={threads}"
+            );
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_should_parallelize_rejects_tiny_workload() {
+        // Regardless of thread count, a workload far below the default
+        // min_batch_chunk threshold should never be recommended for
+        // parallel dispatch.
+        assert!(!should_parallelize(1, 8));
+        assert!(!should_parallelize(2, 16));
     }
 }

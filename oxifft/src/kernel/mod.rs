@@ -4,8 +4,9 @@
 //! - `Float` trait for generic floating-point operations
 //! - `Complex<T>` for complex numbers
 //! - `Tensor` and `IoDim` for N-dimensional data representation
-//! - `Problem`, `Plan`, and `Solver` trait hierarchies
-//! - The `Planner` that orchestrates algorithm selection
+//! - `Problem` and `Plan` trait hierarchies
+//! - The `Planner` that enumerates candidate algorithms for the public API's
+//!   flag-aware selection path
 
 mod complex;
 pub(crate) mod complex_mul;
@@ -15,14 +16,12 @@ pub mod f128_type;
 pub mod f16;
 mod flags;
 mod float;
-mod hash;
 mod ops;
 mod plan;
 mod planner;
 mod primes;
 mod problem;
 mod rader_omega;
-mod solver;
 mod tensor;
 mod trig;
 mod twiddle;
@@ -34,13 +33,11 @@ pub use f128_type::F128;
 pub use f16::F16;
 pub use flags::PlannerFlags;
 pub use float::Float;
-pub use hash::ProblemHash;
 pub use ops::OpCount;
 pub use plan::{Plan, WakeMode, WakeState};
 pub use planner::{Planner, SolverChoice, WisdomEntry};
 pub use primes::{factor, is_prime, mod_pow, primitive_root};
 pub use problem::{Problem, ProblemKind};
-pub use solver::Solver;
 pub use tensor::{IoDim, Tensor};
 pub use trig::TrigTable;
 pub use twiddle::{

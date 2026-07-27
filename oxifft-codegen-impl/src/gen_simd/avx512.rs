@@ -569,8 +569,46 @@ pub(super) fn gen_avx512_size_8_f32() -> TokenStream {
 ///
 /// For stage-4 twiddles (W16^k for k=0..7) we use FMA:
 /// - `_mm512_fmadd_ps` / `_mm512_fmsub_ps` for complex multiply
-#[allow(clippy::too_many_lines)]
+// `cast_possible_truncation`: the codegen-time twiddle tables are
+// intentionally computed in `f64` (for precision) then rounded to the `f32`
+// the emitted codelet operates on — an explicit, one-time, build-time
+// rounding, not a runtime precision hazard.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
 pub(super) fn gen_avx512_size_16_f32() -> TokenStream {
+    // Precompute the W16^k / W8^k twiddle-factor tables at proc-macro
+    // expansion time instead of emitting runtime `.sin()`/`.cos()` calls.
+    //
+    // `f32::sin`/`f32::cos` are `std`-only inherent methods (no_std has no
+    // built-in transcendental math without an extra `libm`-style
+    // dependency), so calling them from *inside* the emitted function body
+    // would silently break `#![no_std]` builds — unlike the SIMD dispatch
+    // arms elsewhere in this crate, this is not gated by any cfg, so it
+    // would break unconditionally. Since N=16 is fixed at codegen time,
+    // every twiddle angle is already known; the only runtime-variable piece
+    // is the forward/inverse sign. `cos` is even and `sin` is odd, so a
+    // single precomputed "positive angle" (`sign_f = +1`) table plus one
+    // multiply of the sine component by the runtime `sign_f` reproduces both
+    // directions exactly, with no runtime trig call at all:
+    //   cos(sign_f * θ) = cos(θ)             (sign_f ∈ {-1.0, 1.0})
+    //   sin(sign_f * θ) = sign_f * sin(θ)
+    let w16_angles: Vec<(f32, f32)> = (0..8_usize)
+        .map(|k| {
+            let angle = 2.0 * core::f64::consts::PI * (k as f64) / 16.0;
+            (angle.cos() as f32, angle.sin() as f32)
+        })
+        .collect();
+    let w16_cos: Vec<f32> = w16_angles.iter().map(|&(c, _)| c).collect();
+    let w16_sin_base: Vec<f32> = w16_angles.iter().map(|&(_, s)| s).collect();
+
+    let w8_angles: Vec<(f32, f32)> = (0..4_usize)
+        .map(|k| {
+            let angle = 2.0 * core::f64::consts::PI * (k as f64) / 8.0;
+            (angle.cos() as f32, angle.sin() as f32)
+        })
+        .collect();
+    let w8_cos: Vec<f32> = w8_angles.iter().map(|&(c, _)| c).collect();
+    let w8_sin_base: Vec<f32> = w8_angles.iter().map(|&(_, s)| s).collect();
+
     quote! {
         /// Size-16 FFT using AVX-512F intrinsics for f32 data (radix-2 DIT, 4 stages).
         ///
@@ -629,13 +667,18 @@ pub(super) fn gen_avx512_size_16_f32() -> TokenStream {
             let fwd = sign < 0;
             let sign_f = if fwd { -1.0_f32 } else { 1.0_f32 };
 
-            // Precompute W16^k twiddle factors for stage 4 (k = 0..7)
-            // W16^k = exp(sign_f * 2πik/16) = cos(sign_f*2πk/16) + i*sin(sign_f*2πk/16)
+            // W16^k twiddle factors for stage 4 (k = 0..7).
+            // W16^k = exp(sign_f * 2πik/16) = cos(sign_f*2πk/16) + i*sin(sign_f*2πk/16).
+            // The cosine/sine tables below are literal constants computed at
+            // proc-macro expansion time (no runtime `.sin()`/`.cos()` calls —
+            // see the doc comment on `gen_avx512_size_16_f32`); only the sign
+            // of the sine component depends on the runtime `sign_f`.
+            const W16_COS: [f32; 8] = [#(#w16_cos),*];
+            const W16_SIN_BASE: [f32; 8] = [#(#w16_sin_base),*];
             let w16: [(f32, f32); 8] = {
                 let mut arr = [(0.0_f32, 0.0_f32); 8];
                 for (k, item) in arr.iter_mut().enumerate() {
-                    let angle = sign_f * 2.0 * core::f32::consts::PI * (k as f32) / 16.0;
-                    *item = (angle.cos(), angle.sin());
+                    *item = (W16_COS[k], W16_SIN_BASE[k] * sign_f);
                 }
                 arr
             };
@@ -680,13 +723,14 @@ pub(super) fn gen_avx512_size_16_f32() -> TokenStream {
                 a[group + 1] = _mm_add_ps(a[group + 1], t_tw);
             }
 
-            // Stage 3: span-4, W8 twiddles
-            // Precompute W8 twiddles (k=0..3)
+            // Stage 3: span-4, W8 twiddles (k=0..3) — same precomputed-table
+            // strategy as W16 above; no runtime trig calls.
+            const W8_COS: [f32; 4] = [#(#w8_cos),*];
+            const W8_SIN_BASE: [f32; 4] = [#(#w8_sin_base),*];
             let w8: [(f32, f32); 4] = {
                 let mut arr = [(0.0_f32, 0.0_f32); 4];
                 for (k, item) in arr.iter_mut().enumerate() {
-                    let angle = sign_f * 2.0 * core::f32::consts::PI * (k as f32) / 8.0;
-                    *item = (angle.cos(), angle.sin());
+                    *item = (W8_COS[k], W8_SIN_BASE[k] * sign_f);
                 }
                 arr
             };
@@ -719,6 +763,82 @@ pub(super) fn gen_avx512_size_16_f32() -> TokenStream {
             for i in 0..16_usize {
                 store_cx(ptr.add(i * 2), a[i]);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::cast_possible_truncation)] // intentional f64 -> f32 rounding, mirroring the codegen itself
+mod tests {
+    use super::gen_avx512_size_16_f32;
+
+    /// Regression guard for a `no_std`-breaking construct: the size-16 f32
+    /// codelet used to compute its W16/W8 twiddle tables via runtime
+    /// `.sin()`/`.cos()` calls on a bare `f32` — `std`-only inherent methods
+    /// unrelated to the generic `Float` trait, so they broke under
+    /// `#![no_std]` unconditionally (not even cfg-gated). They are now
+    /// precomputed at proc-macro expansion time into literal constant
+    /// tables, so no runtime trig call should remain in the emitted code.
+    #[test]
+    fn size_16_f32_has_no_runtime_trig_calls() {
+        let s = gen_avx512_size_16_f32().to_string();
+        assert!(!s.contains(". cos"), "must not call .cos() at runtime: {s}");
+        assert!(!s.contains(". sin"), "must not call .sin() at runtime: {s}");
+        assert!(
+            s.contains("W16_COS") && s.contains("W16_SIN_BASE"),
+            "expected precomputed W16 twiddle tables: {s}"
+        );
+        assert!(
+            s.contains("W8_COS") && s.contains("W8_SIN_BASE"),
+            "expected precomputed W8 twiddle tables: {s}"
+        );
+    }
+
+    /// The precomputed twiddle tables must carry the exact same values a
+    /// runtime `angle.cos()`/`angle.sin()` computation (the previous
+    /// implementation) would have produced for `sign_f = 1.0` (i.e. the
+    /// "positive angle" base table before the runtime `* sign_f` on the sine
+    /// component) — computed independently here and matched as literal
+    /// token text, so any future accidental change to the formula (e.g. a
+    /// wrong `N`, wrong `k` range, or swapped `cos`/`sin`) is caught.
+    #[test]
+    fn size_16_f32_twiddle_tables_match_expected_values() {
+        let s = gen_avx512_size_16_f32().to_string();
+
+        for k in 0..8_usize {
+            let angle = 2.0 * core::f64::consts::PI * (k as f64) / 16.0;
+            let expected_cos = angle.cos() as f32;
+            let expected_sin = angle.sin() as f32;
+            let cos_tok = quote::quote! { #expected_cos }.to_string();
+            let sin_tok = quote::quote! { #expected_sin }.to_string();
+            assert!(
+                s.contains(&cos_tok),
+                "k={k}: expected W16 cos literal `{cos_tok}` not found in output"
+            );
+            assert!(
+                s.contains(&sin_tok),
+                "k={k}: expected W16 sin literal `{sin_tok}` not found in output"
+            );
+        }
+
+        for k in 0..4_usize {
+            let angle = 2.0 * core::f64::consts::PI * (k as f64) / 8.0;
+            let expected_cos = angle.cos() as f32;
+            let expected_sin = angle.sin() as f32;
+            let cos_tok = quote::quote! { #expected_cos }.to_string();
+            let sin_tok = quote::quote! { #expected_sin }.to_string();
+            assert!(
+                s.contains(&cos_tok),
+                "k={k}: expected W8 cos literal `{cos_tok}` not found in output"
+            );
+            assert!(
+                s.contains(&sin_tok),
+                "k={k}: expected W8 sin literal `{sin_tok}` not found in output"
+            );
         }
     }
 }

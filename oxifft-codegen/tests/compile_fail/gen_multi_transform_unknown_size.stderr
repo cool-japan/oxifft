@@ -1,0 +1,7 @@
+error: multi_transform: unsupported size 3 (expected 2, 4, or 8)
+ --> tests/compile_fail/gen_multi_transform_unknown_size.rs:3:1
+  |
+3 | gen_multi_transform_codelet!(size = 3, v = 8, isa = avx2, ty = f32);
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `gen_multi_transform_codelet` (in Nightly builds, run with -Z macro-backtrace for more info)

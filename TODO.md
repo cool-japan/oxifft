@@ -229,7 +229,10 @@
 
 ---
 
-## Current Status (v0.3.2 — All Phases 1–10 Complete + v0.3.0/0.3.1/0.3.2 Performance — Released 2026-05-22)
+## Implementation History Snapshot (v0.3.2 — All Phases 1–10 Complete + v0.3.0/0.3.1/0.3.2 Performance — Released 2026-05-22)
+
+> This snapshot reflects the v0.3.2 release and is preserved as a historical record. For the
+> current release status, see "v0.4.0 — Production Readiness Sprint" below.
 
 ### Implemented Solvers
 - **NOP Solver**: Size-0 and size-1 (identity) transforms
@@ -284,7 +287,7 @@
 - **rfft_batch/irfft_batch**: Convenience functions for batched real FFT
 
 ### Test Coverage
-- 1554 tests passing (unit + integration + rustfft comparison + wisdom + planning + size coverage + GuruPlan + split-complex + codegen + SIMD + signal processing + autodiff + convolution + NUFFT + FrFT + sparse + pruned + streaming + auto-tuning + mixed-radix + multi-rank 3D pencil FFT)
+- 1,730 tests passing across the workspace, all features (v0.4.0), + 107 doctests (1 ignored) — unit + integration + rustfft comparison + wisdom + planning + size coverage + GuruPlan + split-complex + codegen + SIMD + signal processing + autodiff + convolution + NUFFT + FrFT + sparse + pruned + streaming + auto-tuning + mixed-radix + multi-rank 3D pencil FFT
 - 28 FFTW comparison tests passing (oxifft-bench with fftw-compare feature)
 - 688 public API items (all documented and tested)
 - 0 unimplemented!() or todo!() in public API surface
@@ -404,7 +407,7 @@
 
 ### GPU Support
 - [x] Implement `GpuFftEngine` trait for GPU-accelerated FFT
-- [x] Implement `GpuBackend` enum (Auto, Cuda, Metal, OpenCL, Vulkan)
+- [x] Implement `GpuBackend` enum — the `OpenCL`/`Vulkan` variants were later **removed** (they were dead-code placeholders with no backing feature/dependency); the shipping enum is `Auto`, `Cuda`, `Metal` only. See "GPU: Architecture Cleanup" below.
 - [x] Implement `GpuBuffer<T>` for GPU memory management
 - [x] Implement `GpuFft<T>` plan with forward/inverse transforms
 - [x] Implement `GpuCapabilities` for querying device info
@@ -754,7 +757,7 @@ to the GPU/performance milestone in v0.3.0.
 - GPU error recovery and pooling in place
 - `cargo semver-checks` passes
 - `cargo publish --dry-run` succeeds for all crates
-- 1554 tests pass with `--all-features`
+- 1,692 tests pass with `--all-features` (+ 107 doctests, 0 ignored)
 
 ### Breaking Changes
 
@@ -920,6 +923,89 @@ implemented" errors — no working code depends on them).
 
 ---
 
+## v0.4.0 — Production Readiness Sprint (audit 2026-07-22)
+
+**Theme:** Close every gap found by the 2026-07-22 deep audit (152 findings across 16
+investigators): silent wrong-answer bugs, unwired flagship features, unsound APIs,
+dishonest docs, packaging blockers. Zero silent degradation for v1.0.
+
+**Status legend (as of the v0.4.0 docs pass):** `[x]` = fix landed and the full
+test suite (1,730 tests, all features) is green; `[~]` = partially addressed,
+remaining gap noted; `[ ]` = not yet done.
+
+### Wave 1 — Correctness & Core Wiring (parallel)
+
+- [x] **planner-wisdom**: `Plan::dft_1d` now honors ESTIMATE (heuristic) vs
+      MEASURE/PATIENT/EXHAUSTIVE (consult runtime wisdom via `lookup_wisdom`, else
+      benchmark real candidates and cache the winner); `auto_tune::tune_size` gained a
+      `Flags` arg and compares candidates; `Flags::WISDOM_ONLY` added; `build.rs`
+      OXIFFT_TUNE writes a real baseline; dead `kernel::{Solver,ProblemHash}` removed
+- [x] **wisdom-robust**: binary format **v2** (variable-length factor lists — fixes >6-factor
+      truncation, e.g. n=2187; u32 entry count), `from_binary` returns `Result` with semantic
+      validation, RwLock poison recovery, import size ceilings, binary-format fuzz target
+- [x] **real-correctness**: c2r normalization unified across 1D/2D/3D/ND; Flags threaded through
+      RealPlan/SplitPlan/R2rPlan/PlanND; odd-N real FFT fixed (regression tests added);
+      r2r rank>1 support (`R2rPlan2D`/`R2rPlan3D`)
+- [~] **gpu**: Metal inverse double-normalization **fixed** (regression test on the public
+      `GpuFft` API); CUDA CPU-fallback now **explicit** (`GpuFft::execution_target()` /
+      `GpuCapabilities::hardware_accelerated`); `eprintln!` and Send/Sync addressed.
+      **Remaining:** real CUDA kernel dispatch, buffer-pool wiring into the exec path, native
+      batched GPU dispatch
+- [~] **mpi**: criticals addressed and code reworked (`oxifft-adapter-mpi`); distributed real
+      transforms shipped (`MpiRealPlan2D`/`MpiRealPlan3D`, r2c/c2r with odd-last-dim support);
+      `distributed_fft_dim0` reworked to a single alltoallv-based transpose (was per-fiber
+      `all_gather_v`); validated under `mpirun -n 1/2/3/4`. **Remaining:** howmany/batched
+      MPI transforms
+- [x] **sparse-pruned**: FFAST decoder and pruned/partial paths reworked; tests are numeric
+      (not tautological); full suite green
+- [x] **autodiff**: gradient correctness fixed with finite-difference-checked tests; suite green
+- [x] **nufft-czt-frft**: numeric tests vs direct NDFT; NUFFT convention documented; conv
+      FFT-path exercised; suite green
+- [x] **quality-soundness**: AlignedBuffer overflow fixed, unsound raw-pointer API addressed,
+      Err instead of panic in low-level/zero-length paths, twiddle-cache poison recovery; suite green
+- [~] **codegen**: codegen-impl reworked (handled by the codegen agent). **Remaining in this
+      docs pass:** codegen crate READMEs are owned by a separate agent and are out of scope here
+- [~] **nostd-features**: dead `simd` feature **removed**; `portable_simd` documented as
+      nightly-only; core `no_std` build fixed — `cargo check -p oxifft --no-default-features`
+      (host) and `--target thumbv7em-none-eabihf` (embedded) both build clean, as does
+      `--no-default-features --features avx512`. **Remaining:** full no_std feature-matrix
+      sweep (every non-default feature × no_std) not yet exhaustively verified
+- [~] **threading**: `ParallelConfig` thresholds now consulted by Plan2D/3D execute; Plan3D
+      pool propagation done. **Remaining:** `with_num_threads`/`PoolConfig::threads` genuine
+      parallelism limiting
+- [~] **perf**: `fftw_ratio_report` now honors `CARGO_TARGET_DIR` and adds `--out`/
+      `--commit-baseline` (no longer overwrites committed baselines); bench plan-hoisting/
+      black_box methodology fixed. **Remaining:** extend SIMD into the general Stockham path
+      (prime/large-N losses up to 7.8×, n=360 composite 4.77× regression still open)
+
+### Wave 2 — Policy, Packaging, Docs (after Wave 1 verification)
+
+- [x] **workspace-packaging**: `deny.toml` added (`cargo deny check bans` clean), version bump
+      0.3.2 → 0.4.0, MSRV corrected to 1.87, docs.rs metadata, workspace dep inheritance,
+      adapter-mpi README, LICENSE in tarballs, `pkg_simd/` excluded, dead `libc`/`seahash`
+      removed, bench rustfft gating, `default-members`
+- [x] **docs-truthfulness**: README broken examples fixed (autodiff/MPI/streaming/GPU/wisdom
+      now compile); nonexistent `mpi`/`portable_simd`/`simd`/`libc`/`seahash` claims corrected;
+      auto-tuning claim made accurate; "Verified in CI" claims removed (CI disabled); unsourced
+      "9/15 faster than RustFFT" replaced with the honest committed baseline; PROJECT_STATUS
+      rewritten for 0.4.0; all 32 ```ignore-masked doctests un-ignored (`cargo test --doc` passes)
+- [x] **integrator**: cross-file Wave 1 hookups reconciled; adversarial numerics re-validated
+
+### Verification Gates
+
+- [x] cargo nextest run --workspace --all-features: zero failures (1,730 passed, 7 skipped)
+- [x] cargo clippy --workspace --all-targets --all-features: zero warnings (verified across the
+      full workspace)
+- [x] cargo test --doc --all-features: doctests pass (107 doctests, 1 ignored)
+- [~] Feature matrix: all-features + individual std features compile clean; bare and avx512
+      `--no-default-features` (no_std) now build clean (see nostd-features); full feature-matrix
+      sweep still outstanding
+- [x] cargo deny check: fully clean (bans, advisories, licenses, sources)
+- [x] Adversarial numerics validation (primes/composites/2D/3D/DCT/DST/f32) within tolerance
+- [x] mpirun -n 2 / -n 4 pencil + slab tests pass (validated on an MPI host)
+
+---
+
 ## v1.0.0 — Stable Release
 
 **Theme:** Semver stability commitment. Verified performance and platform targets.
@@ -958,15 +1044,23 @@ Production-ready for all 14 COOLJAPAN dependent projects.
     - **Goal:** Commit initial fftw_ratios snapshot to benches/baselines/v0.3.0/ as part of this session.
     - **Files:** `benches/baselines/v0.3.0/fftw_ratios_2026-04-20.json`
 
-### Platform Matrix (Verified in CI)
+### Platform Matrix (verified locally — no CI)
 
-- [x] x86_64 Linux (SSE2, AVX, AVX2, AVX-512)
-- [x] x86_64 macOS (SSE2, AVX, AVX2)
-- [x] x86_64 Windows (SSE2, AVX, AVX2)
-- [x] aarch64 Linux (NEON)
-- [x] aarch64 macOS / Apple Silicon (NEON)
-- [x] wasm32-unknown-unknown (WASM SIMD)
-- [x] no_std (embedded target, with alloc)
+> There is **no CI** (repository policy permits only publish workflows). This
+> matrix reflects **manual, local** verification on available hardware, not
+> automated CI runs. `[x]` = exercised locally at some point; treat as
+> "verified where run", and re-verify per release. `no_std` core now builds
+> clean on host and embedded targets (see the nostd-features sprint item); a
+> full no_std feature-matrix sweep is still outstanding.
+
+- [x] aarch64 macOS / Apple Silicon (NEON) — primary development host
+- [~] x86_64 Linux (SSE2, AVX, AVX2, AVX-512) — verify locally per release
+- [~] x86_64 macOS (SSE2, AVX, AVX2) — verify locally per release
+- [~] x86_64 Windows (SSE2, AVX, AVX2) — verify locally per release
+- [~] aarch64 Linux (NEON) — verify locally per release
+- [~] wasm32-unknown-unknown (WASM SIMD) — verify locally per release
+- [x] no_std (embedded target, with alloc) — `cargo check -p oxifft --no-default-features
+      --target thumbv7em-none-eabihf` builds clean (verified 2026-07-27)
 
 ### Quality Gates
 
@@ -992,8 +1086,8 @@ Production-ready for all 14 COOLJAPAN dependent projects.
 
 ### Success Criteria
 
-- All performance targets met with committed benchmark evidence
-- All platform targets verified in CI
+- All performance targets met with committed benchmark evidence (current baseline: 4/7 gates)
+- All platform targets verified locally on representative hardware (no CI is configured)
 - All quality gates pass
 - 14 dependent projects successfully upgraded
 
@@ -1009,7 +1103,7 @@ None. This is the stable release.
 - [x] Match FFTW performance (1.0×) for power-of-2 sizes via deeper codelet tuning
 - [x] Exceed FFTW for composite sizes via Rust-specific optimizations
 - [x] Implement auto-tuning (runtime codelet selection profiled at build time) (planned 2026-05-01)
-  - **Goal:** Build-time + runtime auto-tuning profiling candidate algorithms (CT-Dit, SplitRadix, Stockham, MixedRadix, Bluestein, Winograd, Direct) for sizes 2..=4096; picks fastest per size on host; persists to WisdomCache. Wires Flags::MEASURE and Flags::PATIENT into Plan::select_algorithm (currently ignored).
+  - **Goal:** Build-time + runtime auto-tuning profiling candidate algorithms (CT-Dit, SplitRadix, Stockham, MixedRadix, Bluestein, Winograd, Direct) for sizes 2..=4096; picks fastest per size on host; persists to WisdomCache. Wires Flags::MEASURE and Flags::PATIENT into Plan::dft_1d algorithm selection (done in v0.4.0 — flags now consult runtime wisdom and compare candidates).
   - **Design:** Two-tier: (1) static tuning via build.rs opt-in (OXIFFT_TUNE=1), binary wisdom_baseline.bin in OUT_DIR; (2) dynamic tuning at runtime when Flags::MEASURE. Core in auto_tune.rs: tune_size<T>(n, max_iters) → WisdomEntry, tune_range<T>(min_n, max_n, on_progress) → WisdomCache. Binary format: header (magic + u16 version + u16 count + u32 reserved) + 30-byte repr(packed) entries (u64 hash_key, u8 algo_tag, u8 factors_len, [u16;6] factors, u64 elapsed_ns), explicit LE bytes, no bincode.
   - **Files:** auto_tune.rs (~600 LoC), types.rs (Flags plumbing + wisdom lookup), wisdom.rs (binary to_le_bytes/from_le_bytes), build.rs (extend stub ~200 LoC), oxifft_tune.rs (extend stub ~150 LoC)
   - **Tests:** tune_size(64) returns valid WisdomEntry in candidate set; tune_range(2..=32) covers 31 sizes; binary round-trip; ESTIMATE vs MEASURE behavior; OXIFFT_SKIP_TUNE=1 sentinel path.

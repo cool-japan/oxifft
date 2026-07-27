@@ -12,10 +12,10 @@ use crate::dft::codelets::twiddle_odd::{
 };
 use crate::dft::problem::Sign;
 use crate::dft::solvers::{
-    BluesteinSolver, CooleyTukeySolver, CtVariant, DirectSolver, GenericSolver, NopSolver,
-    StockhamSolver,
+    BluesteinSolver, CacheObliviousSolver, CooleyTukeySolver, CtVariant, DirectSolver,
+    GenericSolver, NopSolver, RaderSolver, StockhamSolver,
 };
-use crate::kernel::{twiddles_mixed_radix, Complex, Float, TwiddleDirection};
+use crate::kernel::{is_prime, twiddles_mixed_radix, Complex, Float, TwiddleDirection};
 use crate::prelude::*;
 
 #[cfg(feature = "threading")]
@@ -49,11 +49,22 @@ enum Algorithm<T: Float> {
     Generic(Box<GenericSolver<T>>),
     /// Bluestein's algorithm for arbitrary sizes (fallback for primes)
     Bluestein(Box<BluesteinSolver<T>>),
+    /// Rader's algorithm for prime sizes (converts a prime-length DFT into a
+    /// cyclic convolution of length `n - 1`).
+    Rader(Box<RaderSolver<T>>),
+    /// Cache-oblivious four-step FFT for large power-of-2 sizes.
+    CacheOblivious(Box<CacheObliviousSolver<T>>),
     /// Winograd small-prime kernel for N ∈ {3, 5, 7, 9, 11, 13}
     Winograd(usize),
     /// Prime Factor Algorithm (PFA) for coprime composites: N ∈ {15, 21, 35}
     WinogradPfa { n1: usize, n2: usize },
-    /// Mixed-radix FFT for composite sizes (pre-wave stub)
+    /// Mixed-radix decimation-in-time FFT for composite sizes.
+    ///
+    /// A fully-implemented DIT engine: `factors` (radices drawn from
+    /// {2, 3, 4, 5, 7, 8, 16}, ordered innermost-first) are peeled greedily by
+    /// [`try_factor_mixed_radix`], the input is digit-reversal permuted, and one
+    /// twiddle butterfly stage is applied per factor. See
+    /// [`execute_mixed_radix_inplace`].
     MixedRadix { factors: Vec<u16> },
 }
 // ============================================================================
@@ -82,7 +93,7 @@ fn try_factor_mixed_radix(n: usize) -> Option<Vec<u16>> {
 
     'outer: while remaining > 1 {
         for &r in MIXED_RADIX_SUPPORTED {
-            if remaining % r as usize == 0 {
+            if remaining.is_multiple_of(r as usize) {
                 factors.push(r);
                 remaining /= r as usize;
                 continue 'outer;
@@ -240,6 +251,7 @@ pub struct Plan<T: Float> {
 /// state that cannot be reconstructed from the name alone (e.g. `Generic`
 /// needs a `GenericSolver` which stores pre-computed twiddle tables).  The
 /// caller should fall back to heuristic planning in that case.
+#[cfg(feature = "std")]
 fn algorithm_from_solver_name<T: Float>(name: &str, n: usize) -> Option<Algorithm<T>> {
     use crate::dft::solvers::CtVariant;
 
@@ -271,14 +283,27 @@ fn algorithm_from_solver_name<T: Float>(name: &str, n: usize) -> Option<Algorith
                 .split('-')
                 .filter_map(|s| s.parse::<u16>().ok())
                 .collect();
-            if factors.is_empty() {
-                None
-            } else {
+            // Defense-in-depth: reject degenerate factor lists (empty, unsupported
+            // radices, or a product that disagrees with `n`) using the same
+            // validator that gates wisdom decoding, so a corrupt/hostile solver
+            // name can never reach the mixed-radix DIT engine.
+            if crate::api::wisdom::is_valid_mixed_radix_factors(&factors, n as u64) {
                 Some(Algorithm::MixedRadix { factors })
+            } else {
+                None
             }
         }
-        // Stateful solvers — cannot reconstruct from name alone, fall through.
-        "bluestein" | "generic" | "rader" | "cache-oblivious" => None,
+        // Stateful solvers — reconstructed from the transform size `n`, which is
+        // the only extra state they need.  This is what lets measured/imported
+        // wisdom actually feed back into plan selection.
+        "bluestein" => Some(Algorithm::Bluestein(Box::new(BluesteinSolver::new(n)))),
+        "generic" if GenericSolver::<T>::applicable(n) => {
+            Some(Algorithm::Generic(Box::new(GenericSolver::new(n))))
+        }
+        "rader" => RaderSolver::new(n).map(|s| Algorithm::Rader(Box::new(s))),
+        "cache-oblivious" if CacheObliviousSolver::<T>::applicable(n) => {
+            Some(Algorithm::CacheOblivious(Box::default()))
+        }
         _ => None,
     }
 }
@@ -345,9 +370,8 @@ impl<T: Float> Plan<T> {
         //
         // The baseline cache keys by raw size (`n as u64`).  When a match is
         // found the stored `solver_name` is used to reconstruct the algorithm.
-        // Currently we fall through to the heuristic if reconstruction is not
-        // possible; this keeps the code correct even with future unknown solver
-        // names.
+        // This is consulted in every planning mode (it is measured data baked
+        // in at build time) and counts as wisdom for WISDOM_ONLY.
         #[cfg(feature = "std")]
         if let Some(entry) = baseline_wisdom().lookup(n as u64) {
             if let Some(algo) = algorithm_from_solver_name::<T>(&entry.solver_name, n) {
@@ -359,30 +383,97 @@ impl<T: Float> Plan<T> {
             }
         }
 
-        // ── 2. MEASURE / PATIENT: profile the heuristic and store timing ──────
-        //
-        // We run the tuner (which internally always uses ESTIMATE so there is
-        // no re-entry), collect the timing result, and then fall through to
-        // construct the plan via the normal heuristic path.  In a future wave
-        // this could pick among several candidates; for now the value is that
-        // the result is written into the global wisdom cache so that
-        // export_to_string() reflects real timings.
+        // ESTIMATE is the pure-heuristic mode: no wisdom lookup, no benchmarking.
+        // Every other mode (MEASURE / PATIENT / EXHAUSTIVE / WISDOM_ONLY)
+        // consults the runtime wisdom cache first so repeated plan construction
+        // for the same size never re-benchmarks.  The runtime cache requires
+        // `std`, so this binding is only meaningful (and only read) there.
         #[cfg(feature = "std")]
-        if flags.is_measure() || flags.is_patient() {
-            let reps: usize = if flags.is_patient() { 200 } else { 32 };
-            if let Some(result) = crate::api::plan::auto_tune::tune_size::<T>(n, direction, reps) {
-                // Store the timing in the global wisdom cache for later export.
+        let wisdom_backed = flags.is_measure()
+            || flags.is_patient()
+            || flags.is_exhaustive()
+            || flags.is_wisdom_only();
+
+        #[cfg(feature = "std")]
+        if wisdom_backed {
+            // ── 2. Runtime GLOBAL_WISDOM fast path ────────────────────────────
+            //
+            // Reuse a previously-measured (or imported) winner for this size.
+            // This is what makes the second and subsequent MEASURE/PATIENT plan
+            // constructions orders of magnitude cheaper than the first — the
+            // previous behaviour re-ran a full benchmark on *every* call.
+            if let Some(entry) = crate::api::wisdom::lookup_wisdom(n as u64) {
+                if let Some(algo) = algorithm_from_solver_name::<T>(&entry.solver_name, n) {
+                    return Some(Self {
+                        n,
+                        direction,
+                        algorithm: algo,
+                    });
+                }
+            }
+
+            // ── 3. WISDOM_ONLY: no wisdom found → planning fails (FFTW semantics)
+            if flags.is_wisdom_only() {
+                return None;
+            }
+
+            // ── 4. MEASURE / PATIENT / EXHAUSTIVE: benchmark real candidates ──
+            //
+            // The tuner compares several genuinely different algorithms valid
+            // for `n` (see `auto_tune::tune_size`) and returns the fastest.  The
+            // winner is cached in GLOBAL_WISDOM so later constructions hit the
+            // fast path above instead of re-benchmarking.
+            let reps: usize = if flags.is_exhaustive() {
+                200
+            } else if flags.is_patient() {
+                100
+            } else {
+                32
+            };
+            if let Some(result) =
+                crate::api::plan::auto_tune::tune_size::<T>(n, direction, flags, reps)
+            {
                 crate::api::wisdom::store_wisdom(crate::kernel::WisdomEntry {
                     problem_hash: n as u64,
-                    solver_name: result.algorithm_name,
+                    solver_name: result.algorithm_name.clone(),
                     cost: result.elapsed_ns as f64,
                 });
+                if let Some(algo) = algorithm_from_solver_name::<T>(&result.algorithm_name, n) {
+                    return Some(Self {
+                        n,
+                        direction,
+                        algorithm: algo,
+                    });
+                }
             }
-            // Fall through to heuristic — the tuner chose the same algorithm.
         }
 
-        // ── 3. Heuristic selection (ESTIMATE path and fallback) ───────────────
-        let algorithm = Self::select_algorithm(n, flags);
+        // WISDOM_ONLY without `std` cannot consult any runtime wisdom, so it
+        // fails just as it would when no entry exists.
+        #[cfg(not(feature = "std"))]
+        if flags.is_wisdom_only() {
+            return None;
+        }
+
+        // ── 5. Heuristic selection (ESTIMATE path and measured-mode fallback) ─
+        let algorithm = Self::select_algorithm(n);
+        Some(Self {
+            n,
+            direction,
+            algorithm,
+        })
+    }
+
+    /// Construct a plan for size `n` whose algorithm is fixed by a wisdom-format
+    /// solver name (e.g. `"ct-dit"`, `"rader"`, `"mixed-radix-2-3"`).
+    ///
+    /// Returns `None` when the name is unknown or the named algorithm is not
+    /// applicable to `n`.  This is the reconstruction primitive used by the
+    /// auto-tuner to time each candidate algorithm on identical footing.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub(crate) fn from_solver_name(n: usize, direction: Direction, name: &str) -> Option<Self> {
+        let algorithm = algorithm_from_solver_name::<T>(name, n)?;
         Some(Self {
             n,
             direction,
@@ -415,9 +506,23 @@ impl<T: Float> Plan<T> {
     pub fn c2r_1d(n: usize, flags: Flags) -> Option<RealPlan<T>> {
         RealPlan::c2r_1d(n, flags)
     }
-    /// Select the best algorithm for the given size.
-    fn select_algorithm(n: usize, _flags: Flags) -> Algorithm<T> {
+    /// Select the best algorithm for the given size using the fast heuristic.
+    ///
+    /// This is the ESTIMATE-mode decision and the fallback for measured modes
+    /// when no wisdom is available.  It never benchmarks.
+    ///
+    /// `Algorithm::Direct` is deliberately absent here: for every `n ≤ 16` a
+    /// dedicated kernel (Winograd / composite codelet / mixed-radix DIT) is both
+    /// available and faster, so the O(n²) direct path never wins by heuristic.
+    /// It remains reachable through measured/imported wisdom (a stored `"direct"`
+    /// entry reconstructs to [`Algorithm::Direct`]).
+    fn select_algorithm(n: usize) -> Algorithm<T> {
         use crate::dft::codelets::has_composite_codelet;
+
+        /// Largest prime for which Rader's algorithm is preferred over Bluestein
+        /// in the heuristic; above this the Bluestein power-of-two convolution
+        /// wins.  Matches `kernel::planner`'s heuristic threshold.
+        const RADER_MAX_PRIME: usize = 1021;
 
         if n <= 1 {
             Algorithm::Nop
@@ -442,15 +547,19 @@ impl<T: Float> Plan<T> {
             Algorithm::Composite(n)
         } else if let Some(factors) = try_factor_mixed_radix(n) {
             // Mixed-radix DIT FFT for smooth-7 sizes (factors from {2,3,4,5,7,8,16}).
-            // Checked before the Direct fallback so that sizes like 6=3×2, 10=5×2
-            // use the correct DIT engine rather than O(n²) direct computation.
+            // Handles sizes like 6=3×2, 10=5×2 with the correct DIT engine.
             Algorithm::MixedRadix { factors }
-        } else if n <= 16 {
-            // For small non-power-of-2, non-smooth sizes without codelets, use direct O(n²).
-            // (Only primes like 11, 13 land here since smooth composites are handled above.)
-            Algorithm::Direct
         } else if GenericSolver::<T>::applicable(n) {
             Algorithm::Generic(Box::new(GenericSolver::new(n)))
+        } else if is_prime(n) && n <= RADER_MAX_PRIME {
+            // Prime sizes above the Winograd range: Rader's algorithm turns the
+            // length-`n` prime DFT into a length-(n-1) cyclic convolution, which
+            // is markedly faster than Bluestein for small/medium primes.  Fall
+            // back to Bluestein if the solver cannot be constructed.
+            RaderSolver::new(n).map_or_else(
+                || Algorithm::Bluestein(Box::new(BluesteinSolver::new(n))),
+                |s| Algorithm::Rader(Box::new(s)),
+            )
         } else {
             Algorithm::Bluestein(Box::new(BluesteinSolver::new(n)))
         }
@@ -482,6 +591,8 @@ impl<T: Float> Plan<T> {
             Algorithm::Composite(_) => "Composite",
             Algorithm::Generic(_) => "Generic",
             Algorithm::Bluestein(_) => "Bluestein",
+            Algorithm::Rader(_) => "Rader",
+            Algorithm::CacheOblivious(_) => "CacheOblivious",
             Algorithm::Winograd(_) => "Winograd",
             Algorithm::WinogradPfa { .. } => "WinogradPfa",
             Algorithm::MixedRadix { .. } => "MixedRadix",
@@ -513,6 +624,8 @@ impl<T: Float> Plan<T> {
             Algorithm::Composite(_) => "composite".to_string(),
             Algorithm::Generic(_) => "generic".to_string(),
             Algorithm::Bluestein(_) => "bluestein".to_string(),
+            Algorithm::Rader(_) => "rader".to_string(),
+            Algorithm::CacheOblivious(_) => "cache-oblivious".to_string(),
             Algorithm::Winograd(_) => "winograd".to_string(),
             Algorithm::WinogradPfa { .. } => "winograd-pfa".to_string(),
             Algorithm::MixedRadix { factors } => {
@@ -570,6 +683,12 @@ impl<T: Float> Plan<T> {
                 solver.execute(input, output, sign);
             }
             Algorithm::Bluestein(solver) => {
+                solver.execute(input, output, sign);
+            }
+            Algorithm::Rader(solver) => {
+                solver.execute(input, output, sign);
+            }
+            Algorithm::CacheOblivious(solver) => {
                 solver.execute(input, output, sign);
             }
             Algorithm::Winograd(n) => {
@@ -657,6 +776,12 @@ impl<T: Float> Plan<T> {
                 solver.execute_inplace(data, sign);
             }
             Algorithm::Bluestein(solver) => {
+                solver.execute_inplace(data, sign);
+            }
+            Algorithm::Rader(solver) => {
+                solver.execute_inplace(data, sign);
+            }
+            Algorithm::CacheOblivious(solver) => {
                 solver.execute_inplace(data, sign);
             }
             Algorithm::Winograd(n) => {
@@ -797,13 +922,60 @@ impl<T: Float> Plan2D<T> {
     pub fn direction(&self) -> Direction {
         self.direction
     }
+    /// Single-threaded row-then-column 2D FFT.
+    ///
+    /// Used directly when the `threading` feature is off, and as the below-
+    /// threshold fallback when it is on (see `ParallelConfig`).
+    fn execute_serial(&self, input: &[Complex<T>], output: &mut [Complex<T>]) {
+        let total = self.n0 * self.n1;
+        let mut temp = vec![Complex::zero(); total];
+        for i in 0..self.n0 {
+            let row_start = i * self.n1;
+            let row_end = row_start + self.n1;
+            self.row_plan
+                .execute(&input[row_start..row_end], &mut temp[row_start..row_end]);
+        }
+        let mut col_in = vec![Complex::zero(); self.n0];
+        let mut col_out = vec![Complex::zero(); self.n0];
+        for j in 0..self.n1 {
+            for i in 0..self.n0 {
+                col_in[i] = temp[i * self.n1 + j];
+            }
+            self.col_plan.execute(&col_in, &mut col_out);
+            for i in 0..self.n0 {
+                output[i * self.n1 + j] = col_out[i];
+            }
+        }
+    }
+
+    /// Single-threaded in-place row-then-column 2D FFT (see [`Self::execute_serial`]).
+    fn execute_inplace_serial(&self, data: &mut [Complex<T>]) {
+        for i in 0..self.n0 {
+            let row_start = i * self.n1;
+            let row_end = row_start + self.n1;
+            self.row_plan.execute_inplace(&mut data[row_start..row_end]);
+        }
+        let mut col = vec![Complex::zero(); self.n0];
+        for j in 0..self.n1 {
+            for i in 0..self.n0 {
+                col[i] = data[i * self.n1 + j];
+            }
+            self.col_plan.execute_inplace(&mut col);
+            for i in 0..self.n0 {
+                data[i * self.n1 + j] = col[i];
+            }
+        }
+    }
+
     /// Execute the 2D FFT on the given input/output buffers.
     ///
     /// Input and output are row-major: element at (i, j) is at index i*n1 + j.
     ///
     /// When the `threading` feature is enabled, row transforms are parallelised
     /// over rayon workers using work-stealing; column transforms are parallelised
-    /// similarly with per-thread scratch buffers.
+    /// similarly with per-thread scratch buffers. Transforms below the global
+    /// [`ParallelConfig`](crate::threading::ParallelConfig) `min_fft_size`
+    /// threshold run serially.
     ///
     /// # Panics
     /// Panics if buffer sizes don't match n0 × n1.
@@ -816,29 +988,18 @@ impl<T: Float> Plan2D<T> {
         }
 
         #[cfg(not(feature = "threading"))]
-        {
-            let mut temp = vec![Complex::zero(); total];
-            for i in 0..self.n0 {
-                let row_start = i * self.n1;
-                let row_end = row_start + self.n1;
-                self.row_plan
-                    .execute(&input[row_start..row_end], &mut temp[row_start..row_end]);
-            }
-            let mut col_in = vec![Complex::zero(); self.n0];
-            let mut col_out = vec![Complex::zero(); self.n0];
-            for j in 0..self.n1 {
-                for i in 0..self.n0 {
-                    col_in[i] = temp[i * self.n1 + j];
-                }
-                self.col_plan.execute(&col_in, &mut col_out);
-                for i in 0..self.n0 {
-                    output[i * self.n1 + j] = col_out[i];
-                }
-            }
-        }
+        self.execute_serial(input, output);
 
         #[cfg(feature = "threading")]
         {
+            // Consult the global ParallelConfig threshold: transforms below
+            // `min_fft_size` run serially so rayon dispatch overhead never
+            // dominates the actual work.
+            if !crate::threading::global_parallel_config().should_parallelize_fft(total) {
+                self.execute_serial(input, output);
+                return;
+            }
+
             use rayon::prelude::*;
 
             // Step 1: Parallel row transforms.
@@ -902,26 +1063,16 @@ impl<T: Float> Plan2D<T> {
         }
 
         #[cfg(not(feature = "threading"))]
-        {
-            for i in 0..self.n0 {
-                let row_start = i * self.n1;
-                let row_end = row_start + self.n1;
-                self.row_plan.execute_inplace(&mut data[row_start..row_end]);
-            }
-            let mut col = vec![Complex::zero(); self.n0];
-            for j in 0..self.n1 {
-                for i in 0..self.n0 {
-                    col[i] = data[i * self.n1 + j];
-                }
-                self.col_plan.execute_inplace(&mut col);
-                for i in 0..self.n0 {
-                    data[i * self.n1 + j] = col[i];
-                }
-            }
-        }
+        self.execute_inplace_serial(data);
 
         #[cfg(feature = "threading")]
         {
+            // Consult the global ParallelConfig threshold (see `execute`).
+            if !crate::threading::global_parallel_config().should_parallelize_fft(total) {
+                self.execute_inplace_serial(data);
+                return;
+            }
+
             use rayon::prelude::*;
 
             // Step 1: Parallel row transforms (in-place on disjoint row chunks).
@@ -1033,7 +1184,11 @@ impl<T: Float> Plan3D<T> {
     #[cfg(feature = "threading")]
     #[must_use]
     pub fn with_rayon_pool(mut self, pool: std::sync::Arc<rayon::ThreadPool>) -> Self {
-        self.ws = self.ws.with_rayon_pool(pool);
+        // Propagate the custom pool into the embedded plane plan (a `Plan2D`) so
+        // its internal row/column dispatch also runs on this pool rather than
+        // the ambient global rayon pool.
+        self.ws = self.ws.with_rayon_pool(pool.clone());
+        self.plane_plan = self.plane_plan.with_rayon_pool(pool);
         self
     }
 
@@ -1062,6 +1217,61 @@ impl<T: Float> Plan3D<T> {
     pub(crate) fn dim2(&self) -> usize {
         self.n2
     }
+
+    /// Single-threaded plane-then-z 3D FFT.
+    ///
+    /// Used directly when the `threading` feature is off, and as the below-
+    /// threshold fallback when it is on.
+    fn execute_serial(&self, input: &[Complex<T>], output: &mut [Complex<T>]) {
+        let total = self.n0 * self.n1 * self.n2;
+        let plane_size = self.n1 * self.n2;
+        let mut temp = vec![Complex::zero(); total];
+        for i in 0..self.n0 {
+            let plane_start = i * plane_size;
+            let plane_end = plane_start + plane_size;
+            self.plane_plan.execute(
+                &input[plane_start..plane_end],
+                &mut temp[plane_start..plane_end],
+            );
+        }
+        let mut z_col = vec![Complex::zero(); self.n0];
+        let mut z_out = vec![Complex::zero(); self.n0];
+        for j in 0..self.n1 {
+            for k in 0..self.n2 {
+                for i in 0..self.n0 {
+                    z_col[i] = temp[i * plane_size + j * self.n2 + k];
+                }
+                self.z_plan.execute(&z_col, &mut z_out);
+                for i in 0..self.n0 {
+                    output[i * plane_size + j * self.n2 + k] = z_out[i];
+                }
+            }
+        }
+    }
+
+    /// Single-threaded in-place plane-then-z 3D FFT (see [`Self::execute_serial`]).
+    fn execute_inplace_serial(&self, data: &mut [Complex<T>]) {
+        let plane_size = self.n1 * self.n2;
+        for i in 0..self.n0 {
+            let plane_start = i * plane_size;
+            let plane_end = plane_start + plane_size;
+            self.plane_plan
+                .execute_inplace(&mut data[plane_start..plane_end]);
+        }
+        let mut z_col = vec![Complex::zero(); self.n0];
+        for j in 0..self.n1 {
+            for k in 0..self.n2 {
+                for i in 0..self.n0 {
+                    z_col[i] = data[i * plane_size + j * self.n2 + k];
+                }
+                self.z_plan.execute_inplace(&mut z_col);
+                for i in 0..self.n0 {
+                    data[i * plane_size + j * self.n2 + k] = z_col[i];
+                }
+            }
+        }
+    }
+
     /// Execute the 3D FFT on the given input/output buffers.
     ///
     /// Data is row-major: element at (i, j, k) is at index i*n1*n2 + j*n2 + k.
@@ -1078,37 +1288,22 @@ impl<T: Float> Plan3D<T> {
         if total == 0 {
             return;
         }
-        let plane_size = self.n1 * self.n2;
 
         #[cfg(not(feature = "threading"))]
-        {
-            let mut temp = vec![Complex::zero(); total];
-            for i in 0..self.n0 {
-                let plane_start = i * plane_size;
-                let plane_end = plane_start + plane_size;
-                self.plane_plan.execute(
-                    &input[plane_start..plane_end],
-                    &mut temp[plane_start..plane_end],
-                );
-            }
-            let mut z_col = vec![Complex::zero(); self.n0];
-            let mut z_out = vec![Complex::zero(); self.n0];
-            for j in 0..self.n1 {
-                for k in 0..self.n2 {
-                    for i in 0..self.n0 {
-                        z_col[i] = temp[i * plane_size + j * self.n2 + k];
-                    }
-                    self.z_plan.execute(&z_col, &mut z_out);
-                    for i in 0..self.n0 {
-                        output[i * plane_size + j * self.n2 + k] = z_out[i];
-                    }
-                }
-            }
-        }
+        self.execute_serial(input, output);
 
         #[cfg(feature = "threading")]
         {
+            // Consult the global ParallelConfig threshold: small transforms run
+            // serially to avoid rayon dispatch overhead dominating the work.
+            if !crate::threading::global_parallel_config().should_parallelize_fft(total) {
+                self.execute_serial(input, output);
+                return;
+            }
+
             use rayon::prelude::*;
+
+            let plane_size = self.n1 * self.n2;
 
             // Step 1: Parallel 2D plane transforms (each plane is independent).
             let mut temp = vec![Complex::<T>::zero(); total];
@@ -1165,33 +1360,21 @@ impl<T: Float> Plan3D<T> {
         if total == 0 {
             return;
         }
-        let plane_size = self.n1 * self.n2;
 
         #[cfg(not(feature = "threading"))]
-        {
-            for i in 0..self.n0 {
-                let plane_start = i * plane_size;
-                let plane_end = plane_start + plane_size;
-                self.plane_plan
-                    .execute_inplace(&mut data[plane_start..plane_end]);
-            }
-            let mut z_col = vec![Complex::zero(); self.n0];
-            for j in 0..self.n1 {
-                for k in 0..self.n2 {
-                    for i in 0..self.n0 {
-                        z_col[i] = data[i * plane_size + j * self.n2 + k];
-                    }
-                    self.z_plan.execute_inplace(&mut z_col);
-                    for i in 0..self.n0 {
-                        data[i * plane_size + j * self.n2 + k] = z_col[i];
-                    }
-                }
-            }
-        }
+        self.execute_inplace_serial(data);
 
         #[cfg(feature = "threading")]
         {
+            // Consult the global ParallelConfig threshold (see `execute`).
+            if !crate::threading::global_parallel_config().should_parallelize_fft(total) {
+                self.execute_inplace_serial(data);
+                return;
+            }
+
             use rayon::prelude::*;
+
+            let plane_size = self.n1 * self.n2;
 
             // Step 1: Parallel 2D plane transforms in-place.
             let plane_plan = &self.plane_plan;

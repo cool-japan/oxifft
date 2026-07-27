@@ -13,6 +13,22 @@
 //! is stored in C-contiguous (row-major) order: element `(k1, k2, k3)` lives
 //! at flat index `k1 * n2 * n3 + k2 * n3 + k3`.
 //!
+//! # Frequency-index convention
+//!
+//! Output index `k` along each dimension corresponds to the **centered**
+//! frequency `freq = k - n/2` — the same convention documented and used by
+//! the 1D [`crate::nufft::Nufft::type1`] / [`crate::nufft::Nufft::type2`]
+//! API and the 2D [`crate::nufft::nufft2d`] module (and the FINUFFT Type 1/2
+//! convention):
+//!
+//! ```text
+//! k=0      -> freq = -n/2   (most negative)
+//! k=n/2    -> freq = 0      (DC)
+//! k=n-1    -> freq = n/2-1  (most positive)
+//! ```
+//!
+//! This applies independently to each axis.
+//!
 //! # References
 //!
 //! Greengard, L. & Lee, J.-Y. (2004). Accelerating the nonuniform fast
@@ -22,8 +38,8 @@ use crate::api::{Direction, Flags, Plan};
 use crate::kernel::{Complex, Float};
 
 use super::{
-    compute_kernel_width, next_smooth_number, precompute_deconv_factors, NufftError, NufftOptions,
-    NufftResult,
+    centered_freq_indices, compute_kernel_width, next_smooth_number, precompute_deconv_factors,
+    NufftError, NufftOptions, NufftResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -186,7 +202,7 @@ fn fft3d_inplace<T: Float>(data: &mut [Complex<T>], n0: usize, n1: usize, n2: us
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::nufft::{nufft3d_type1, NufftOptions};
 /// use oxifft::kernel::Complex;
 ///
@@ -296,10 +312,6 @@ pub fn nufft3d_type1<T: Float>(
     let deconv2 = precompute_deconv_factors::<T>(n2, n_over2, kernel_width);
     let deconv3 = precompute_deconv_factors::<T>(n3, n_over3, kernel_width);
 
-    let half1 = n1 / 2;
-    let half2 = n2 / 2;
-    let half3 = n3 / 2;
-
     // Cap individual 1-D deconvolution factors to prevent triple-exponential
     // blowup at high-frequency corner bins of the oversampled 3-D grid.
     let max_deconv = T::from_f64(1.0 / options.tolerance);
@@ -307,30 +319,32 @@ pub fn nufft3d_type1<T: Float>(
     let mut result = Vec::with_capacity(n1 * n2 * n3);
 
     for k1 in 0..n1 {
-        let grid_idx1 = if k1 < half1 { k1 } else { n_over1 - (n1 - k1) };
-        let d1 = if deconv1[k1].re > max_deconv {
+        // Centered frequency convention (freq = k1 - n1/2), matching
+        // nufft2d_type1 and the 1D NUFFT API.
+        let (grid_idx1, deconv_idx1) = centered_freq_indices(k1, n1, n_over1);
+        let d1 = if deconv1[deconv_idx1].re > max_deconv {
             Complex::new(max_deconv, T::ZERO)
         } else {
-            deconv1[k1]
+            deconv1[deconv_idx1]
         };
 
         for k2 in 0..n2 {
-            let grid_idx2 = if k2 < half2 { k2 } else { n_over2 - (n2 - k2) };
-            let d2 = if deconv2[k2].re > max_deconv {
+            let (grid_idx2, deconv_idx2) = centered_freq_indices(k2, n2, n_over2);
+            let d2 = if deconv2[deconv_idx2].re > max_deconv {
                 Complex::new(max_deconv, T::ZERO)
             } else {
-                deconv2[k2]
+                deconv2[deconv_idx2]
             };
             let d12 = d1 * d2;
 
             for k3 in 0..n3 {
-                let grid_idx3 = if k3 < half3 { k3 } else { n_over3 - (n3 - k3) };
+                let (grid_idx3, deconv_idx3) = centered_freq_indices(k3, n3, n_over3);
 
                 let flat_grid = grid_idx1 * stride1 + grid_idx2 * stride2 + grid_idx3;
-                let d3 = if deconv3[k3].re > max_deconv {
+                let d3 = if deconv3[deconv_idx3].re > max_deconv {
                     Complex::new(max_deconv, T::ZERO)
                 } else {
-                    deconv3[k3]
+                    deconv3[deconv_idx3]
                 };
                 result.push(grid[flat_grid] * d12 * d3);
             }
@@ -352,14 +366,75 @@ mod tests {
         NufftOptions::default()
     }
 
-    /// A single source at the origin should produce a flat 3-D spectrum
-    /// A single point at the origin yields a non-zero, finite 3-D spectrum.
+    // -----------------------------------------------------------------------
+    // Dense NDFT reference (O(n1*n2*n3*m)), used to numerically validate the
+    // Gaussian-gridding NUFFT against ground truth.  Uses the same centered
+    // frequency convention (freq = k - n/2) documented on the module and
+    // implemented via `centered_freq_indices`.
+    // -----------------------------------------------------------------------
+
+    /// Dense 3-D NDFT Type 1 (non-uniform -> uniform).
     ///
-    /// The Gaussian gridding + deconvolution pipeline introduces frequency-dependent
-    /// amplitude variation; we verify the result is non-zero and all-finite rather
-    /// than enforcing exact flatness.
+    /// `f_hat[k1,k2,k3] = sum_j c[j] * exp(-i*(freq1*x[j]+freq2*y[j]+freq3*z[j]))`
+    fn dense_ndft3d_type1(
+        x: &[f64],
+        y: &[f64],
+        z: &[f64],
+        c: &[Complex<f64>],
+        n1: usize,
+        n2: usize,
+        n3: usize,
+    ) -> Vec<Complex<f64>> {
+        let half1 = (n1 / 2) as isize;
+        let half2 = (n2 / 2) as isize;
+        let half3 = (n3 / 2) as isize;
+        let mut out = Vec::with_capacity(n1 * n2 * n3);
+        for k1 in 0..n1 {
+            let freq1 = (k1 as isize - half1) as f64;
+            for k2 in 0..n2 {
+                let freq2 = (k2 as isize - half2) as f64;
+                for k3 in 0..n3 {
+                    let freq3 = (k3 as isize - half3) as f64;
+                    let mut acc = Complex::new(0.0_f64, 0.0);
+                    for (j, &cj) in c.iter().enumerate() {
+                        let angle = -(freq1 * x[j] + freq2 * y[j] + freq3 * z[j]);
+                        acc = acc + cj * Complex::new(angle.cos(), angle.sin());
+                    }
+                    out.push(acc);
+                }
+            }
+        }
+        out
+    }
+
+    /// Maximum `|nufft[i] - ref[i]| / max(|ref[i]|)` over all bins.
+    fn max_relative_error(nufft_out: &[Complex<f64>], reference: &[Complex<f64>]) -> f64 {
+        let ref_max = reference.iter().map(|c| c.norm()).fold(0.0_f64, f64::max);
+        if ref_max < 1e-30 {
+            return 0.0;
+        }
+        nufft_out
+            .iter()
+            .zip(reference.iter())
+            .map(|(n, r)| (*n - *r).norm() / ref_max)
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// Relative-error headroom for the default `opts()` (tol=1e-6, os=2.0).
+    ///
+    /// Empirically 3-D Gaussian-gridding error is of the same order as the
+    /// 1-D case (see `oxifft/tests/nufft_tolerance_sweep.rs`) since the
+    /// kernel is separable per axis; `tol * 10` gives comfortable headroom
+    /// without masking real regressions.
+    fn headroom() -> f64 {
+        opts().tolerance * 10.0
+    }
+
+    /// Single-point source at the origin: the dense 3-D NDFT of a unit delta
+    /// at the origin is exactly `1.0` for every (k1,k2,k3) bin (all phases
+    /// are zero).
     #[test]
-    fn test_3d_type1_single_point_finite_spectrum() {
+    fn test_3d_type1_single_point_matches_dense_ndft() {
         let x = vec![0.0f64];
         let y = vec![0.0f64];
         let z = vec![0.0f64];
@@ -369,37 +444,129 @@ mod tests {
         let n3 = 8;
 
         let result = nufft3d_type1(&x, &y, &z, &c, n1, n2, n3, &opts()).expect("3D Type 1 failed");
-        assert_eq!(result.len(), n1 * n2 * n3);
+        let reference = dense_ndft3d_type1(&x, &y, &z, &c, n1, n2, n3);
+        assert_eq!(result.len(), reference.len());
 
-        // All values must be finite and at least the DC bin must be non-zero.
-        for (i, &v) in result.iter().enumerate() {
-            assert!(
-                v.re.is_finite() && v.im.is_finite(),
-                "Result element {i} is not finite: {v:?}"
-            );
-        }
-        let mag_dc = result[0].norm();
-        assert!(mag_dc > 0.0, "DC bin must be non-zero");
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "single-point-at-origin rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
     }
 
+    /// Random (deterministic) non-uniform points vs. dense NDFT.
     #[test]
-    fn test_3d_type1_multiple_points() {
+    fn test_3d_type1_multiple_points_matches_dense_ndft() {
         let m = 10;
-        let x: Vec<f64> = (0..m).map(|i| -2.0 + i as f64 * 0.4).collect();
-        let y: Vec<f64> = (0..m).map(|i| -1.5 + i as f64 * 0.3).collect();
-        let z: Vec<f64> = (0..m).map(|i| -1.0 + i as f64 * 0.2).collect();
+        let x: Vec<f64> = (0..m).map(|i| -2.0 + (i as f64) * 0.4).collect();
+        let y: Vec<f64> = (0..m).map(|i| -1.5 + (i as f64) * 0.3).collect();
+        let z: Vec<f64> = (0..m).map(|i| -1.0 + (i as f64) * 0.2).collect();
         let c: Vec<Complex<f64>> = (0..m)
-            .map(|i| Complex::new((i as f64 * 0.3).cos(), (i as f64 * 0.3).sin()))
+            .map(|i| Complex::new(((i as f64) * 0.3).cos(), ((i as f64) * 0.3).sin()))
             .collect();
+        let n1 = 8;
+        let n2 = 8;
+        let n3 = 8;
 
-        let result = nufft3d_type1(&x, &y, &z, &c, 8, 8, 8, &opts()).expect("3D Type 1 failed");
+        let result = nufft3d_type1(&x, &y, &z, &c, n1, n2, n3, &opts()).expect("3D Type 1 failed");
+        let reference = dense_ndft3d_type1(&x, &y, &z, &c, n1, n2, n3);
 
-        assert_eq!(result.len(), 8 * 8 * 8);
-        for (j, &v) in result.iter().enumerate() {
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "multiple-points rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
+    }
+
+    /// Points exactly at the domain edges (`-π`, `π`) must not panic and
+    /// must still match the dense reference.
+    #[test]
+    fn test_3d_type1_edge_points_matches_dense_ndft() {
+        let pi = core::f64::consts::PI;
+        let x = vec![-pi, pi, 0.0];
+        let y = vec![pi, -pi, 0.0];
+        let z = vec![-pi, 0.0, pi];
+        let c = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.5, -0.5),
+            Complex::new(-0.3, 0.2),
+        ];
+        let n1 = 8;
+        let n2 = 8;
+        let n3 = 8;
+
+        let result = nufft3d_type1(&x, &y, &z, &c, n1, n2, n3, &opts())
+            .expect("edge-point 3D Type 1 failed");
+        let reference = dense_ndft3d_type1(&x, &y, &z, &c, n1, n2, n3);
+
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "edge-points rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
+    }
+
+    /// Two coincident non-uniform points with values `c1`,`c2` must produce
+    /// exactly the same result (up to floating rounding) as a single point
+    /// at the same location with value `c1+c2`.
+    #[test]
+    fn test_3d_type1_coincident_points_linearity() {
+        let n1 = 8;
+        let n2 = 8;
+        let n3 = 8;
+        let x_single = vec![0.4f64];
+        let y_single = vec![-0.3f64];
+        let z_single = vec![0.6f64];
+        let c_combined = vec![Complex::new(1.7, -0.5)];
+
+        let x_dup = vec![0.4f64, 0.4f64];
+        let y_dup = vec![-0.3f64, -0.3f64];
+        let z_dup = vec![0.6f64, 0.6f64];
+        let c_dup = vec![Complex::new(1.0, -0.2), Complex::new(0.7, -0.3)];
+
+        let result_single = nufft3d_type1(
+            &x_single,
+            &y_single,
+            &z_single,
+            &c_combined,
+            n1,
+            n2,
+            n3,
+            &opts(),
+        )
+        .expect("single failed");
+        let result_dup =
+            nufft3d_type1(&x_dup, &y_dup, &z_dup, &c_dup, n1, n2, n3, &opts()).expect("dup failed");
+
+        for (a, b) in result_single.iter().zip(result_dup.iter()) {
             assert!(
-                v.re.is_finite() && v.im.is_finite(),
-                "Result element {j} is non-finite"
+                (*a - *b).norm() < 1e-9,
+                "coincident-point linearity violated: {a:?} vs {b:?}"
             );
+        }
+    }
+
+    /// Empty non-uniform input must yield an all-zero uniform grid (not a
+    /// panic or garbage output).
+    #[test]
+    fn test_3d_type1_empty_input_returns_zero_grid() {
+        let x: Vec<f64> = vec![];
+        let y: Vec<f64> = vec![];
+        let z: Vec<f64> = vec![];
+        let c: Vec<Complex<f64>> = vec![];
+        let n1 = 8;
+        let n2 = 8;
+        let n3 = 8;
+
+        let result =
+            nufft3d_type1(&x, &y, &z, &c, n1, n2, n3, &opts()).expect("empty 3D Type 1 failed");
+        assert_eq!(result.len(), n1 * n2 * n3);
+        for v in &result {
+            assert_eq!(v.re, 0.0);
+            assert_eq!(v.im, 0.0);
         }
     }
 
@@ -444,7 +611,12 @@ mod tests {
     /// should have energy concentrated at the expected frequency bin.
     #[test]
     fn test_3d_type1_tolerance_check() {
-        // Use a set of uniformly-spaced points at frequency (1,2,3) in the grid
+        // Use a set of uniformly-spaced points carrying a single known
+        // frequency component (k1,k2,k3) = (1,2,3) in the centered-convention
+        // grid, and verify both (a) the full spectrum matches the dense NDFT
+        // reference within tolerance headroom, and (b) the energy peak is
+        // located exactly where the centered frequency convention predicts:
+        // grid index `k = freq + n/2`.
         let n1 = 8usize;
         let n2 = 8usize;
         let n3 = 8usize;
@@ -478,11 +650,40 @@ mod tests {
 
         let result = nufft3d_type1(&x_pts, &y_pts, &z_pts, &c_pts, n1, n2, n3, &opts())
             .expect("3D Type 1 failed");
-
+        let reference = dense_ndft3d_type1(&x_pts, &y_pts, &z_pts, &c_pts, n1, n2, n3);
         assert_eq!(result.len(), total);
-        // Output should be finite
-        for v in &result {
-            assert!(v.re.is_finite() && v.im.is_finite());
-        }
+
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= headroom(),
+            "tolerance-check rel_err {rel_err:.2e} exceeds headroom {:.2e}",
+            headroom()
+        );
+
+        // Verify the centered-convention grid index for (k1_target,
+        // k2_target, k3_target) actually carries the expected energy (~m,
+        // since all m points share the same phase at this frequency).  Note:
+        // for this particular non-uniform point set there can be *other*
+        // bins with comparable magnitude too (the dense NDFT itself is not
+        // guaranteed to have a unique global maximum for an arbitrary point
+        // set), so we check the expected bin directly against the dense
+        // reference rather than asserting it is the unique arg-max.
+        let expected_k1 = (k1_target + (n1 / 2) as isize) as usize;
+        let expected_k2 = (k2_target + (n2 / 2) as isize) as usize;
+        let expected_k3 = (k3_target + (n3 / 2) as isize) as usize;
+        let expected_idx = expected_k1 * n2 * n3 + expected_k2 * n3 + expected_k3;
+
+        let expected_mag = m as f64;
+        assert!(
+            (reference[expected_idx].norm() - expected_mag).abs() < 1e-9,
+            "dense reference at expected bin {expected_idx} has magnitude {}, expected {expected_mag}",
+            reference[expected_idx].norm()
+        );
+        assert!(
+            (result[expected_idx].norm() - expected_mag).abs() <= expected_mag * headroom(),
+            "NUFFT at expected bin {expected_idx} (k1={expected_k1}, k2={expected_k2}, \
+             k3={expected_k3}) has magnitude {}, expected ~{expected_mag}",
+            result[expected_idx].norm()
+        );
     }
 }

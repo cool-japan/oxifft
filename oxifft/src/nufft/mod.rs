@@ -22,18 +22,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::nufft::{Nufft, NufftType};
+//! use oxifft::Complex;
 //!
 //! // Non-uniform sample locations in [-π, π]
 //! let x = vec![-2.0, -0.5, 0.3, 1.5, 2.8];
-//! let values = vec![Complex::new(1.0, 0.0); 5];
+//! let values = vec![Complex::new(1.0_f64, 0.0); 5];
 //!
 //! // Create NUFFT plan
-//! let plan = Nufft::new(NufftType::Type1, 64, &x, 1e-6)?;
+//! let plan = Nufft::new(NufftType::Type1, 64, &x, 1e-6).expect("valid NUFFT plan");
 //!
 //! // Execute: non-uniform → uniform grid
-//! let result = plan.execute(&values)?;
+//! let result = plan.execute(&values).expect("NUFFT execution");
+//! # let _ = result;
 //! ```
 
 use crate::api::{Direction, Flags, Plan};
@@ -135,8 +137,15 @@ pub struct Nufft<T: Float> {
     spread_coeffs: Vec<Vec<(usize, T)>>,
     /// Deconvolution factors.
     deconv_factors: Vec<Complex<T>>,
-    /// Internal FFT plan.
+    /// Internal forward FFT plan (oversampled grid, used by Type 1 spreading).
     fft_plan: Option<Plan<T>>,
+    /// Internal inverse FFT plan (oversampled grid, used by Type 2 interpolation).
+    ///
+    /// Precomputed once at construction time (rather than per-`type2()` call)
+    /// so repeated Type 2 execution does not pay planning cost on every call.
+    inv_fft_plan: Option<Plan<T>>,
+    /// Planning flags used to build `fft_plan` / `inv_fft_plan`.
+    flags: Flags,
     /// Options.
     options: NufftOptions,
 }
@@ -175,6 +184,12 @@ impl<T: Float> Nufft<T> {
     /// // Output has n_uniform = 8 modes
     /// assert_eq!(modes.len(), 8);
     /// ```
+    ///
+    /// Uses [`Flags::ESTIMATE`] for the internal FFT plans (fast planning, no
+    /// benchmarking). Use [`Nufft::with_flags`] or
+    /// [`Nufft::with_options_and_flags`] to request a different planning
+    /// strategy (e.g. `Flags::MEASURE` for repeated executions of the same
+    /// plan where planning cost is amortized).
     pub fn new(
         nufft_type: NufftType,
         n_uniform: usize,
@@ -190,6 +205,10 @@ impl<T: Float> Nufft<T> {
 
     /// Create NUFFT plan with custom options.
     ///
+    /// Uses [`Flags::ESTIMATE`] for the internal FFT plans. Use
+    /// [`Nufft::with_options_and_flags`] to request a different planning
+    /// strategy.
+    ///
     /// # Errors
     ///
     /// Returns error if size is zero, tolerance is non-positive, or points are out of range.
@@ -198,6 +217,48 @@ impl<T: Float> Nufft<T> {
         n_uniform: usize,
         points: &[f64],
         options: &NufftOptions,
+    ) -> NufftResult<Self> {
+        Self::with_options_and_flags(nufft_type, n_uniform, points, options, Flags::ESTIMATE)
+    }
+
+    /// Create a new NUFFT plan with an explicit FFT planning strategy.
+    ///
+    /// Equivalent to [`Nufft::new`] but lets the caller choose the [`Flags`]
+    /// used for the internal oversampled-grid FFT plans (e.g. `Flags::MEASURE`
+    /// to spend more time planning in exchange for faster repeated execution).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if size is zero, tolerance is non-positive, or points are out of range.
+    pub fn with_flags(
+        nufft_type: NufftType,
+        n_uniform: usize,
+        points: &[f64],
+        tolerance: f64,
+        flags: Flags,
+    ) -> NufftResult<Self> {
+        let options = NufftOptions {
+            tolerance,
+            ..Default::default()
+        };
+        Self::with_options_and_flags(nufft_type, n_uniform, points, &options, flags)
+    }
+
+    /// Create NUFFT plan with custom options and an explicit FFT planning strategy.
+    ///
+    /// Both the forward (Type 1 spreading) and inverse (Type 2 interpolation)
+    /// oversampled-grid FFT plans are built once here, using the same `flags`,
+    /// so that repeated `type1`/`type2` execution never re-plans internally.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if size is zero, tolerance is non-positive, or points are out of range.
+    pub fn with_options_and_flags(
+        nufft_type: NufftType,
+        n_uniform: usize,
+        points: &[f64],
+        options: &NufftOptions,
+        flags: Flags,
     ) -> NufftResult<Self> {
         if n_uniform == 0 {
             return Err(NufftError::InvalidSize(0));
@@ -236,8 +297,11 @@ impl<T: Float> Nufft<T> {
         // Precompute deconvolution factors
         let deconv_factors = precompute_deconv_factors(n_uniform, n_oversampled, kernel_width);
 
-        // Create FFT plan
-        let fft_plan = Plan::dft_1d(n_oversampled, Direction::Forward, Flags::MEASURE);
+        // Create forward and inverse FFT plans once, using the same flags, so
+        // that Type 1 (forward) and Type 2 (inverse) execution never re-plan
+        // on every call.
+        let fft_plan = Plan::dft_1d(n_oversampled, Direction::Forward, flags);
+        let inv_fft_plan = Plan::dft_1d(n_oversampled, Direction::Backward, flags);
 
         Ok(Self {
             nufft_type,
@@ -248,6 +312,8 @@ impl<T: Float> Nufft<T> {
             spread_coeffs,
             deconv_factors,
             fft_plan,
+            inv_fft_plan,
+            flags,
             options: NufftOptions {
                 kernel_width,
                 ..*options
@@ -300,24 +366,10 @@ impl<T: Float> Nufft<T> {
         //   deconv_idx = freq               if freq ≥ 0
         //   deconv_idx = n_uniform + freq   if freq < 0
         let mut result = Vec::with_capacity(self.n_uniform);
-        let half_n = self.n_uniform / 2;
 
         for k in 0..self.n_uniform {
-            // Math-order frequency for output index k
-            let freq = (k as isize) - (half_n as isize);
-
-            let grid_idx = if freq >= 0 {
-                freq as usize
-            } else {
-                (self.n_oversampled as isize + freq) as usize
-            };
-
-            let deconv_idx = if freq >= 0 {
-                freq as usize
-            } else {
-                (self.n_uniform as isize + freq) as usize
-            };
-
+            let (grid_idx, deconv_idx) =
+                centered_freq_indices(k, self.n_uniform, self.n_oversampled);
             result.push(fft_result[grid_idx] * self.deconv_factors[deconv_idx]);
         }
 
@@ -362,23 +414,11 @@ impl<T: Float> Nufft<T> {
         // n_os / Ψ̂(freq), not 1 / Ψ̂(freq).  Since deconv_factors already stores
         // 1/Ψ̂, we multiply by n_os here.
         let mut grid = vec![Complex::<T>::zero(); self.n_oversampled];
-        let half_n = self.n_uniform / 2;
         let n_os_scale = T::from_usize(self.n_oversampled);
 
         for (k, &coeff) in coeffs.iter().enumerate() {
-            let freq = (k as isize) - (half_n as isize);
-
-            let grid_idx = if freq >= 0 {
-                freq as usize
-            } else {
-                (self.n_oversampled as isize + freq) as usize
-            };
-
-            let deconv_idx = if freq >= 0 {
-                freq as usize
-            } else {
-                (self.n_uniform as isize + freq) as usize
-            };
+            let (grid_idx, deconv_idx) =
+                centered_freq_indices(k, self.n_uniform, self.n_oversampled);
 
             // Multiply deconv factor by n_os to account for the IFFT normalization
             // that is undone by the interpolation (kernel re-applies a factor of ~1/n_os
@@ -391,12 +431,9 @@ impl<T: Float> Nufft<T> {
             grid[grid_idx] = coeff * scaled_deconv;
         }
 
-        // Step 2: Inverse FFT
+        // Step 2: Inverse FFT (uses the plan precomputed at construction time)
         let mut ifft_result = vec![Complex::<T>::zero(); self.n_oversampled];
-        // Create inverse plan
-        if let Some(inv_plan) =
-            Plan::dft_1d(self.n_oversampled, Direction::Backward, Flags::ESTIMATE)
-        {
+        if let Some(ref inv_plan) = self.inv_fft_plan {
             inv_plan.execute(&grid, &mut ifft_result);
         } else {
             return Err(NufftError::PlanFailed);
@@ -452,12 +489,15 @@ impl<T: Float> Nufft<T> {
         // First do Type 1
         let uniform_coeffs = self.type1(values)?;
 
-        // Create Type 2 plan for target points
-        let type2_plan = Self::new(
+        // Create Type 2 plan for target points, propagating this plan's
+        // options and FFT planning flags so Type 3 behaves consistently with
+        // the Type 1 half of the computation.
+        let type2_plan = Self::with_options_and_flags(
             NufftType::Type2,
             self.n_uniform,
             target_points,
-            self.options.tolerance,
+            &self.options,
+            self.flags,
         )?;
 
         // Execute Type 2
@@ -501,6 +541,12 @@ impl<T: Float> Nufft<T> {
     /// Get the NUFFT type.
     pub fn nufft_type(&self) -> NufftType {
         self.nufft_type
+    }
+
+    /// Get the FFT planning flags used to build this plan's internal
+    /// oversampled-grid FFT plans.
+    pub fn flags(&self) -> Flags {
+        self.flags
     }
 
     /// Get the normalized non-uniform points (in [0, 2π]).
@@ -548,6 +594,46 @@ pub(crate) fn compute_kernel_width(tolerance: f64, oversampling: f64, default: u
     //   - If the user requests a wider kernel, honour it.
     //   - If accuracy demands a wider kernel than `default`, use the wider one.
     (2 * w).max(4).max(default)
+}
+
+/// Map a uniform-grid output index `k` (in `0..n`) to the corresponding
+/// oversampled-FFT-grid index and FFT-order deconvolution-table index, using
+/// the **centered** frequency convention documented for [`Nufft::type1`] and
+/// [`Nufft::type2`]:
+///
+/// ```text
+/// freq = k - n/2
+///   k=0     -> freq = -n/2   (most negative)
+///   k=n/2   -> freq = 0      (DC)
+///   k=n-1   -> freq = n/2-1  (most positive)
+///
+/// grid_idx   = freq                 if freq >= 0
+///            = n_oversampled + freq if freq <  0
+/// deconv_idx = freq                 if freq >= 0
+///            = n + freq             if freq <  0
+/// ```
+///
+/// `deconv_idx` indexes into the FFT-order table returned by
+/// [`precompute_deconv_factors`]; `grid_idx` indexes into the FFT-order
+/// oversampled-grid output.
+///
+/// This single convention is shared by the 1D, 2D ([`nufft2d`]), and 3D
+/// ([`nufft3d`]) NUFFT implementations so that output index `k` always means
+/// the same physical frequency regardless of dimensionality.
+pub(crate) fn centered_freq_indices(k: usize, n: usize, n_oversampled: usize) -> (usize, usize) {
+    let half_n = n / 2;
+    let freq = (k as isize) - (half_n as isize);
+    let grid_idx = if freq >= 0 {
+        freq as usize
+    } else {
+        (n_oversampled as isize + freq) as usize
+    };
+    let deconv_idx = if freq >= 0 {
+        freq as usize
+    } else {
+        (n as isize + freq) as usize
+    };
+    (grid_idx, deconv_idx)
 }
 
 /// Find next "smooth" number (product of small primes) for efficient FFT.
@@ -792,9 +878,68 @@ pub fn nufft_type3<T: Float>(
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Dense NDFT reference helpers, using the centered frequency convention
+    // (freq = k - n/2) documented on [`Nufft::type1`] / [`Nufft::type2`].
+    // A more extensive tolerance x oversampling x size sweep against the same
+    // reference lives in `oxifft/tests/nufft_tolerance_sweep.rs`; these local
+    // helpers keep the module's own unit tests self-contained and numeric.
+    // -----------------------------------------------------------------------
+
+    /// Dense NDFT Type 1 (non-uniform -> uniform), O(n*m).
+    fn dense_ndft_type1(points: &[f64], values: &[Complex<f64>], n: usize) -> Vec<Complex<f64>> {
+        let half = (n / 2) as isize;
+        (0..n)
+            .map(|k| {
+                let freq = (k as isize - half) as f64;
+                values
+                    .iter()
+                    .zip(points.iter())
+                    .fold(Complex::new(0.0, 0.0), |acc, (&val, &xj)| {
+                        let angle = -freq * xj;
+                        acc + val * Complex::new(angle.cos(), angle.sin())
+                    })
+            })
+            .collect()
+    }
+
+    /// Dense NDFT Type 2 (uniform -> non-uniform), O(n*m).
+    fn dense_ndft_type2(fhat: &[Complex<f64>], points: &[f64]) -> Vec<Complex<f64>> {
+        let n = fhat.len();
+        let half = (n / 2) as isize;
+        points
+            .iter()
+            .map(|&xj| {
+                (0..n).fold(Complex::new(0.0, 0.0), |acc, k| {
+                    let freq = (k as isize - half) as f64;
+                    let angle = freq * xj;
+                    acc + fhat[k] * Complex::new(angle.cos(), angle.sin())
+                })
+            })
+            .collect()
+    }
+
+    /// Maximum `|nufft[i] - ref[i]| / max(|ref[i]|)` over all bins.
+    fn max_relative_error(nufft_out: &[Complex<f64>], reference: &[Complex<f64>]) -> f64 {
+        let ref_max = reference.iter().map(|c| c.norm()).fold(0.0_f64, f64::max);
+        if ref_max < 1e-30 {
+            return 0.0;
+        }
+        nufft_out
+            .iter()
+            .zip(reference.iter())
+            .map(|(n, r)| (*n - *r).norm() / ref_max)
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// Relative-error headroom for tolerance 1e-6 (10x margin, matching the
+    /// dedicated tolerance sweep in `oxifft/tests/nufft_tolerance_sweep.rs`).
+    const HEADROOM: f64 = 1e-5;
+
     #[test]
-    fn test_nufft_type1_uniform_points() {
-        // If points are uniformly spaced, NUFFT should match regular FFT
+    fn test_nufft_type1_uniform_points_matches_dense_ndft() {
+        // If points are uniformly spaced, NUFFT Type 1 should closely match
+        // the dense NDFT (and, by construction, the regular DFT).
         let n = 8;
         let points: Vec<f64> = (0..n)
             .map(|k| -core::f64::consts::PI + (k as f64) * 2.0 * core::f64::consts::PI / (n as f64))
@@ -804,32 +949,46 @@ mod tests {
             .map(|k| Complex::new((k as f64).cos(), (k as f64).sin()))
             .collect();
 
-        let result = nufft_type1(&points, &values, n, 1e-6);
-        assert!(result.is_ok());
-        let result = result.expect("NUFFT failed");
+        let result = nufft_type1(&points, &values, n, 1e-6).expect("NUFFT Type1 failed");
         assert_eq!(result.len(), n);
+
+        let reference = dense_ndft_type1(&points, &values, n);
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= HEADROOM,
+            "uniform-points Type1 rel_err {rel_err:.2e} exceeds headroom {HEADROOM:.2e}"
+        );
     }
 
     #[test]
-    fn test_nufft_type2_single_frequency() {
-        // Single frequency should produce sinusoid at evaluation points
+    fn test_nufft_type2_single_frequency_matches_dense_ndft() {
+        // Single frequency coefficient should produce a pure sinusoid at
+        // frequency `freq = k - n/2` at each evaluation point.
         let n = 16;
         let mut coeffs = vec![Complex::<f64>::zero(); n];
-        coeffs[1] = Complex::new(1.0, 0.0); // Single frequency at k=1
+        coeffs[1] = Complex::new(1.0, 0.0); // freq = 1 - n/2 = -7
 
         let points: Vec<f64> = (0..5)
             .map(|k| -core::f64::consts::PI + f64::from(k) * 0.5)
             .collect();
 
-        let result = nufft_type2(&coeffs, &points, 1e-6);
-        assert!(result.is_ok());
-        let result = result.expect("NUFFT failed");
+        let result = nufft_type2(&coeffs, &points, 1e-6).expect("NUFFT Type2 failed");
         assert_eq!(result.len(), 5);
+
+        let reference = dense_ndft_type2(&coeffs, &points);
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= HEADROOM,
+            "single-frequency Type2 rel_err {rel_err:.2e} exceeds headroom {HEADROOM:.2e}"
+        );
     }
 
     #[test]
-    fn test_nufft_roundtrip() {
-        // Type1 followed by Type2 should approximate identity
+    fn test_nufft_type1_and_type2_independently_match_dense_ndft() {
+        // Type 1 and Type 2 are each validated independently against their
+        // own dense NDFT reference (Type1-then-Type2 is not an exact
+        // identity in general since Type 1 is the adjoint, not the inverse,
+        // of Type 2).
         let n = 32;
         let points: Vec<f64> = (0..10).map(|k| -2.5 + f64::from(k) * 0.5).collect();
 
@@ -838,14 +997,128 @@ mod tests {
             .map(|&x| Complex::new(x.cos(), x.sin()))
             .collect();
 
-        // Type 1: non-uniform → uniform
-        let uniform = nufft_type1(&points, &values, n, 1e-6).expect("Type1 failed");
+        let type1_out = nufft_type1(&points, &values, n, 1e-6).expect("Type1 failed");
+        let type1_ref = dense_ndft_type1(&points, &values, n);
+        let type1_rel_err = max_relative_error(&type1_out, &type1_ref);
+        assert!(
+            type1_rel_err <= HEADROOM,
+            "Type1 rel_err {type1_rel_err:.2e} exceeds headroom {HEADROOM:.2e}"
+        );
 
-        // Type 2: uniform → non-uniform (same points)
-        let recovered = nufft_type2(&uniform, &points, 1e-6).expect("Type2 failed");
+        let type2_out = nufft_type2(&type1_ref, &points, 1e-6).expect("Type2 failed");
+        let type2_ref = dense_ndft_type2(&type1_ref, &points);
+        let type2_rel_err = max_relative_error(&type2_out, &type2_ref);
+        assert!(
+            type2_rel_err <= HEADROOM,
+            "Type2 rel_err {type2_rel_err:.2e} exceeds headroom {HEADROOM:.2e}"
+        );
+        assert_eq!(type2_out.len(), values.len());
+    }
 
-        // Check approximate recovery (won't be exact due to truncation)
-        assert_eq!(recovered.len(), values.len());
+    #[test]
+    fn test_nufft_type3_matches_composed_dense_reference() {
+        // `execute_type3` is defined as Type1 (to an intermediate uniform
+        // grid of `n_uniform` bandlimited modes) followed by Type2 at the
+        // target points, so its ground truth is the *composition* of the two
+        // dense NDFT references (not a "true" continuous non-uniform-to-
+        // non-uniform transform), matching the documented algorithm.
+        let n_uniform = 32;
+        let source_points: Vec<f64> = (0..9).map(|k| -2.8 + f64::from(k) * 0.6).collect();
+        let target_points: Vec<f64> = (0..6).map(|k| -1.9 + f64::from(k) * 0.55).collect();
+
+        let values: Vec<Complex<f64>> = source_points
+            .iter()
+            .map(|&x| Complex::new((x * 0.5).cos(), (x * 0.5).sin()))
+            .collect();
+
+        let plan = Nufft::new(NufftType::Type1, n_uniform, &source_points, 1e-6)
+            .expect("Type3 plan failed");
+        let result = plan
+            .execute_type3(&values, &target_points)
+            .expect("Type3 execute failed");
+        assert_eq!(result.len(), target_points.len());
+
+        let intermediate_ref = dense_ndft_type1(&source_points, &values, n_uniform);
+        let composed_ref = dense_ndft_type2(&intermediate_ref, &target_points);
+
+        let rel_err = max_relative_error(&result, &composed_ref);
+        assert!(
+            rel_err <= HEADROOM,
+            "Type3 rel_err {rel_err:.2e} exceeds headroom {HEADROOM:.2e}"
+        );
+    }
+
+    /// Coincident non-uniform points must combine linearly: two points at
+    /// the same location with values `c1`,`c2` must give exactly the same
+    /// Type 1 result (up to floating rounding) as a single point at that
+    /// location with value `c1+c2`.
+    #[test]
+    fn test_nufft_type1_coincident_points_linearity() {
+        let n = 16;
+        let x_single = vec![0.4f64];
+        let c_combined = vec![Complex::new(1.7, -0.5)];
+
+        let x_dup = vec![0.4f64, 0.4f64];
+        let c_dup = vec![Complex::new(1.0, -0.2), Complex::new(0.7, -0.3)];
+
+        let result_single = nufft_type1(&x_single, &c_combined, n, 1e-6).expect("single failed");
+        let result_dup = nufft_type1(&x_dup, &c_dup, n, 1e-6).expect("dup failed");
+
+        for (a, b) in result_single.iter().zip(result_dup.iter()) {
+            assert!(
+                (*a - *b).norm() < 1e-9,
+                "coincident-point linearity violated: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    /// Points exactly at the domain edges (`-π`, `π`) must not panic and
+    /// must still match the dense reference.
+    #[test]
+    fn test_nufft_type1_edge_points_matches_dense_ndft() {
+        let pi = core::f64::consts::PI;
+        let points = vec![-pi, pi, 0.0];
+        let values = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.5, -0.5),
+            Complex::new(-0.3, 0.2),
+        ];
+        let n = 16;
+
+        let result = nufft_type1(&points, &values, n, 1e-6).expect("edge-point Type1 failed");
+        let reference = dense_ndft_type1(&points, &values, n);
+        let rel_err = max_relative_error(&result, &reference);
+        assert!(
+            rel_err <= HEADROOM,
+            "edge-points rel_err {rel_err:.2e} exceeds headroom {HEADROOM:.2e}"
+        );
+    }
+
+    /// Empty non-uniform input must yield an all-zero uniform grid (not a
+    /// panic or garbage output).
+    #[test]
+    fn test_nufft_type1_empty_input_returns_zero_grid() {
+        let points: Vec<f64> = vec![];
+        let values: Vec<Complex<f64>> = vec![];
+        let n = 8;
+
+        let result = nufft_type1(&points, &values, n, 1e-6).expect("empty Type1 failed");
+        assert_eq!(result.len(), n);
+        for v in &result {
+            assert_eq!(v.re, 0.0);
+            assert_eq!(v.im, 0.0);
+        }
+    }
+
+    /// Empty evaluation-point input must yield an empty result (not a panic).
+    #[test]
+    fn test_nufft_type2_empty_points_returns_empty() {
+        let n = 8;
+        let coeffs = vec![Complex::<f64>::zero(); n];
+        let points: Vec<f64> = vec![];
+
+        let result = nufft_type2(&coeffs, &points, 1e-6).expect("empty Type2 failed");
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -871,5 +1144,70 @@ mod tests {
         assert_eq!(next_smooth_number(100), 100); // 100 = 2^2 * 5^2
         assert_eq!(next_smooth_number(101), 108); // 108 = 2^2 * 3^3
         assert_eq!(next_smooth_number(7), 8); // 8 = 2^3
+    }
+
+    #[test]
+    fn test_nufft_new_defaults_to_estimate_flag() {
+        // `new`/`with_options` must no longer hardcode Flags::MEASURE.
+        let points = vec![0.0, 0.3, -0.5];
+        let plan = Nufft::<f64>::new(NufftType::Type1, 16, &points, 1e-6).expect("plan failed");
+        assert_eq!(plan.flags(), Flags::ESTIMATE);
+    }
+
+    #[test]
+    fn test_nufft_with_flags_estimate_and_measure_match() {
+        let n = 16;
+        let points: Vec<f64> = (0..6).map(|k| -2.0 + f64::from(k) * 0.6).collect();
+        let values: Vec<Complex<f64>> = points
+            .iter()
+            .map(|&x| Complex::new(x.cos(), x.sin()))
+            .collect();
+
+        let plan_estimate =
+            Nufft::<f64>::with_flags(NufftType::Type1, n, &points, 1e-6, Flags::ESTIMATE)
+                .expect("ESTIMATE plan failed");
+        let plan_measure =
+            Nufft::<f64>::with_flags(NufftType::Type1, n, &points, 1e-6, Flags::MEASURE)
+                .expect("MEASURE plan failed");
+
+        assert_eq!(plan_estimate.flags(), Flags::ESTIMATE);
+        assert_eq!(plan_measure.flags(), Flags::MEASURE);
+
+        let out_estimate = plan_estimate
+            .type1(&values)
+            .expect("ESTIMATE execute failed");
+        let out_measure = plan_measure.type1(&values).expect("MEASURE execute failed");
+
+        for (a, b) in out_estimate.iter().zip(out_measure.iter()) {
+            assert!((*a - *b).norm() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_nufft_type2_forward_and_inverse_plans_share_flags() {
+        // Regression test for the forward=MEASURE/inverse=ESTIMATE flag
+        // inconsistency: both the forward (Type 1 spreading) and inverse
+        // (Type 2 interpolation) FFT plans must be built with the same,
+        // caller-chosen flags, and the inverse plan must be precomputed at
+        // construction time (not re-planned on every `type2()` call).
+        let n = 16;
+        let coeffs: Vec<Complex<f64>> = (0..n)
+            .map(|k| Complex::new(((k as f64) * 0.1).cos(), 0.0))
+            .collect();
+        let points: Vec<f64> = (0..5).map(|k| -2.0 + f64::from(k) * 0.7).collect();
+
+        let plan = Nufft::<f64>::with_flags(NufftType::Type2, n, &points, 1e-6, Flags::MEASURE)
+            .expect("plan failed");
+        assert_eq!(plan.flags(), Flags::MEASURE);
+
+        // Calling type2() repeatedly must succeed and give consistent output
+        // now that the inverse plan is cached rather than rebuilt each call.
+        let out1 = plan.type2(&coeffs).expect("first type2 call failed");
+        let out2 = plan.type2(&coeffs).expect("second type2 call failed");
+        assert_eq!(out1.len(), out2.len());
+        for (a, b) in out1.iter().zip(out2.iter()) {
+            assert_eq!(a.re, b.re);
+            assert_eq!(a.im, b.im);
+        }
     }
 }

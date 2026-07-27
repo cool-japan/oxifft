@@ -18,6 +18,9 @@
 
 use crate::kernel::{Complex, Float};
 
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+
 /// Compute the modular inverse of `a` modulo `m` via extended Euclidean algorithm.
 ///
 /// Returns `Some(x)` where `a*x ≡ 1 (mod m)`, or `None` if gcd(a, m) != 1.

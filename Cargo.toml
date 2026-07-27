@@ -1,15 +1,29 @@
 [workspace]
 resolver = "2"
-members = ["oxifft", "oxifft-codegen", "oxifft-codegen-impl", "oxifft-bench"]
+members = ["oxifft", "oxifft-adapter-mpi", "oxifft-codegen", "oxifft-codegen-impl", "oxifft-bench"]
 exclude = ["oxifft/fuzz"]
+# Plain `cargo build`/`cargo test` at the workspace root stay pure-Rust and
+# system-dependency-free by default. `oxifft-adapter-mpi` requires a real MPI
+# implementation plus libclang (for `bindgen`) to even compile, so it is
+# intentionally excluded from the default member set; use
+# `cargo build --workspace` or `cargo build -p oxifft-adapter-mpi` to opt in.
+default-members = ["oxifft", "oxifft-codegen", "oxifft-codegen-impl", "oxifft-bench"]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 authors = ["COOLJAPAN OU (Team KitaSan)"]
 license = "Apache-2.0"
 repository = "https://github.com/cool-japan/oxifft"
-rust-version = "1.75"
+# True floor, verified empirically with rustup toolchains 1.75.0/1.77.1/1.82.0/
+# 1.85.0/1.86.0 (all fail) and 1.87.0/1.88.0 (both succeed) against
+# `cargo +<toolchain> check -p oxifft --locked`. `hashbrown` 0.17 alone forces
+# edition2024/rust-version 1.85 (fails <1.85 at dependency-resolution time,
+# "feature `edition2024` is required"); independently, `oxifft/src/ntt/arith.rs`
+# and `oxifft/src/nufft/mod.rs` use `u32::is_multiple_of`, stabilized in 1.87,
+# which fails to compile on 1.85/1.86 ("use of unstable library feature
+# `unsigned_is_multiple_of`"). See CHANGELOG.md 0.4.0 for the full basis.
+rust-version = "1.87"
 keywords = ["fft", "fftw", "dft", "signal-processing", "simd"]
 categories = ["algorithms", "science", "mathematics"]
 
@@ -22,9 +36,6 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = "1.0"
 
-# Hashing for wisdom (no_std compatible)
-seahash = "4.1"
-
 # no_std support
 hashbrown = "0.17"
 spin = { version = "0.12", default-features = false, features = ["spin_mutex", "rwlock", "once", "lazy"] }
@@ -36,34 +47,42 @@ rayon = "1.12"
 # MPI distributed computing
 mpi = "0.8"
 
-# System interface (for SVE detection)
-libc = "0.2"
-
 # Proc macro support
 proc-macro2 = "1.0"
 quote = "1.0"
+# NOTE: crates.io's current major is syn 3.0 (3.0.3); staying on 2.0 here is a
+# deliberate, tracked deferral (not a stale-pin oversight) because migrating
+# `oxifft-codegen`/`oxifft-codegen-impl` to syn 3.0's proc-macro API is a real
+# source-level migration, not a drop-in bump. `serde_derive` already pulls in
+# syn 3.0.2 transitively, so both majors are compiled today regardless
+# (`cargo tree -e no-dev -i syn@3.0.2` / `-i syn@2.0.119`). See CHANGELOG.md.
 syn = { version = "2.0", features = ["full", "parsing"] }
 
 # Internal codegen logic (not proc-macro)
-oxifft-codegen-impl = { version = "0.3.2", path = "oxifft-codegen-impl" }
+oxifft-codegen-impl = { version = "0.4.0", path = "oxifft-codegen-impl" }
+# Proc-macro crate (kept in the workspace dependency table like
+# oxifft-codegen-impl so path/version can never drift out of lockstep again).
+oxifft-codegen = { version = "0.4.0", path = "oxifft-codegen" }
+# The core crate, consumed by oxifft-adapter-mpi.
+oxifft = { version = "0.4.0", path = "oxifft" }
 
 # Testing
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1.11"
 approx = "0.5"
 rustfft = "6.4"
+trybuild = "1.0"
 
 # FFTW bindings (optional, for benchmarking only)
 fftw = "0.8"
 
 # WebAssembly support
 wasm-bindgen = "0.2"
-js-sys = "0.3"
 
 # oxicuda GPU backends
-oxicuda-driver = { version = "0.1.8" }
-oxicuda-fft = { version = "0.1.8" }
-oxicuda-metal = { version = "0.1.8" }
+oxicuda-driver = { version = "0.5.2" }
+oxicuda-fft = { version = "0.5.2" }
+oxicuda-metal = { version = "0.5.2" }
 
 # ndarray integration (opt-in via ndarray feature)
 ndarray = "0.17.2"

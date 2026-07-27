@@ -13,7 +13,7 @@ use core::arch::x86_64::*;
 /// Check if AVX-512F (foundation) is available at runtime.
 #[inline]
 pub fn has_avx512f() -> bool {
-    is_x86_feature_detected!("avx512f")
+    crate::detect_x86_feature!("avx512f")
 }
 
 /// AVX-512 f64 vector type (8 lanes).

@@ -4,6 +4,7 @@
 
 use oxifft::api::{Direction, Flags, Plan};
 use oxifft::Complex;
+use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
@@ -25,15 +26,16 @@ fn main() {
 
         // Warm up
         for _ in 0..100 {
-            plan.execute(&input, &mut output);
+            plan.execute(black_box(&input), black_box(&mut output));
         }
 
         // Measure
         let start = Instant::now();
         for _ in 0..iterations {
-            plan.execute(&input, &mut output);
+            plan.execute(black_box(&input), black_box(&mut output));
         }
         let duration = start.elapsed();
+        black_box(&output);
 
         let avg_ns = duration.as_nanos() as f64 / iterations as f64;
         let throughput = (size as f64) / (avg_ns / 1e9) / 1e6;

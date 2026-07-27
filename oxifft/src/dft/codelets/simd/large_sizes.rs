@@ -7,10 +7,20 @@
 #![allow(clippy::large_stack_arrays)] // reason: bit-reversal and twiddle tables are fixed-size for cache-friendly SIMD access
 
 use crate::kernel::Complex;
+// `Box` is only referenced from the aarch64 / x86_64 SIMD dispatch blocks below;
+// scoping the import to those architectures avoids an unused-import warning on
+// other targets (wasm32, riscv32, ...).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use crate::prelude::Box;
 // Float trait needed for sin_cos on f64 in no_std (libm-backed impl).
 // In std mode f64::sin_cos is a lang item; in no_std we need the num_traits impl.
-#[cfg(not(feature = "std"))]
+// The sin_cos/sin/cos calls all live in the aarch64 / x86_64 dispatch blocks, so
+// the import is scoped to those architectures to avoid an unused-import warning
+// on other no_std targets (wasm32, riscv32, ...).
+#[cfg(all(
+    not(feature = "std"),
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 use num_traits::Float as _;
 
 /// Size-64 DFT with SIMD acceleration for f64.
@@ -759,7 +769,7 @@ impl TwiddlesF64_1024X86 {
 
 #[cfg(target_arch = "x86_64")]
 fn dit_1024_precomputed(data: &mut [Complex<f64>], sign: i32) {
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+    if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
         unsafe { dit_1024_avx2(data, sign) }
     } else {
         use crate::dft::problem::Sign;
@@ -1235,7 +1245,7 @@ impl TwiddlesF64_4096X86 {
 
 #[cfg(target_arch = "x86_64")]
 fn dit_4096_precomputed(data: &mut [Complex<f64>], sign: i32) {
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+    if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
         unsafe { dit_4096_avx2(data, sign) }
     } else {
         // SSE2 fallback

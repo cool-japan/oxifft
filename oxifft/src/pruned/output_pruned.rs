@@ -21,7 +21,7 @@ use crate::prelude::*;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::pruned::fft_pruned_output;
 /// use oxifft::Complex;
 ///
@@ -40,15 +40,24 @@ pub fn fft_pruned_output<T: Float>(
         return vec![Complex::<T>::zero(); output_indices.len()];
     }
 
-    // Decision: use Goertzel for few outputs, full FFT for many
-    // Crossover point is approximately log2(N)
-    let crossover = libm::ceil(libm::log2(n as f64)) as usize;
+    let m = output_indices.len();
 
-    if output_indices.len() <= crossover {
-        // Use Goertzel algorithm for each frequency
+    // Routing (wall-clock oriented, see the module docs):
+    //
+    // * Very few requested outputs → Goertzel, O(M·N).  This is the regime in
+    //   which a pruned evaluation genuinely beats the (vectorized) full FFT.
+    // * Otherwise → full FFT then select.  The crate's full transform is
+    //   vectorized, so for larger M it wins in wall-clock even though the
+    //   butterfly-skipping path ([`fft_pruned_output_butterfly`]) performs
+    //   fewer arithmetic operations.
+    //
+    // The genuine O(N log M) butterfly-skipping algorithm is exposed as
+    // [`fft_pruned_output_butterfly`] for callers on targets without a
+    // vectorized FFT (or who care about operation count over wall-clock).
+    let crossover = libm::ceil(libm::log2(n as f64)) as usize;
+    if m <= crossover {
         super::goertzel_multi(input, output_indices)
     } else {
-        // Use full FFT and select outputs
         fft_and_select(input, output_indices)
     }
 }
@@ -91,7 +100,6 @@ fn fft_and_select<T: Float>(input: &[Complex<T>], output_indices: &[usize]) -> V
 /// # Returns
 ///
 /// Vector of complex values at the specified frequencies.
-#[allow(dead_code)] // reason: public API for output-pruned FFT; not all call sites are compiled in every feature configuration
 pub fn fft_pruned_output_butterfly<T: Float>(
     input: &[Complex<T>],
     output_indices: &[usize],
@@ -108,6 +116,19 @@ pub fn fft_pruned_output_butterfly<T: Float>(
     }
 
     let log_n = n.trailing_zeros() as usize;
+
+    // Precompute the twiddle table W_n^k = e^{-2πi k / n} for k in 0..n/2 so
+    // the butterfly inner loop never calls a transcendental — this is what
+    // makes the skipped-butterfly path actually faster in wall-clock, not just
+    // in operation count.
+    let two_pi = <T as Float>::PI + <T as Float>::PI;
+    let twiddles: Vec<Complex<T>> = (0..n / 2)
+        .map(|k| {
+            let angle = two_pi * T::from_usize(k) / T::from_usize(n);
+            let (sin_a, cos_a) = Float::sin_cos(angle);
+            Complex::new(cos_a, T::ZERO - sin_a)
+        })
+        .collect();
 
     // Build a mask of which outputs we need
     let mut needed = vec![false; n];
@@ -151,28 +172,25 @@ pub fn fft_pruned_output_butterfly<T: Float>(
         })
         .collect();
 
-    // Perform pruned FFT with butterfly skipping
-    let two_pi = <T as Float>::PI + <T as Float>::PI;
-
+    // Perform pruned FFT with butterfly skipping, using the precomputed
+    // twiddle table.
     for stage in 0..log_n {
         let block_size = 1 << (stage + 1);
         let half_block = block_size / 2;
+        let twiddle_stride = n / block_size;
 
         for block_start in (0..n).step_by(block_size) {
             for i in 0..half_block {
                 let idx1 = block_start + i;
                 let idx2 = block_start + i + half_block;
 
-                // Skip butterfly if not needed
+                // Skip butterfly if neither output feeds a requested bin.
                 if !stage_needed[idx1] && !stage_needed[idx2] {
                     continue;
                 }
 
-                // Twiddle factor
-                let k = i * (n / block_size);
-                let angle = two_pi * T::from_usize(k) / T::from_usize(n);
-                let (sin_a, cos_a) = Float::sin_cos(angle);
-                let twiddle = Complex::new(cos_a, T::ZERO - sin_a);
+                // Twiddle factor W_n^{i·(n/block_size)} from the table.
+                let twiddle = twiddles[i * twiddle_stride];
 
                 // Butterfly
                 let a = data[idx1];
@@ -296,5 +314,126 @@ mod tests {
         assert_eq!(bit_reverse(2, 3), 2);
         assert_eq!(bit_reverse(3, 3), 6);
         assert_eq!(bit_reverse(4, 3), 1);
+    }
+
+    /// The re-exported `fft_pruned_output_butterfly` (the O(N log M) op-count
+    /// path) must agree with a full FFT for scattered indices across sizes.
+    #[test]
+    fn test_fft_pruned_output_butterfly_scattered() {
+        for &n in &[64usize, 256, 1024] {
+            let input: Vec<Complex<f64>> = (0..n)
+                .map(|i| Complex::new((i as f64 * 0.13).sin(), (i as f64 * 0.021).cos()))
+                .collect();
+            let plan = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE).unwrap();
+            let mut full = vec![Complex::new(0.0_f64, 0.0); n];
+            plan.execute(&input, &mut full);
+
+            for &m in &[1usize, 3, 9, 17] {
+                let indices: Vec<usize> = (0..m).map(|i| (i * 37 + 1) % n).collect();
+                let out = fft_pruned_output_butterfly(&input, &indices);
+                for (i, &idx) in indices.iter().enumerate() {
+                    assert!(
+                        (out[i].re - full[idx].re).abs() < 1e-9
+                            && (out[i].im - full[idx].im).abs() < 1e-9,
+                        "N={n} M={m} idx={idx}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The public `fft_pruned_output` entry point must agree with a full FFT for
+    /// the selected bins across every routing regime (butterfly-skip for small
+    /// M, Goertzel/full-select for large M).
+    #[test]
+    fn test_fft_pruned_output_routing_matches_full_fft() {
+        let n = 256;
+        let input: Vec<Complex<f64>> = (0..n)
+            .map(|i| Complex::new((i as f64 * 0.1).sin(), (i as f64 * 0.07).cos()))
+            .collect();
+
+        let plan = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE).unwrap();
+        let mut full = vec![Complex::new(0.0_f64, 0.0); n];
+        plan.execute(&input, &mut full);
+
+        // M values that exercise the butterfly path (M ≤ N/4 = 64) and the
+        // full-select fallback (M > 64, up to all outputs).
+        for &m in &[1usize, 2, 8, 32, 64, 100, 200, 256] {
+            let indices: Vec<usize> = (0..m).map(|i| (i * 7 + 3) % n).collect();
+            let pruned = fft_pruned_output(&input, &indices);
+            assert_eq!(pruned.len(), m);
+            for (i, &idx) in indices.iter().enumerate() {
+                let dre = (pruned[i].re - full[idx].re).abs();
+                let dim = (pruned[i].im - full[idx].im).abs();
+                assert!(dre < 1e-9 && dim < 1e-9, "M={m} idx={idx}: {dre}, {dim}");
+            }
+        }
+    }
+
+    /// Non-power-of-two N must still be correct (Goertzel / full-select routes).
+    #[test]
+    fn test_fft_pruned_output_non_power_of_two() {
+        let n = 96; // not a power of two
+        let input: Vec<Complex<f64>> = (0..n)
+            .map(|i| Complex::new((i as f64).cos(), (i as f64 * 0.3).sin()))
+            .collect();
+        let plan = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE).unwrap();
+        let mut full = vec![Complex::new(0.0_f64, 0.0); n];
+        plan.execute(&input, &mut full);
+
+        for &m in &[2usize, 40] {
+            let indices: Vec<usize> = (0..m).map(|i| (i * 5) % n).collect();
+            let pruned = fft_pruned_output(&input, &indices);
+            for (i, &idx) in indices.iter().enumerate() {
+                assert!((pruned[i].re - full[idx].re).abs() < 1e-9);
+                assert!((pruned[i].im - full[idx].im).abs() < 1e-9);
+            }
+        }
+    }
+
+    /// Coarse timing benchmark: the pruned output path should beat a full FFT
+    /// (+ select) for small M on a large power-of-two N.  Ignored by default
+    /// because wall-clock assertions are environment-sensitive; run with
+    /// `cargo test -- --ignored --nocapture` to see the numbers.
+    #[test]
+    #[ignore = "timing benchmark; run manually with --ignored --nocapture"]
+    fn bench_pruned_output_vs_full_small_m() {
+        use std::time::Instant;
+
+        for &n in &[1usize << 10, 1 << 12, 1 << 14, 1 << 16] {
+            let input: Vec<Complex<f64>> = (0..n)
+                .map(|i| Complex::new((i as f64 * 0.001).sin(), (i as f64 * 0.002).cos()))
+                .collect();
+            let plan = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE).unwrap();
+            let iters = 200;
+
+            for &m in &[2usize, 8, 32] {
+                let indices: Vec<usize> = (0..m).map(|i| i * 7 + 5).collect();
+
+                let t0 = Instant::now();
+                for _ in 0..iters {
+                    let mut full = vec![Complex::new(0.0_f64, 0.0); n];
+                    plan.execute(&input, &mut full);
+                    let _sel: Vec<Complex<f64>> = indices.iter().map(|&i| full[i]).collect();
+                }
+                let full_time = t0.elapsed();
+
+                let t1 = Instant::now();
+                for _ in 0..iters {
+                    let _pruned = super::fft_pruned_output_butterfly(&input, &indices);
+                }
+                let bfly_time = t1.elapsed();
+
+                let t2 = Instant::now();
+                for _ in 0..iters {
+                    let _g = super::super::goertzel_multi(&input, &indices);
+                }
+                let goertzel_time = t2.elapsed();
+
+                println!(
+                    "N={n:>6} M={m:>3}: full+select={full_time:>10?}  butterfly={bfly_time:>10?}  goertzel={goertzel_time:>10?}"
+                );
+            }
+        }
     }
 }

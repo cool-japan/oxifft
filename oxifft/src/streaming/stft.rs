@@ -228,12 +228,12 @@ impl<T: Float> StreamingFft<T> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::streaming::{stft, WindowFunction};
 ///
 /// let signal = vec![0.0f64; 4096];
 /// let spectrogram = stft(&signal, 256, 64, WindowFunction::Hann);
-/// println!("Number of frames: {}", spectrogram.len());
+/// assert!(!spectrogram.is_empty()); // one spectrum per frame
 /// ```
 pub fn stft<T: Float>(
     signal: &[T],
@@ -290,12 +290,13 @@ pub fn stft<T: Float>(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::streaming::{stft, istft, WindowFunction};
 ///
 /// let signal = vec![1.0f64; 1024];
 /// let spectrogram = stft(&signal, 256, 64, WindowFunction::Hann);
 /// let reconstructed = istft(&spectrogram, 64, WindowFunction::Hann);
+/// # let _ = reconstructed;
 /// ```
 pub fn istft<T: Float>(
     spectrogram: &[Vec<Complex<T>>],
@@ -381,12 +382,13 @@ pub fn istft<T: Float>(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::streaming::{stft_overlap_save, istft_overlap_save, WindowFunction};
 ///
 /// let signal: Vec<f64> = (0..512).map(|i| (i as f64 * 0.1).sin()).collect();
 /// let spectra = stft_overlap_save(&signal, 64, 16, WindowFunction::Rectangular);
 /// let reconstructed = istft_overlap_save(&spectra, 64, 16, WindowFunction::Rectangular);
+/// # let _ = reconstructed;
 /// ```
 pub fn stft_overlap_save<T: Float>(
     signal: &[T],
@@ -470,12 +472,13 @@ pub fn stft_overlap_save<T: Float>(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::streaming::{stft_overlap_save, istft_overlap_save, WindowFunction};
 ///
 /// let signal: Vec<f64> = (0..256).map(|i| (i as f64 * 0.05).cos()).collect();
 /// let spectra = stft_overlap_save(&signal, 64, 16, WindowFunction::Rectangular);
 /// let recovered = istft_overlap_save(&spectra, 64, 16, WindowFunction::Rectangular);
+/// # let _ = recovered;
 /// // recovered should match signal in the valid interior region
 /// ```
 pub fn istft_overlap_save<T: Float>(

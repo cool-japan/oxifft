@@ -1,0 +1,5 @@
+error: gen_simd_codelet: unsupported size 6 (expected one of 2, 4, 8, 16)
+ --> tests/compile_fail/gen_simd_unknown_size.rs:3:19
+  |
+3 | gen_simd_codelet!(6);
+  |                   ^

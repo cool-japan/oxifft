@@ -10,6 +10,12 @@ use crate::kernel::Complex;
 #[allow(unused_imports)]
 // reason: prelude glob re-exports are selectively used per feature gate (std vs no_std)
 use crate::prelude::*;
+// The x86_64 AVX2 codelet computes W16 twiddles inline via `f64::sin`/`f64::cos`,
+// which are std-only inherent methods. Under no_std bring the libm-backed
+// `num_traits::Float` impl into scope so those calls resolve. Scoped to x86_64
+// because the aarch64/scalar paths use precomputed twiddle tables instead.
+#[cfg(all(not(feature = "std"), target_arch = "x86_64"))]
+use num_traits::Float as _;
 
 /// Convert a `Vec<[f64; 2]>` of exactly 65535 elements into `Box<[[f64; 2]; 65535]>`
 /// without panicking. This avoids `unwrap()`/`expect()` on the `try_into()` conversion.
@@ -42,10 +48,10 @@ fn vec_to_boxed_twiddles(v: Vec<[f64; 2]>) -> Box<[[f64; 2]; 65535]> {
 /// Detects CPU features at runtime and uses the fastest available implementation.
 #[cfg(target_arch = "x86_64")]
 pub fn dit_butterflies_f64(data: &mut [Complex<f64>], sign: Sign) {
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+    if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
         // Safety: We've verified AVX2+FMA are available
         unsafe { dit_butterflies_avx2(data, sign) }
-    } else if is_x86_feature_detected!("sse3") {
+    } else if crate::detect_x86_feature!("sse3") {
         // SSE3 required for _mm_addsub_pd
         // Safety: We've verified SSE3 is available
         unsafe { dit_butterflies_sse3(data, sign) }
@@ -667,11 +673,10 @@ unsafe fn dit_butterflies_avx2(data: &mut [Complex<f64>], sign: Sign) {
         let twiddles = get_twiddles();
 
         let mut stage = 0;
-        let mut m;
 
         // Fused stages 0-3 for n >= 16: process 16 elements at once
         // This reduces memory traffic by doing all early stages in registers
-        if log_n >= 4 {
+        let mut m = if log_n >= 4 {
             let sqrt2_2 = core::f64::consts::FRAC_1_SQRT_2;
             // Stage 2 twiddles (for m=8)
             let w8_1 = Complex::new(sqrt2_2, sign_f * sqrt2_2);
@@ -783,7 +788,7 @@ unsafe fn dit_butterflies_avx2(data: &mut [Complex<f64>], sign: Sign) {
                 data[k + 15] = x[7] - t7;
             }
             stage = 4;
-            m = 32;
+            32
         } else {
             // For n < 16, use the original stage-by-stage approach
             // Stage 0: m=2, half_m=1, twiddle is always 1
@@ -838,8 +843,8 @@ unsafe fn dit_butterflies_avx2(data: &mut [Complex<f64>], sign: Sign) {
                 }
                 stage += 1;
             }
-            m = 16;
-        }
+            16
+        };
 
         // SIMD stages for m >= 32 with precomputed twiddles
         let ptr = data.as_mut_ptr() as *mut f64;

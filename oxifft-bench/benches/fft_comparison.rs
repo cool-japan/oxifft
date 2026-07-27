@@ -7,7 +7,10 @@
 #![allow(clippy::assign_op_pattern)] // Clearer in benchmark context
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use oxifft::api::{fft2d, fft_batch, rfft, Direction, Flags, Plan};
+use oxifft::api::{Direction, Flags, Plan, Plan2D};
+use oxifft::dft::problem::Sign;
+use oxifft::dft::solvers::VrankGeq1Solver;
+use oxifft::rdft::solvers::R2cSolver;
 use oxifft::Complex;
 use rustfft::FftPlanner;
 use std::hint::black_box;
@@ -253,11 +256,15 @@ fn bench_real_fft(c: &mut Criterion) {
 
         let input = generate_real_input(size);
 
-        // OxiFFT benchmark
+        // OxiFFT benchmark — build the R2C solver once (apples-to-apples with
+        // rustfft/FFTW, which plan once outside the timing loop). The public
+        // `rfft` convenience wrapper reconstructs an `R2cSolver` on every call,
+        // so it must not be used inside `b.iter()`.
+        let oxifft_solver = R2cSolver::new(size);
+        let mut oxifft_output = vec![Complex::zero(); size / 2 + 1];
         group.bench_with_input(BenchmarkId::new("oxifft", size), &input, |b, input| {
             b.iter(|| {
-                let result = rfft(black_box(input));
-                black_box(result)
+                oxifft_solver.execute(black_box(input), black_box(&mut oxifft_output));
             });
         });
 
@@ -324,12 +331,16 @@ fn bench_2d_fft(c: &mut Criterion) {
 
         let input = generate_input(total);
 
-        // OxiFFT benchmark
+        // OxiFFT benchmark — build the 2D plan once (the `fft2d` convenience
+        // wrapper rebuilds a `Plan2D` on every call, so it is unsuitable inside
+        // `b.iter()`; rustfft/FFTW below likewise plan once up front).
         let label = format!("{rows}x{cols}");
+        let oxifft_plan = Plan2D::new(rows, cols, Direction::Forward, Flags::ESTIMATE)
+            .expect("Failed to create OxiFFT 2D plan");
+        let mut oxifft_output = vec![Complex::zero(); total];
         group.bench_with_input(BenchmarkId::new("oxifft", &label), &input, |b, input| {
             b.iter(|| {
-                let result = fft2d(black_box(input), rows, cols);
-                black_box(result)
+                oxifft_plan.execute(black_box(input), black_box(&mut oxifft_output));
             });
         });
 
@@ -415,12 +426,18 @@ fn bench_batch_fft(c: &mut Criterion) {
 
         let input = generate_input(total);
 
-        // OxiFFT benchmark
+        // OxiFFT benchmark — build the batched solver once (the `fft_batch`
+        // convenience wrapper reconstructs a `VrankGeq1Solver` on every call).
         let label = format!("{size}x{howmany}");
+        let oxifft_solver = VrankGeq1Solver::new_contiguous(size, howmany);
+        let mut oxifft_output = vec![Complex::zero(); total];
         group.bench_with_input(BenchmarkId::new("oxifft", &label), &input, |b, input| {
             b.iter(|| {
-                let result = fft_batch(black_box(input), size, howmany);
-                black_box(result)
+                oxifft_solver.execute(
+                    black_box(input),
+                    black_box(&mut oxifft_output),
+                    Sign::Forward,
+                );
             });
         });
 
@@ -555,11 +572,16 @@ fn bench_sar_azimuth_batch(c: &mut Criterion) {
 
         let label = format!("{azimuth_size}x{num_range_bins}");
 
-        // OxiFFT benchmark using batch API
+        // OxiFFT benchmark using batch API — solver built once outside the loop.
+        let oxifft_solver = VrankGeq1Solver::new_contiguous(azimuth_size, num_range_bins);
+        let mut oxifft_output = vec![Complex::zero(); total];
         group.bench_with_input(BenchmarkId::new("oxifft", &label), &input, |b, input| {
             b.iter(|| {
-                let result = fft_batch(black_box(input), azimuth_size, num_range_bins);
-                black_box(result)
+                oxifft_solver.execute(
+                    black_box(input),
+                    black_box(&mut oxifft_output),
+                    Sign::Forward,
+                );
             });
         });
 
@@ -609,11 +631,13 @@ fn bench_sar_2d_image_formation(c: &mut Criterion) {
 
         let label = format!("{rows}x{cols}");
 
-        // OxiFFT benchmark
+        // OxiFFT benchmark — 2D plan built once outside the timing loop.
+        let oxifft_plan = Plan2D::new(rows, cols, Direction::Forward, Flags::ESTIMATE)
+            .expect("Failed to create OxiFFT 2D plan");
+        let mut oxifft_output = vec![Complex::zero(); total];
         group.bench_with_input(BenchmarkId::new("oxifft", &label), &input, |b, input| {
             b.iter(|| {
-                let result = fft2d(black_box(input), rows, cols);
-                black_box(result)
+                oxifft_plan.execute(black_box(input), black_box(&mut oxifft_output));
             });
         });
 
@@ -794,11 +818,12 @@ fn bench_sar_real_fft(c: &mut Criterion) {
 
         let input = generate_real_input(size);
 
-        // OxiFFT benchmark
+        // OxiFFT benchmark — R2C solver built once outside the timing loop.
+        let oxifft_solver = R2cSolver::new(size);
+        let mut oxifft_output = vec![Complex::zero(); size / 2 + 1];
         group.bench_with_input(BenchmarkId::new("oxifft", size), &input, |b, input| {
             b.iter(|| {
-                let result = rfft(black_box(input));
-                black_box(result)
+                oxifft_solver.execute(black_box(input), black_box(&mut oxifft_output));
             });
         });
 
@@ -826,6 +851,45 @@ fn bench_sar_real_fft(c: &mut Criterion) {
     group.finish();
 }
 
+// =============================================================================
+// Plan-construction benchmarks
+// =============================================================================
+
+/// Benchmark plan construction cost in isolation.
+///
+/// Every other group here hoists planning out of `b.iter()` so that only the
+/// steady-state `execute()` cost is measured (matching how rustfft/FFTW are
+/// benchmarked). Plan construction is a distinct, one-time cost, so it gets its
+/// own group rather than being folded into per-execute numbers via the
+/// replanning convenience wrappers.
+fn bench_plan_construction(c: &mut Criterion) {
+    let sizes: Vec<usize> = vec![256, 1000, 4096, 65536];
+
+    let mut group = c.benchmark_group("plan_construction");
+
+    for size in sizes {
+        // OxiFFT: ESTIMATE plan construction (heuristic solver selection).
+        group.bench_with_input(BenchmarkId::new("oxifft", size), &size, |b, &size| {
+            b.iter(|| {
+                let plan = Plan::<f64>::dft_1d(size, Direction::Forward, Flags::ESTIMATE)
+                    .expect("Failed to create OxiFFT plan");
+                black_box(plan)
+            });
+        });
+
+        // rustfft: FftPlanner construction for the same size.
+        group.bench_with_input(BenchmarkId::new("rustfft", size), &size, |b, &size| {
+            b.iter(|| {
+                let mut planner = FftPlanner::<f64>::new();
+                let plan = planner.plan_fft_forward(black_box(size));
+                black_box(plan)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_power_of_2,
@@ -833,7 +897,8 @@ criterion_group!(
     bench_composite_sizes,
     bench_real_fft,
     bench_2d_fft,
-    bench_batch_fft
+    bench_batch_fft,
+    bench_plan_construction
 );
 
 // SAR-specific benchmark group

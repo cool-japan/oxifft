@@ -89,6 +89,14 @@ pub struct GpuCapabilities {
     pub compute_units: u32,
     /// Maximum work group size.
     pub max_workgroup_size: u32,
+    /// Whether transforms on this backend actually run on the GPU.
+    ///
+    /// `true` means kernels are dispatched to device hardware (Metal today).
+    /// `false` means the backend currently emulates the transform on the CPU
+    /// (the CUDA backend, pending real kernel-launch support in oxicuda-fft).
+    /// Query [`crate::gpu::GpuFft::execution_target`] for the same information
+    /// at the plan level.
+    pub hardware_accelerated: bool,
 }
 
 impl Default for GpuCapabilities {
@@ -103,6 +111,7 @@ impl Default for GpuCapabilities {
             supports_f16: false,
             compute_units: 0,
             max_workgroup_size: 0,
+            hardware_accelerated: false,
         }
     }
 }

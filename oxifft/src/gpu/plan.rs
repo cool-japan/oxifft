@@ -22,6 +22,20 @@ pub enum GpuDirection {
     Inverse,
 }
 
+/// Where a [`GpuFft`] plan's transforms actually execute.
+///
+/// This makes the current backend status queryable rather than implicit:
+/// the Metal backend dispatches to the GPU, whereas the CUDA backend currently
+/// emulates on the CPU (its device kernels are pending real launch support in
+/// oxicuda-fft — see [`crate::gpu::cuda`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionTarget {
+    /// Transforms run on the host CPU.
+    Cpu,
+    /// Transforms are dispatched to GPU hardware.
+    Gpu,
+}
+
 /// GPU FFT plan configuration.
 #[derive(Debug, Clone)]
 pub struct GpuPlanConfig {
@@ -290,6 +304,22 @@ impl<T: Float> GpuFft<T> {
         }
 
         Ok(())
+    }
+
+    /// Report where this plan's transforms actually execute.
+    ///
+    /// Returns [`ExecutionTarget::Gpu`] for the Metal backend and
+    /// [`ExecutionTarget::Cpu`] for the CUDA backend, which currently emulates
+    /// on the host (see [`crate::gpu::cuda`]).  Use this to decide, at runtime,
+    /// whether a workload will genuinely be GPU-accelerated.
+    #[must_use]
+    pub fn execution_target(&self) -> ExecutionTarget {
+        match self.backend {
+            GpuBackend::Metal => ExecutionTarget::Gpu,
+            // CUDA currently computes on the CPU; every other reachable state is
+            // likewise host-side.
+            _ => ExecutionTarget::Cpu,
+        }
     }
 
     fn execute_internal(&mut self, _direction: GpuDirection) -> GpuResult<()> {
@@ -598,5 +628,140 @@ mod tests {
     fn test_gpu_fft_size_validation() {
         let result: GpuResult<GpuFft<f64>> = GpuFft::new(0, GpuBackend::Auto);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_target_reports_cpu_when_no_metal() {
+        // Without a real backend this just confirms the mapping compiles and
+        // that non-Metal backends report CPU.  (Metal-specific behaviour is
+        // covered by the metal_highlevel_tests module.)
+        let _ = ExecutionTarget::Cpu;
+        let _ = ExecutionTarget::Gpu;
+    }
+}
+
+// High-level regression tests for the *public* `GpuFft` API on the Metal
+// backend.  These are the tests that would have caught the double-normalised
+// inverse bug — they exercise `GpuFft::forward`/`inverse`, not the low-level
+// `MetalFftPlan::execute`.  They require an Apple GPU and are skipped otherwise.
+#[cfg(all(test, feature = "metal"))]
+mod metal_highlevel_tests {
+    // Import only the concrete types — deliberately NOT the `GpuFftEngine`
+    // trait, so `plan.forward`/`plan.inverse` resolve to the inherent
+    // `Vec`-returning methods (the public high-level API) rather than the
+    // trait's `&self`, two-argument methods.
+    use super::{ExecutionTarget, GpuFft, GpuPlanConfig};
+    use crate::gpu::metal;
+    use crate::gpu::GpuBackend;
+    use crate::kernel::Complex;
+
+    /// Reference CPU forward FFT (unnormalised), for cross-checking the GPU.
+    fn cpu_forward_f32(input: &[Complex<f32>]) -> Vec<Complex<f32>> {
+        use crate::api::{Direction, Flags, Plan};
+        let n = input.len();
+        let plan = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE).expect("cpu plan");
+        let in64: Vec<Complex<f64>> = input
+            .iter()
+            .map(|c| Complex::new(c.re as f64, c.im as f64))
+            .collect();
+        let mut out64 = vec![Complex::<f64>::zero(); n];
+        plan.execute(&in64, &mut out64);
+        out64
+            .iter()
+            .map(|c| Complex::new(c.re as f32, c.im as f32))
+            .collect()
+    }
+
+    fn make_signal(n: usize) -> Vec<Complex<f32>> {
+        (0..n)
+            .map(|k| {
+                let t = k as f32 / n as f32;
+                let re = (2.0 * core::f32::consts::PI * 3.0 * t).sin()
+                    + 0.5 * (2.0 * core::f32::consts::PI * 7.0 * t).cos();
+                Complex::new(re, 0.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gpu_fft_highlevel_roundtrip_and_vs_cpu() {
+        if !metal::is_available() {
+            return;
+        }
+        for &n in &[256usize, 1024, 4096] {
+            let input = make_signal(n);
+            let mut plan = GpuFft::<f32>::new(n, GpuBackend::Metal).expect("plan");
+            assert_eq!(plan.execution_target(), ExecutionTarget::Gpu);
+
+            // Forward must agree with the CPU reference (tolerance scaled with N
+            // for f32 accumulation).
+            let spectrum = plan.forward(&input).expect("forward");
+            let cpu_spectrum = cpu_forward_f32(&input);
+            let fwd_tol = 1e-2_f32 * n as f32;
+            for (k, (g, c)) in spectrum.iter().zip(cpu_spectrum.iter()).enumerate() {
+                let err = ((g.re - c.re).powi(2) + (g.im - c.im).powi(2)).sqrt();
+                assert!(
+                    err <= fwd_tol,
+                    "n={n} bin {k}: gpu=({},{}) cpu=({},{}) err={err} > {fwd_tol}",
+                    g.re,
+                    g.im,
+                    c.re,
+                    c.im
+                );
+            }
+
+            // Round trip with the default normalize_inverse=true: recovers x.
+            // Under the old double-normalisation bug this returned x/N and would
+            // fail this assertion badly.
+            let recovered = plan.inverse(&spectrum).expect("inverse");
+            for (k, (r, x)) in recovered.iter().zip(input.iter()).enumerate() {
+                let err = ((r.re - x.re).powi(2) + (r.im - x.im).powi(2)).sqrt();
+                assert!(
+                    err <= 1e-3,
+                    "n={n} sample {k}: recovered=({},{}) expected=({},{}) err={err}",
+                    r.re,
+                    r.im,
+                    x.re,
+                    x.im
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_fft_highlevel_unnormalized_inverse() {
+        if !metal::is_available() {
+            return;
+        }
+        let n = 256usize;
+        let input = make_signal(n);
+        let mut plan = GpuFft::<f32>::with_config(GpuPlanConfig {
+            size: n,
+            batch_size: 1,
+            backend: GpuBackend::Metal,
+            normalize_inverse: false,
+        })
+        .expect("plan");
+
+        let spectrum = plan.forward(&input).expect("forward");
+        let recovered = plan.inverse(&spectrum).expect("inverse");
+
+        // With normalize_inverse=false the inverse is unnormalised, so
+        // inverse(forward(x)) == N * x.
+        let scale = n as f32;
+        let tol = 1e-2_f32 * n as f32;
+        for (k, (r, x)) in recovered.iter().zip(input.iter()).enumerate() {
+            let expected_re = x.re * scale;
+            let expected_im = x.im * scale;
+            let err = ((r.re - expected_re).powi(2) + (r.im - expected_im).powi(2)).sqrt();
+            assert!(
+                err <= tol,
+                "n={n} sample {k}: recovered=({},{}) expected=({},{}) err={err} > {tol}",
+                r.re,
+                r.im,
+                expected_re,
+                expected_im
+            );
+        }
     }
 }

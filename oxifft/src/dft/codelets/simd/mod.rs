@@ -38,6 +38,18 @@ pub fn simd_available() -> bool {
 /// supported architectures.
 #[inline]
 pub fn notw_2_dispatch<T: Float>(x: &mut [Complex<T>]) {
+    // Portable SIMD tier (nightly, opt-in): route f64 through `core::simd`.
+    #[cfg(oxifft_portable_simd)]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // Safety: verified T is f64, so the memory layout is identical.
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            backends::portable_f64::notw_2_portable(x_f64);
+            return;
+        }
+    }
     // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
     // The size-2 butterfly is sign-independent; pass 1 as a no-op placeholder.
     super::generated_simd::generated_simd_2_dispatch(x);
@@ -51,6 +63,18 @@ pub fn notw_2_dispatch<T: Float>(x: &mut [Complex<T>]) {
 /// supported architectures.
 #[inline]
 pub fn notw_4_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
+    // Portable SIMD tier (nightly, opt-in): route f64 through `core::simd`.
+    #[cfg(oxifft_portable_simd)]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // Safety: verified T is f64, so the memory layout is identical.
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            backends::portable_f64::notw_4_portable(x_f64, sign);
+            return;
+        }
+    }
     // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
     super::generated_simd::generated_simd_4_dispatch(x, sign);
 }

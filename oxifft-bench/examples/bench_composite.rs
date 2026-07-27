@@ -3,6 +3,7 @@
 #![allow(clippy::single_match_else)]
 
 use oxifft::{Complex, Direction, Flags, Plan};
+use std::hint::black_box;
 use std::time::Instant;
 
 fn bench_size(n: usize, iterations: usize) {
@@ -22,15 +23,16 @@ fn bench_size(n: usize, iterations: usize) {
 
     // Warmup
     for _ in 0..100 {
-        plan.execute(&input, &mut output);
+        plan.execute(black_box(&input), black_box(&mut output));
     }
 
     // Benchmark
     let start = Instant::now();
     for _ in 0..iterations {
-        plan.execute(&input, &mut output);
+        plan.execute(black_box(&input), black_box(&mut output));
     }
     let elapsed = start.elapsed();
+    black_box(&output);
 
     let avg_ns = elapsed.as_nanos() as f64 / iterations as f64;
     println!("Size {:4}: {:8.1} ns/transform", n, avg_ns);

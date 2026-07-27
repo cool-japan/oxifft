@@ -82,7 +82,7 @@ fn cmul_f32(re: f32, im: f32, c: f32, s: f32) -> (f32, f32) {
 /// to ZMM context.
 ///
 /// # Safety
-/// - Caller must ensure `avx512f` is available via `is_x86_feature_detected!`.
+/// - Caller must ensure `avx512f` is available via `crate::detect_x86_feature!`.
 /// - `data` must contain exactly 16 `Complex<f64>` elements.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
@@ -830,7 +830,7 @@ pub(crate) unsafe fn hand_avx512_size64_f32(data: *mut Complex<f32>, sign: i32) 
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size16_f64(data: &mut [Complex<f64>], sign: i32) {
-    if is_x86_feature_detected!("avx512f") {
+    if crate::detect_x86_feature!("avx512f") {
         // Safety: avx512f confirmed, data has exactly 16 elements.
         unsafe {
             hand_avx512_size16_f64(data.as_mut_ptr(), sign);
@@ -844,7 +844,7 @@ pub fn dispatch_hand_avx512_size16_f64(data: &mut [Complex<f64>], sign: i32) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size32_f64(data: &mut [Complex<f64>], sign: i32) {
-    if is_x86_feature_detected!("avx512f") {
+    if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size32_f64(data.as_mut_ptr(), sign);
         }
@@ -857,7 +857,7 @@ pub fn dispatch_hand_avx512_size32_f64(data: &mut [Complex<f64>], sign: i32) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size64_f64(data: &mut [Complex<f64>], sign: i32) {
-    if is_x86_feature_detected!("avx512f") {
+    if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size64_f64(data.as_mut_ptr(), sign);
         }
@@ -870,7 +870,7 @@ pub fn dispatch_hand_avx512_size64_f64(data: &mut [Complex<f64>], sign: i32) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size16_f32(data: &mut [Complex<f32>], sign: i32) {
-    if is_x86_feature_detected!("avx512f") {
+    if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size16_f32(data.as_mut_ptr(), sign);
         }
@@ -883,7 +883,7 @@ pub fn dispatch_hand_avx512_size16_f32(data: &mut [Complex<f32>], sign: i32) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size32_f32(data: &mut [Complex<f32>], sign: i32) {
-    if is_x86_feature_detected!("avx512f") {
+    if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size32_f32(data.as_mut_ptr(), sign);
         }
@@ -896,7 +896,7 @@ pub fn dispatch_hand_avx512_size32_f32(data: &mut [Complex<f32>], sign: i32) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size64_f32(data: &mut [Complex<f32>], sign: i32) {
-    if is_x86_feature_detected!("avx512f") {
+    if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size64_f32(data.as_mut_ptr(), sign);
         }

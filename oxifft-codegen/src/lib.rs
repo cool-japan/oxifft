@@ -12,14 +12,32 @@
 //! - Optimal instruction ordering
 //! - SIMD-aware code patterns
 //!
+//! # The `crate::kernel` contract
+//!
+//! Every generated codelet refers to two types by the **relative** path
+//! `crate::kernel::Float` and `crate::kernel::Complex<T>`. The crate that
+//! *invokes* a codelet macro must therefore expose a module named `kernel` at
+//! its crate root that provides a `Float` trait (implemented for the scalar
+//! element type) and a `Complex<T: Float>` type. The production `oxifft` crate
+//! supplies its own `oxifft::kernel`; for tests, doc-tests, and downstream
+//! experimentation a dependency-free reference implementation is available as
+//! [`oxifft_codegen_impl::kernel_contract`] — re-export it as `kernel` and the
+//! generated code resolves against it.
+//!
 //! # Usage
 //!
-//! ```ignore
+//! ```
+//! # mod kernel {
+//! #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+//! # }
 //! use oxifft_codegen::gen_dft_codelet;
 //!
-//! // Generate size-8 DFT codelet
+//! // Generate size-8 DFT codelet (`codelet_notw_8`).
 //! gen_dft_codelet!(8);
+//! # fn main() {}
 //! ```
+//!
+//! [`oxifft_codegen_impl::kernel_contract`]: https://docs.rs/oxifft-codegen-impl
 
 extern crate proc_macro;
 
@@ -31,8 +49,13 @@ use proc_macro::TokenStream;
 /// * `size` - The FFT size (must be 2, 4, 8, 16, 32, or 64)
 ///
 /// # Example
-/// ```ignore
-/// gen_notw_codelet!(8);
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// use oxifft_codegen::gen_notw_codelet;
+/// gen_notw_codelet!(8); // emits `codelet_notw_8`
+/// # fn main() {}
 /// ```
 #[proc_macro]
 pub fn gen_notw_codelet(input: TokenStream) -> TokenStream {
@@ -43,6 +66,19 @@ pub fn gen_notw_codelet(input: TokenStream) -> TokenStream {
 }
 
 /// Generate a twiddle-factor DFT codelet.
+///
+/// # Arguments
+/// * The radix literal — must be 2, 4, 8, or 16.
+///
+/// # Example
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// use oxifft_codegen::gen_twiddle_codelet;
+/// gen_twiddle_codelet!(4); // emits `codelet_twiddle_4`
+/// # fn main() {}
+/// ```
 #[proc_macro]
 pub fn gen_twiddle_codelet(input: TokenStream) -> TokenStream {
     let input2: proc_macro2::TokenStream = input.into();
@@ -58,15 +94,21 @@ pub fn gen_twiddle_codelet(input: TokenStream) -> TokenStream {
 /// with twiddle factors `W_N^k` and `W_N^{3k`}, reducing the total multiply count.
 ///
 /// # Usage
-/// ```ignore
-/// // Generate generic runtime-parameterized split-radix twiddle codelet
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// use oxifft_codegen::gen_split_radix_twiddle_codelet;
+///
+/// // Generic runtime-parameterized split-radix twiddle codelet.
 /// gen_split_radix_twiddle_codelet!();
 ///
-/// // Generate specialized unrolled version for N=8
+/// // Specialized unrolled version for N=8.
 /// gen_split_radix_twiddle_codelet!(8);
 ///
-/// // Generate specialized unrolled version for N=16
+/// // Specialized unrolled version for N=16.
 /// gen_split_radix_twiddle_codelet!(16);
+/// # fn main() {}
 /// ```
 #[proc_macro]
 pub fn gen_split_radix_twiddle_codelet(input: TokenStream) -> TokenStream {
@@ -76,7 +118,25 @@ pub fn gen_split_radix_twiddle_codelet(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Generate a SIMD-optimized codelet.
+/// Generate a runtime-dispatched SIMD codelet.
+///
+/// Emits a public `codelet_simd_{size}<T>` dispatcher plus architecture-specific
+/// inner functions (AVX-512F / AVX2+FMA / AVX / SSE2 on `x86_64`, NEON on
+/// `aarch64`) and a portable scalar fallback. The dispatcher picks the best
+/// available path at runtime.
+///
+/// # Arguments
+/// * The size literal — must be 2, 4, 8, or 16.
+///
+/// # Example
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// use oxifft_codegen::gen_simd_codelet;
+/// gen_simd_codelet!(8); // emits `codelet_simd_8` + arch-specific inner functions
+/// # fn main() {}
+/// ```
 #[proc_macro]
 pub fn gen_simd_codelet(input: TokenStream) -> TokenStream {
     let input2: proc_macro2::TokenStream = input.into();
@@ -103,10 +163,15 @@ pub fn gen_dft_codelet(input: TokenStream) -> TokenStream {
 /// * The size literal — must be 3, 5, or 7.
 ///
 /// # Example
-/// ```ignore
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// use oxifft_codegen::gen_odd_codelet;
 /// gen_odd_codelet!(3);  // emits `codelet_notw_3`
 /// gen_odd_codelet!(5);  // emits `codelet_notw_5`
 /// gen_odd_codelet!(7);  // emits `codelet_notw_7`
+/// # fn main() {}
 /// ```
 #[proc_macro]
 pub fn gen_odd_codelet(input: TokenStream) -> TokenStream {
@@ -126,9 +191,14 @@ pub fn gen_odd_codelet(input: TokenStream) -> TokenStream {
 /// * The prime literal — must be 11 or 13.
 ///
 /// # Example
-/// ```ignore
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// use oxifft_codegen::gen_rader_codelet;
 /// gen_rader_codelet!(11);  // emits `codelet_notw_11`
 /// gen_rader_codelet!(13);  // emits `codelet_notw_13`
+/// # fn main() {}
 /// ```
 #[proc_macro]
 pub fn gen_rader_codelet(input: TokenStream) -> TokenStream {
@@ -151,10 +221,15 @@ pub fn gen_rader_codelet(input: TokenStream) -> TokenStream {
 /// * `isa`  — target ISA: `sse2`, `avx2`, or `scalar`
 /// * `ty`   — float type: `f32` or `f64`
 ///
+/// The outer function operates on raw `*const/*mut {ty}` pointers in the
+/// canonical Array-of-Structs layout and does **not** reference `crate::kernel`.
+///
 /// # Example
-/// ```ignore
+/// ```
+/// use oxifft_codegen::gen_multi_transform_codelet;
+/// // emits: pub unsafe fn notw_4_v8_avx2_f32(input, output, istride, ostride, count)
 /// gen_multi_transform_codelet!(size = 4, v = 8, isa = avx2, ty = f32);
-/// // emits: pub unsafe fn notw_4_v8_avx2_f32(...)
+/// # fn main() {}
 /// ```
 #[proc_macro]
 pub fn gen_multi_transform_codelet(input: TokenStream) -> TokenStream {
@@ -181,10 +256,26 @@ pub fn gen_multi_transform_codelet(input: TokenStream) -> TokenStream {
 /// - `aarch64`: NEON > scalar
 /// - other: scalar
 ///
+/// The cached dispatcher delegates to the `super::codelet_simd_{size}_{isa}_{ty}`
+/// inner functions, so it must be emitted in a child module of a
+/// `gen_simd_codelet!(size)` expansion that provides them.
+///
 /// # Example
-/// ```ignore
-/// gen_dispatcher_codelet!(size = 4, ty = f32);
-/// // emits: pub fn codelet_simd_4_cached_f32(data: &mut [Complex<f32>], sign: i32)
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// mod simd {
+///     use oxifft_codegen::gen_simd_codelet;
+///     gen_simd_codelet!(4); // provides codelet_simd_4_scalar / _sse2_f32 / ...
+///
+///     pub mod cached {
+///         use oxifft_codegen::gen_dispatcher_codelet;
+///         // emits: pub fn codelet_simd_4_cached_f32(data: &mut Complex<f32> slice, sign)
+///         gen_dispatcher_codelet!(size = 4, ty = f32);
+///     }
+/// }
+/// # fn main() {}
 /// ```
 #[proc_macro]
 pub fn gen_dispatcher_codelet(input: TokenStream) -> TokenStream {
@@ -206,18 +297,35 @@ pub fn gen_dispatcher_codelet(input: TokenStream) -> TokenStream {
 /// - **All other sizes**: runtime-delegating Bluestein wrapper via `Plan::dft_1d`.
 ///
 /// # Syntax
-/// ```ignore
-/// gen_any_codelet!(8);     // emits codelet_any_8  (direct notw codelet)
-/// gen_any_codelet!(15);    // emits codelet_any_15 (runtime mixed-radix wrapper)
+///
+/// For the hardcoded classes (direct / Winograd-odd / Rader) the emitted codelet
+/// is fully self-contained and only needs the `crate::kernel` contract:
+///
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
+/// use oxifft_codegen::gen_any_codelet;
+/// gen_any_codelet!(8);  // direct notw codelet -> codelet_notw_8
+/// gen_any_codelet!(13); // hardcoded Rader codelet -> codelet_notw_13
+/// # fn main() {}
+/// ```
+///
+/// The runtime-wrapper classes (smooth-7 `MixedRadix`, runtime `RaderPrime`, and
+/// `Bluestein`) additionally delegate to `::oxifft`'s `Plan::dft_1d`, so they only
+/// compile inside a crate that depends on `oxifft`:
+///
+/// ```text
+/// gen_any_codelet!(15);    // emits codelet_any_15   (runtime mixed-radix wrapper)
 /// gen_any_codelet!(2003);  // emits codelet_any_2003 (Bluestein wrapper)
 /// ```
 ///
-/// The emitted function signature is:
-/// ```ignore
+/// The runtime-wrapper function signature is:
+/// ```text
 /// pub fn codelet_any_{N}<T: crate::kernel::Float>(
 ///     x: &mut [crate::kernel::Complex<T>],
 ///     sign: i32,
-/// )
+/// ) -> Result<(), &'static str>
 /// ```
 #[proc_macro]
 pub fn gen_any_codelet(input: TokenStream) -> TokenStream {
@@ -231,7 +339,10 @@ pub fn gen_any_codelet(input: TokenStream) -> TokenStream {
 /// results to the hand-written codelets in `oxifft/src/rdft/codelets/mod.rs`.
 ///
 /// # Usage
-/// ```ignore
+/// ```
+/// # mod kernel {
+/// #     pub use oxifft_codegen_impl::kernel_contract::{Complex, Float};
+/// # }
 /// use oxifft_codegen::gen_rdft_codelet;
 ///
 /// // Generates `pub fn r2hc_4_gen<T: crate::kernel::Float>(x: &[T], y: &mut [Complex<T>])`
@@ -239,6 +350,7 @@ pub fn gen_any_codelet(input: TokenStream) -> TokenStream {
 ///
 /// // Generates `pub fn hc2r_4_gen<T: crate::kernel::Float>(y: &[Complex<T>], x: &mut [T])`
 /// gen_rdft_codelet!(size = 4, kind = Hc2r);
+/// # fn main() {}
 /// ```
 ///
 /// Supported sizes: 2, 4, 8.

@@ -79,10 +79,13 @@
 //!
 //! For batch transforms, each FFT in the batch can run independently:
 //!
-//! ```ignore
+//! ```
+//! use oxifft::threading::{ThreadPool, get_default_pool};
+//! let pool = get_default_pool();
 //! // 1000 independent 1024-point FFTs
 //! pool.parallel_for(1000, |batch_idx| {
-//!     compute_single_fft(batch_idx);
+//!     // compute the `batch_idx`-th single FFT here
+//!     let _ = batch_idx;
 //! });
 //! ```
 //!
@@ -90,15 +93,19 @@
 //!
 //! For multi-dimensional FFTs, rows/columns can be processed in parallel:
 //!
-//! ```ignore
-//! // 2D FFT: parallelize over rows
+//! ```no_run
+//! use oxifft::threading::{ThreadPool, get_default_pool};
+//! use oxifft::{fft, Complex};
+//!
+//! let (height, width) = (64usize, 64usize);
+//! let rows: Vec<Vec<Complex<f64>>> = vec![vec![Complex::new(0.0, 0.0); width]; height];
+//! let pool = get_default_pool();
+//!
+//! // 2D FFT stage 1: transform each row independently.
 //! pool.parallel_for(height, |row| {
-//!     fft_1d(&mut data[row * width..(row + 1) * width]);
+//!     let _spectrum = fft(&rows[row]);
 //! });
-//! // Then parallelize over columns
-//! pool.parallel_for(width, |col| {
-//!     fft_1d_strided(&mut data, col, height);
-//! });
+//! // Stage 2 transforms the columns using the same pattern (strided access).
 //! ```
 //!
 //! # Thread Pool Methods
@@ -121,8 +128,17 @@
 //! - Work stealing (with Rayon)
 //! - Cache coherency traffic
 //!
-//! For small FFTs (<4K points), this overhead can exceed the parallel speedup.
-//! OxiFFT automatically falls back to serial execution for small transforms.
+//! For small workloads, this overhead can exceed the parallel speedup.
+//! [`ParallelConfig`]'s size-aware thresholds (`min_fft_size`,
+//! `min_batch_chunk`, `min_rows_per_thread`) exist to avoid this, and are
+//! consulted automatically -- via [`should_parallelize`] -- by this module's
+//! own execution helpers, [`RayonPool::parallel_for`](RayonPool) and
+//! [`work_stealing::WorkStealingContext::par_map_slices_mut`]: both fall
+//! back to a plain sequential loop when the workload is judged too small to
+//! benefit. Higher-level plan types that dispatch parallel work directly
+//! (rather than through these helpers) are responsible for consulting
+//! [`global_parallel_config()`] themselves; see each type's documentation
+//! for whether it does so.
 //!
 //! ## Scaling
 //!
@@ -138,7 +154,7 @@
 //!
 //! # Example: Parallel Batch FFT
 //!
-//! ```ignore
+//! ```no_run
 //! use oxifft::threading::{ThreadPool, get_default_pool};
 //! use oxifft::{Complex, fft};
 //!
@@ -146,14 +162,14 @@
 //! let batch_size = 1000;
 //! let fft_size = 1024;
 //!
-//! // Allocate batch data
-//! let mut batches: Vec<Vec<Complex<f64>>> = (0..batch_size)
+//! // Allocate batch data.
+//! let batches: Vec<Vec<Complex<f64>>> = (0..batch_size)
 //!     .map(|_| vec![Complex::new(0.0, 0.0); fft_size])
 //!     .collect();
 //!
-//! // Process in parallel
+//! // Process in parallel: `fft` borrows each input and returns its spectrum.
 //! pool.parallel_for(batch_size, |i| {
-//!     fft(&mut batches[i]);
+//!     let _spectrum = fft(&batches[i]);
 //! });
 //! ```
 //!
@@ -180,7 +196,7 @@ pub use work_stealing::WorkStealingContext;
 
 pub use parallel_config::ParallelConfig;
 #[cfg(feature = "std")]
-pub use parallel_config::{global_parallel_config, set_global_parallel_config};
+pub use parallel_config::{global_parallel_config, set_global_parallel_config, should_parallelize};
 pub use serial::SerialPool;
 pub use spawn::ThreadPool;
 

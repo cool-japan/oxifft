@@ -1,16 +1,15 @@
 //! 3D distributed FFT plan.
 
-use mpi::datatype::Equivalence;
 use mpi::topology::Communicator;
 
-use crate::api::{Direction, Plan};
-use crate::kernel::{Complex, Float};
+use oxifft::api::{Direction, Plan};
+use oxifft::kernel::{Complex, Float};
 
-use crate::mpi::distribution::LocalPartition;
-use crate::mpi::error::MpiError;
-use crate::mpi::pool::{MpiFloat, MpiPool};
-use crate::mpi::transpose::distributed_transpose;
-use crate::mpi::MpiFlags;
+use crate::distribution::{Distribution, LocalPartition};
+use crate::error::MpiError;
+use crate::pool::{MpiFloat, MpiPool};
+use crate::transpose::distributed_transpose_batched;
+use crate::MpiFlags;
 
 /// 3D distributed FFT plan.
 ///
@@ -20,7 +19,7 @@ use crate::mpi::MpiFlags;
 /// 2. Distributed transpose to distribute n1
 /// 3. Local 1D FFTs along n0 dimension
 /// 4. Optional: Transpose back
-pub struct MpiPlan3D<T: Float, C: Communicator> {
+pub struct MpiPlan3D<'p, T: Float, C: Communicator> {
     /// Global dimensions.
     dims: [usize; 3],
     /// Local number of planes owned by this process.
@@ -31,8 +30,9 @@ pub struct MpiPlan3D<T: Float, C: Communicator> {
     direction: Direction,
     /// Planning flags.
     flags: MpiFlags,
-    /// Reference to MPI pool.
-    pool: *const MpiPool<C>,
+    /// Borrow of the MPI pool; the borrow checker guarantees the pool outlives
+    /// the plan.
+    pool: &'p MpiPool<C>,
     /// Local plan for n2 dimension.
     plan_n2: Plan<T>,
     /// Local plan for n1 dimension.
@@ -41,17 +41,9 @@ pub struct MpiPlan3D<T: Float, C: Communicator> {
     plan_n0: Plan<T>,
     /// Scratch buffer.
     scratch: Vec<Complex<T>>,
-    /// Marker.
-    _phantom: core::marker::PhantomData<(T, C)>,
 }
 
-unsafe impl<T: Float, C: Communicator + Send> Send for MpiPlan3D<T, C> {}
-unsafe impl<T: Float, C: Communicator + Sync> Sync for MpiPlan3D<T, C> {}
-
-impl<T: Float + MpiFloat, C: Communicator> MpiPlan3D<T, C>
-where
-    Complex<T>: Equivalence,
-{
+impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan3D<'p, T, C> {
     /// Create a new 3D distributed FFT plan.
     ///
     /// # Arguments
@@ -71,7 +63,7 @@ where
         n2: usize,
         direction: Direction,
         flags: MpiFlags,
-        pool: &MpiPool<C>,
+        pool: &'p MpiPool<C>,
     ) -> Result<Self, MpiError> {
         if n0 == 0 || n1 == 0 || n2 == 0 {
             return Err(MpiError::InvalidDimension {
@@ -90,6 +82,13 @@ where
                     n2
                 },
                 message: "Dimension size cannot be zero".to_string(),
+            });
+        }
+
+        if flags.transposed_in {
+            return Err(MpiError::FftError {
+                message: "MpiFlags::transposed_in is not yet implemented for the 3D slab plan"
+                    .to_string(),
             });
         }
 
@@ -127,18 +126,22 @@ where
             local_0_start,
             direction,
             flags,
-            pool: std::ptr::from_ref(pool),
+            pool,
             plan_n2,
             plan_n1,
             plan_n0,
             scratch,
-            _phantom: core::marker::PhantomData,
         })
     }
 
     /// Get global dimensions.
     pub fn dims(&self) -> [usize; 3] {
         self.dims
+    }
+
+    /// Data-distribution strategy used by this plan (always [`Distribution::Slab`]).
+    pub fn distribution(&self) -> Distribution {
+        Distribution::Slab
     }
 
     /// Get the transform direction.
@@ -167,15 +170,27 @@ where
         let n1 = self.dims[1];
         let n2 = self.dims[2];
 
-        let expected_size = self.local_n0 * n1 * n2;
-        if data.len() < expected_size {
+        let pool = self.pool;
+
+        // The transposed-output path writes `local_n1 * n0 * n2` elements into
+        // `data`, which can exceed the `local_n0 * n1 * n2` input footprint.
+        // Validate the worst case up front to convert a would-be slice-index
+        // panic into an error.
+        let transposed_partition = LocalPartition::new(n1, pool.size(), pool.rank());
+        let local_n1 = transposed_partition.local_n;
+        let in_size = self.local_n0 * n1 * n2;
+        let out_size = if self.flags.transposed_out {
+            local_n1 * n0 * n2
+        } else {
+            in_size
+        };
+        let required = in_size.max(out_size);
+        if data.len() < required {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: required,
                 actual: data.len(),
             });
         }
-
-        let pool = unsafe { &*self.pool };
 
         // Step 1: Local FFTs along n2 (innermost, always local)
         let mut buffer_n2 = vec![Complex::<T>::zero(); n2];
@@ -206,41 +221,13 @@ where
             }
         }
 
-        // Step 3: Distributed transpose (distribute n1, gather n0)
-        // This is complex for 3D, we transpose the (n0, n1) plane while keeping n2 local
-        // For simplicity, we'll do a 2D transpose for each n2 slice
-        let transposed_partition = LocalPartition::new(n1, pool.size(), pool.rank());
-        let local_n1 = transposed_partition.local_n;
-
-        // Transpose each n2 slice
-        for i2 in 0..n2 {
-            // Extract slice
-            let mut slice_in = vec![Complex::<T>::zero(); self.local_n0 * n1];
-            for i0 in 0..self.local_n0 {
-                for i1 in 0..n1 {
-                    slice_in[i0 * n1 + i1] = data[i0 * n1 * n2 + i1 * n2 + i2];
-                }
-            }
-
-            // Transpose
-            let mut slice_out = vec![Complex::<T>::zero(); n0 * local_n1];
-            distributed_transpose(
-                pool,
-                &slice_in,
-                &mut slice_out,
-                n0,
-                n1,
-                self.local_n0,
-                self.local_0_start,
-            )?;
-
-            // Store in scratch
-            for i1_local in 0..local_n1 {
-                for i0 in 0..n0 {
-                    self.scratch[i1_local * n0 * n2 + i0 * n2 + i2] = slice_out[i1_local * n0 + i0];
-                }
-            }
-        }
+        // Step 3: Distributed transpose (distribute n1, gather n0), batched over
+        // the local n2 dimension so all n2 planes go through a single alltoallv
+        // collective instead of one per plane.
+        // `data` is already in `[local_n0][n1][n2]` layout and the batched
+        // transpose writes directly into scratch as `[local_n1][n0][n2]`.
+        // (`transposed_partition`/`local_n1` were computed above for buffer sizing.)
+        distributed_transpose_batched(pool, data, &mut self.scratch, n0, n1, self.local_n0, n2)?;
 
         // Step 4: Local FFTs along n0 (now fully local after transpose)
         let mut buffer_n0 = vec![Complex::<T>::zero(); n0];
@@ -260,37 +247,11 @@ where
             }
         }
 
-        // Step 5: Transpose back (unless TRANSPOSED_OUT)
+        // Step 5: Transpose back (unless TRANSPOSED_OUT), again batched over n2:
+        // scratch `[local_n1][n0][n2]` -> data `[local_n0][n1][n2]` in one
+        // alltoallv collective.
         if !self.flags.transposed_out {
-            for i2 in 0..n2 {
-                // Extract transposed slice
-                let mut slice_in = vec![Complex::<T>::zero(); local_n1 * n0];
-                for i1_local in 0..local_n1 {
-                    for i0 in 0..n0 {
-                        slice_in[i1_local * n0 + i0] =
-                            self.scratch[i1_local * n0 * n2 + i0 * n2 + i2];
-                    }
-                }
-
-                // Transpose back
-                let mut slice_out = vec![Complex::<T>::zero(); self.local_n0 * n1];
-                distributed_transpose(
-                    pool,
-                    &slice_in,
-                    &mut slice_out,
-                    n1,
-                    n0,
-                    local_n1,
-                    transposed_partition.local_start,
-                )?;
-
-                // Store back
-                for i0 in 0..self.local_n0 {
-                    for i1 in 0..n1 {
-                        data[i0 * n1 * n2 + i1 * n2 + i2] = slice_out[i0 * n1 + i1];
-                    }
-                }
-            }
+            distributed_transpose_batched(pool, &self.scratch, data, n1, n0, local_n1, n2)?;
         } else {
             // Copy transposed result to output
             let transposed_size = local_n1 * n0 * n2;
@@ -316,6 +277,12 @@ where
                 actual: input.len(),
             });
         }
+        if output.len() < expected_size {
+            return Err(MpiError::SizeMismatch {
+                expected: expected_size,
+                actual: output.len(),
+            });
+        }
 
         output[..expected_size].copy_from_slice(&input[..expected_size]);
         self.execute_inplace(output)
@@ -326,7 +293,7 @@ where
 mod tests {
     #[test]
     fn test_3d_partition() {
-        use crate::mpi::distribution::LocalPartition;
+        use crate::distribution::LocalPartition;
 
         let p = LocalPartition::new(32, 4, 0);
         assert_eq!(p.local_n, 8);

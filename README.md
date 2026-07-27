@@ -12,16 +12,16 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 ## Features
 
 ### Core FFT Functionality
-- **Pure Rust by default**: No C dependencies, no FFI, no bindgen with default features (Pure Rust Policy compliant). The optional `mpi` and `sve` features link against system libraries — see [MPI notes](#mpi).
-- **Full Algorithm Support**: Cooley-Tukey (radix-2/4, mixed-radix for smooth-7 composites), Rader, Bluestein, Direct O(n²); `Algorithm::MixedRadix` handles sizes such as 6, 10, 12, 14, 24, 28, 40, 56, 80, 96, 112, 240, …
+- **Pure Rust by default**: No C dependencies, no FFI, no bindgen — every feature of the `oxifft` crate is pure Rust (Pure Rust Policy compliant), including `sve` (ARM SVE detection uses `std::arch`, not `libc`). Distributed MPI support lives in the **separate** `oxifft-adapter-mpi` crate, which links a system MPI library — see [MPI notes](#mpi).
+- **Full Algorithm Support**: Cooley-Tukey (radix-2/4/8, split-radix, mixed-radix for smooth-7 composites), Stockham auto-sort, cache-oblivious recursion, Rader (primes), Bluestein, Direct O(n²); `Algorithm::MixedRadix` handles sizes such as 6, 10, 12, 14, 24, 28, 40, 56, 80, 96, 112, 240, …
 - **Transform Types**: Complex DFT, Real FFT (R2C/C2R), DCT/DST variants, DHT
 - **Multi-Dimensional**: 1D, 2D, 3D, and N-D transforms
 - **Batch Processing**: Efficient vector-rank handling for multiple transforms
-- **SIMD Optimization**: SSE2, AVX, AVX2, AVX-512, ARM NEON, ARM SVE, WebAssembly SIMD
+- **SIMD Optimization**: SSE2, AVX, AVX2, AVX-512, ARM NEON, ARM SVE, WebAssembly SIMD (runtime-detected; currently applied to small fixed-size codelets and Rader/Bluestein pointwise multiplies — the general large-N Stockham butterfly path is still scalar)
 - **Threading**: Rayon integration for parallel execution
-- **Wisdom System**: Plan caching and persistence for repeated transforms
-- **Auto-tuning**: `Flags::MEASURE` and `Flags::PATIENT` are fully wired; the `oxifft_tune` binary benchmarks candidate plans and writes wisdom automatically
-- **Precision Support**: f16, f32, f64, and f128 floating-point types
+- **Wisdom System**: Plan caching and persistence; `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` consult the runtime wisdom cache before benchmarking, and `Flags::WISDOM_ONLY` plans exclusively from stored wisdom (FFTW semantics)
+- **Auto-tuning**: `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` genuinely compare multiple candidate algorithms at plan time and cache the fastest via the wisdom system; the `oxifft_tune` binary (built from `src/bin/oxifft_tune.rs`) benchmarks candidate plans and writes wisdom, and a build-time baseline can be embedded with `OXIFFT_TUNE=1`
+- **Precision Support**: f16, f32, f64, and f128 floating-point types (`Plan<T>` is generic over the internal `Float` trait)
 
 ### Advanced Features (Beyond FFTW)
 - **Sparse FFT**: O(k log n) complexity for k-sparse signals using FFAST algorithm
@@ -33,18 +33,18 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 - **Convolution**: FFT-based linear/circular convolution and correlation
 - **Automatic Differentiation**: Forward and backward mode gradients for FFT operations
 - **Signal Processing**: Hilbert transform, analytic signal, Welch's PSD, cross-spectral density, coherence, cepstral analysis, FFT-based resampling (`signal` feature)
-- **GPU Acceleration**: CUDA (NVIDIA) and Metal (Apple) backends
-- **MPI Distributed Computing**: 2D/3D/N-D distributed FFTs with slab decomposition (`mpi` feature — links against system OpenMPI/MPICH; see [MPI notes](#mpi))
+- **GPU Acceleration**: Metal (Apple) runs transforms on the GPU today; the CUDA (NVIDIA) backend opens a real context/stream/plan but currently evaluates on the CPU (device kernel dispatch is pending in `oxicuda-fft`). Query the status at runtime via `GpuFft::execution_target()` / `GpuCapabilities::hardware_accelerated`
+- **MPI Distributed Computing**: 2D/3D/N-D distributed FFTs with slab decomposition — provided by the separate `oxifft-adapter-mpi` crate (links a system OpenMPI/MPICH library; see [MPI notes](#mpi))
 - **WebAssembly**: Browser-compatible FFT with WASM SIMD support
 
 ## Project Status
 
 ✅ **Core FFT functionality is COMPLETE**
-✅ **1554 tests passing** (all features, stress tests validated)
+✅ **1,730 tests passing** across the workspace (all features; 7 `#[ignore]`d long-running/environment tests), plus **107 doctests, 1 ignored**
 ✅ **Zero clippy warnings** (all features)
-✅ **Performance optimized** (9/15 composite sizes faster than RustFFT)
-✅ **1544 public API items** documented and tested
-✅ **71K+ lines of code** across 3 crates (71,623 SLoC)
+⚠️ **Performance vs. RustFFT/FFTW is mixed** — OxiFFT wins some sizes and loses others (notably large power-of-2, prime, and some composite sizes). The committed FFTW baseline (`benches/baselines/v0.3.0/`: geomean ratio 1.50×, 4/7 v1.0 gates passing) is the source of truth; see [BENCHMARKING.md](./BENCHMARKING.md) and [Known Performance Gaps](#known-performance-gaps-vs-fftw). General parity is **not** yet claimed.
+✅ **Extensively documented public API** — every rustdoc example compiles and runs under `cargo test --doc`
+✅ **78K+ lines of code** across 5 crates (78,090 SLoC)
 
 See [PROJECT_STATUS.md](./PROJECT_STATUS.md) for comprehensive status, [oxifft.md](./oxifft.md) for architecture blueprint, and [TODO.md](./TODO.md) for detailed roadmap.
 
@@ -62,8 +62,8 @@ plan.execute(&input, &mut output);
 
 // 2D Complex FFT
 let plan_2d = Plan2D::new(64, 64, Direction::Forward, Flags::ESTIMATE).unwrap();
-let input_2d = vec![Complex::zero(); 64 * 64];
-let mut output_2d = vec![Complex::zero(); 64 * 64];
+let input_2d: Vec<Complex<f64>> = vec![Complex::zero(); 64 * 64];
+let mut output_2d: Vec<Complex<f64>> = vec![Complex::zero(); 64 * 64];
 plan_2d.execute(&input_2d, &mut output_2d);
 
 // Real-to-Complex FFT
@@ -85,20 +85,23 @@ let howmany = Tensor::new(vec![IoDim::new(100, 512, 512)]);
 
 let plan = GuruPlan::dft(&dims, &howmany, Direction::Forward, Flags::MEASURE).unwrap();
 
-let input = vec![Complex::zero(); 512 * 100];
-let mut output = vec![Complex::zero(); 512 * 100];
+let input: Vec<Complex<f64>> = vec![Complex::zero(); 512 * 100];
+let mut output: Vec<Complex<f64>> = vec![Complex::zero(); 512 * 100];
 plan.execute(&input, &mut output);
 ```
 
 ### Wisdom Management
 
 ```rust
-use oxifft::wisdom;
+use oxifft::api::{export_to_file, import_from_file, forget};
+use std::path::Path;
 
-// Export/import wisdom
-wisdom::export_to_file("my_wisdom.txt")?;
-wisdom::import_from_file("my_wisdom.txt")?;
-wisdom::forget();
+// Export/import wisdom (both take &Path, not &str)
+export_to_file(Path::new("my_wisdom.txt"))?;
+import_from_file(Path::new("my_wisdom.txt"))?;
+
+// Clear the in-process wisdom cache
+forget();
 ```
 
 ### Advanced Features Examples
@@ -131,14 +134,16 @@ let window_size = 512;
 let hop_size = 256;
 let spectrogram = stft(&audio_signal, window_size, hop_size, WindowFunction::Hann);
 
-// Reconstruct signal from STFT
-let reconstructed = istft(&spectrogram, window_size, hop_size, WindowFunction::Hann);
+// Reconstruct signal from STFT (istft takes hop_size + window; the frame size
+// is recovered from the spectrogram itself)
+let reconstructed = istft(&spectrogram, hop_size, WindowFunction::Hann);
 
-// Real-time streaming
+// Real-time streaming: feed samples, then drain completed frames
 let mut streaming_fft = StreamingFft::new(window_size, hop_size, WindowFunction::Hamming);
-for frame in audio_chunks {
-    let spectrum = streaming_fft.process_frame(&frame);
+streaming_fft.feed(&audio_signal);
+while let Some(spectrum) = streaming_fft.pop_frame() {
     // Process spectrum in real-time
+    let _ = spectrum;
 }
 ```
 
@@ -162,24 +167,24 @@ let values = vec![Complex::new(1.0, 0.0); 4];
 let spectrum = nufft_type1(&non_uniform_points, &values, 16, 1e-6)?;
 
 // Type 2: Uniform to non-uniform (synthesis)
+// Signature is nufft_type2(coeffs, points, tolerance) — spectrum first.
 let uniform_spectrum = vec![Complex::new(1.0, 0.0); 16];
-let interpolated = nufft_type2(&non_uniform_points, &uniform_spectrum, 1e-6)?;
+let interpolated = nufft_type2(&uniform_spectrum, &non_uniform_points, 1e-6)?;
 ```
 
 #### Automatic Differentiation for FFT
 ```rust
 use oxifft::{grad_fft, vjp_fft, fft_jacobian};
 
-// Compute gradient of loss w.r.t. FFT input
-let input = vec![Complex::new(1.0, 0.0); 256];
+// Compute gradient of loss w.r.t. FFT input (returns Option)
 let grad_output = vec![Complex::new(0.1, 0.0); 256]; // Gradient from loss
-let grad_input = grad_fft(&grad_output, 256)?;
+let grad_input = grad_fft(&grad_output);
 
-// Vector-Jacobian product for backpropagation
-let vjp = vjp_fft(&input, &grad_output)?;
+// Vector-Jacobian product for backpropagation (takes only the cotangent)
+let vjp = vjp_fft(&grad_output);
 
-// Full Jacobian matrix (for analysis)
-let jacobian = fft_jacobian(256)?;
+// Full Jacobian matrix (for analysis) — a plain Vec, no `?`
+let jacobian: Vec<Vec<Complex<f64>>> = fft_jacobian(256);
 ```
 
 #### WebAssembly (Browser)
@@ -207,8 +212,10 @@ const output = fft_f64(real, imag);
 ```rust
 use oxifft::gpu::{GpuFft, GpuBackend};
 
-// Auto-detect best available GPU backend (CUDA or Metal)
-let gpu_fft = GpuFft::new(4096, GpuBackend::Auto)?;
+// Auto-detect the best available backend. Metal runs on the GPU; the CUDA
+// backend currently evaluates on the CPU (see GPU note above). forward/inverse
+// take `&mut self`, so the plan must be `mut`.
+let mut gpu_fft = GpuFft::new(4096, GpuBackend::Auto)?;
 
 let input = vec![Complex::new(1.0, 0.0); 4096];
 let output = gpu_fft.forward(&input)?;
@@ -237,15 +244,23 @@ oxifft/
 │   ├── frft/              # Fractional Fourier Transform
 │   ├── conv/              # FFT-based convolution and correlation
 │   ├── autodiff/          # Automatic differentiation for FFT
-│   ├── gpu/               # GPU acceleration (CUDA, Metal backends)
-│   ├── mpi/               # MPI distributed computing
+│   ├── conv/ ntt/ frft/   # Convolution, number-theoretic transform, fractional FFT
+│   ├── chirp_z/           # Chirp-Z transform
+│   ├── compat/            # FFTW-compatible (fftw_*) API surface
+│   ├── gpu/               # GPU acceleration (Metal GPU; CUDA CPU-fallback)
 │   └── wasm/              # WebAssembly bindings and WASM SIMD
-├── oxifft-codegen/        # Proc-macro crate for codelet generation (11 macros, incl. gen_any_codelet!)
-├── oxifft-bench/          # Benchmarks (including FFTW comparison)
-├── benches/               # Additional benchmarks (beyond_fftw.rs)
+├── oxifft-codegen/        # Proc-macro façade crate (re-exports the codelet macros)
+├── oxifft-codegen-impl/   # Codelet-generation implementation crate
+├── oxifft-adapter-mpi/    # MPI distributed FFT (separate crate; system MPI FFI, quarantined)
+├── oxifft-bench/          # RustFFT/FFTW comparison benchmarks + fftw_ratio_report
+├── benches/               # Additional benchmarks + committed baselines (baselines/)
 ├── examples/              # Usage examples
 └── tests/                 # Integration tests (size coverage, FFTW comparison)
 ```
+
+> Note: there is no `oxifft/src/mpi/` module — MPI lives entirely in the
+> separate `oxifft-adapter-mpi` crate so that `oxifft` stays pure Rust under
+> `--all-features`.
 
 ## Architecture
 
@@ -256,12 +271,19 @@ OxiFFT follows FFTW's proven design patterns:
 - **Modular Solvers**: Easy to add new algorithms without breaking existing code
 - **Codelet Generation**: Proc-macros generate optimized kernels at compile-time
 
-### Core Traits
+### Core Types
+
+The public surface is a family of concrete, `Send + Sync` plan structs
+(`Plan`, `Plan2D`, `Plan3D`, `PlanND`, `RealPlan*`, `R2rPlan*`, `SplitPlan*`,
+`GuruPlan`). Internally, `kernel::Planner` enumerates candidate solvers for a
+size and `wisdom::WisdomEntry` records the winning choice so it can be cached
+and replayed:
 
 ```rust
-pub trait Problem: Hash + Debug + Clone + Send + Sync { ... }
-pub trait Plan: Send + Sync { ... }
-pub trait Solver: Send + Sync { ... }
+use oxifft::{Direction, Flags, Plan};
+
+// Construction selects (and, under MEASURE/PATIENT, benchmarks + caches) a solver.
+let plan = Plan::<f64>::dft_1d(1024, Direction::Forward, Flags::MEASURE);
 ```
 
 ## Comparison with RustFFT
@@ -285,14 +307,15 @@ OxiFFT provides many features beyond RustFFT:
 | **Fractional FFT** | ✅ | ❌ |
 | **Convolution** | ✅ | ❌ |
 | **Auto-Differentiation** | ✅ | ❌ |
-| **GPU (CUDA/Metal)** | ✅ | ❌ |
-| **MPI Distributed** | ✅ | ❌ |
+| **GPU (Metal)** | ✅ GPU | ❌ |
+| **GPU (CUDA)** | ⚠️ CPU-fallback | ❌ |
+| **MPI Distributed** | ✅ (separate `oxifft-adapter-mpi` crate) | ❌ |
 | **f16/f128 Support** | ✅ | ❌ |
 | **Const-FFT** | ✅ | ❌ |
 | **Signal Processing (Hilbert/PSD)** | ✅ | ❌ |
 | **Mel-Frequency / MFCC** | ✅ | ❌ |
 | **Split-Complex** | ✅ | ❌ |
-| **Guru Interface** | ✅ | ❌ |
+| **Guru Interface (c2c DFT)** | ✅ | ❌ |
 
 ### When to Use OxiFFT
 
@@ -316,39 +339,68 @@ OxiFFT provides many features beyond RustFFT:
 
 **Stretch goal**: Match or exceed FFTW performance for common sizes.
 
+### Known Performance Gaps vs FFTW
+
+<a name="known-performance-gaps-vs-fftw"></a>
+
+These are **targets, not current results.** The committed FFTW baseline
+(`benches/baselines/v0.3.0/fftw_ratios_2026-04-20.json`, measured mid-development
+on Apple Silicon) records geomean ratio **1.50×** with **4 of 7** v1.0 gates
+passing. The three failing gates (ratio = OxiFFT / FFTW, lower is better):
+
+| Gate | Ratio | Target | Status |
+|------|-------|--------|--------|
+| `1d_cplx_2e20` (2^20 complex DFT) | 3.67× | < 2.0 | ❌ FAIL |
+| `1d_real_2e10` (2^10 real FFT) | 3.95× | < 2.0 | ❌ FAIL |
+| `dct2_1024` (DCT-II, 1024) | 3.90× | < 3.0 | ❌ FAIL |
+
+Against RustFFT, OxiFFT is competitive at some small/medium sizes but currently
+slower on large power-of-2 (up to ~3.4× at 65536), prime (up to ~7.8× at n=17),
+and several composite sizes. The root cause is that SIMD acceleration is applied
+only to small fixed-size codelets and pointwise multiplies today — the general
+large-N Stockham butterfly path is still scalar. Re-run and refresh the baseline
+with `fftw_ratio_report` (see [BENCHMARKING.md](./BENCHMARKING.md)) before any
+v1.0 performance announcement.
+
 ## Dependencies
+
+Add OxiFFT to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-num-complex = "0.4"
-num-traits = "0.2"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-seahash = "4.1"
-rayon = { version = "1.12", optional = true }
-mpi = { version = "0.8", optional = true }
-libc = { version = "0.2", optional = true }
+oxifft = "0.4"
+```
 
+The `oxifft` crate pulls in only pure-Rust dependencies: `num-complex`,
+`num-traits`, `serde`/`serde_json`, `hashbrown`, `spin`, `libm`, and — behind
+optional features — `rayon`, `wasm-bindgen`/`js-sys`, `ndarray`, and the
+`oxicuda-*` GPU driver crates. There is **no** `mpi`, `libc`, `seahash`, or
+`simd` dependency/feature: SIMD is always-on via runtime detection, and MPI is
+a separate crate.
+
+### Cargo features (matches `oxifft/Cargo.toml`)
+
+```toml
 [features]
-default = ["std", "threading"]
-std = []
-threading = ["dep:rayon"]
-simd = []
-portable_simd = []
-f128-support = []
-f16-support = []
-mpi = ["dep:mpi"]
-sparse = []
-pruned = []
-sve = ["dep:libc"]
-wasm = ["dep:wasm-bindgen", "dep:js-sys"]
-streaming = []
-const-fft = []
-cuda = []
-metal = []
-gpu = []
-signal = ["std"]   # Signal processing (Hilbert, Welch PSD, cepstrum)
-fftw-compat = []   # FFTW-compatible API surface
+default       = ["std", "threading"]
+std           = [...]            # File I/O, timing, std collections
+threading     = ["std", ...]     # Rayon-based parallel execution
+avx512        = []               # AVX-512 SIMD tier (x86_64)
+portable_simd = []               # Experimental core::simd backend (NIGHTLY only)
+f16-support   = ["std"]          # Half-precision (f16)
+f128-support  = ["std"]          # Quad-precision (f128)
+sparse        = ["std"]          # Sparse FFT (FFAST)
+pruned        = ["std"]          # Pruned / partial FFT
+sve           = ["std"]          # ARM SVE (pure Rust; std::arch detection)
+wasm          = ["std", ...]     # WebAssembly bindings
+streaming     = ["std"]          # STFT / windows / mel / MFCC
+const-fft     = []               # Compile-time fixed-size FFT
+signal        = ["std"]          # Hilbert, Welch PSD, cepstrum, resampling
+fftw-compat   = []               # FFTW-named (fftw_*) API surface
+ndarray       = ["std", ...]     # ndarray integration
+cuda          = ["std", ...]     # CUDA backend (currently CPU-fallback)
+metal         = ["std", ...]     # Metal backend (real GPU on Apple Silicon)
+gpu           = ["std", "cuda", "metal"]
 ```
 
 ## Documentation
@@ -367,8 +419,8 @@ fftw-compat = []   # FFTW-compatible API surface
 
 ### Architecture & Planning
 
-- **[oxifft.md](oxifft.md)** - Complete architecture and implementation blueprint (32 KB)
-- **[TODO.md](TODO.md)** - Detailed implementation status and roadmap (18 KB)
+- **[oxifft.md](oxifft.md)** - Architecture and implementation blueprint
+- **[TODO.md](TODO.md)** - Detailed implementation status and roadmap
 - **[CHANGELOG.md](CHANGELOG.md)** - Project history and release notes
 
 ### Benchmark Reports
@@ -386,24 +438,27 @@ fftw-compat = []   # FFTW-compatible API surface
 
 <a name="mpi"></a>
 
-The `mpi` feature enables distributed FFT across multiple compute nodes via MPI.
+Distributed FFT across multiple compute nodes lives in the **separate**
+`oxifft-adapter-mpi` crate — it is **not** a feature of `oxifft`. Keeping MPI in
+its own crate is deliberate: it quarantines the MPI FFI so that `oxifft` itself
+stays 100% pure Rust even under `--all-features`.
 
-**⚠ C/Fortran system dependency:** Unlike all other OxiFFT features, `mpi` links
-against the system MPI library (OpenMPI, MPICH, or equivalent — a C/Fortran runtime).
-This intentionally breaks the Pure Rust default build. A compile-time warning is emitted
-when this feature is enabled.
-
-No pure-Rust MPI implementation exists (as of 2026) that covers the API surface required
-for distributed FFT. If one becomes available, OxiFFT will adopt it and this note will
-be removed.
+**⚠ C system dependency:** `oxifft-adapter-mpi` links a system MPI library
+(OpenMPI, MPICH, or equivalent) and needs `libclang` at build time (for
+`bindgen`). This is intentionally not pure Rust. No pure-Rust MPI implementation
+covering the required API surface exists as of 2026; if one appears, OxiFFT will
+adopt it.
 
 To use MPI:
 ```toml
-oxifft = { version = "0.3", features = ["mpi"] }
+[dependencies]
+oxifft-adapter-mpi = "0.4"
 ```
 
 Ensure a system MPI library is installed (`brew install openmpi` on macOS,
-`apt-get install libopenmpi-dev` on Debian/Ubuntu).
+`apt-get install libopenmpi-dev libclang-dev` on Debian/Ubuntu), then launch
+with `mpirun`/`mpiexec` as usual. See `oxifft-adapter-mpi/README.md` for the
+full quickstart.
 
 ## Sponsorship
 

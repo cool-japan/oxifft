@@ -3,7 +3,7 @@
 use mpi::collective::CommunicatorCollectives;
 use mpi::topology::Communicator;
 
-use crate::kernel::{Complex, Float};
+use oxifft::kernel::{Complex, Float};
 
 use super::distribution::LocalPartition;
 use super::error::MpiError;
@@ -13,6 +13,54 @@ pub trait MpiFloat: Float + mpi::datatype::Equivalence {}
 
 impl MpiFloat for f32 {}
 impl MpiFloat for f64 {}
+
+/// Reinterpret a slice of `Complex<T>` as a slice of its underlying scalars.
+///
+/// `Complex<T>` is `#[repr(C)] { re: T, im: T }`, so `N` complex values occupy
+/// exactly `2 * N` contiguous `T` values with identical alignment. This lets the
+/// distributed collectives operate on the built-in scalar MPI datatype
+/// (`f32` / `f64`, which implement [`mpi::datatype::Equivalence`]) instead of on
+/// `Complex<T>` directly.
+///
+/// This is the sound, self-contained alternative to implementing `Equivalence`
+/// for `Complex<T>` — which the orphan rule forbids in this crate because both
+/// `Complex` (from `oxifft`) and `Equivalence` (from `mpi`) are foreign types.
+/// Treating a complex value as two contiguous reals is exactly correct for all
+/// data-movement collectives used here (all-to-all, all-gather, broadcast); no
+/// reductions are performed, so no complex-aware reduction datatype is required.
+#[inline]
+fn as_scalars<T: Float>(data: &[Complex<T>]) -> &[T] {
+    // SAFETY: `Complex<T>` is `#[repr(C)]` with two `T` fields, so a slice of
+    // `len` complex values is exactly `2 * len` contiguous `T` values with the
+    // same alignment as `T`. The pointer is always non-null and aligned (slice
+    // invariant), and `2 * len` cannot overflow because each element already
+    // occupies `2 * size_of::<T>()` bytes of an existing allocation.
+    unsafe { core::slice::from_raw_parts(data.as_ptr().cast::<T>(), data.len() * 2) }
+}
+
+/// Mutable counterpart of [`as_scalars`].
+#[inline]
+fn as_scalars_mut<T: Float>(data: &mut [Complex<T>]) -> &mut [T] {
+    // SAFETY: see [`as_scalars`]; the mutable borrow is unique for the returned
+    // slice's lifetime.
+    unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<T>(), data.len() * 2) }
+}
+
+/// Double each `i32` count/displacement so it counts scalars rather than
+/// complex elements, returning [`MpiError::CountOverflow`] if the doubled value
+/// no longer fits in `i32`.
+fn scalar_counts(counts: &[i32]) -> Result<Vec<i32>, MpiError> {
+    counts
+        .iter()
+        .enumerate()
+        .map(|(rank, &c)| {
+            c.checked_mul(2).ok_or(MpiError::CountOverflow {
+                count: (c as usize) * 2,
+                rank,
+            })
+        })
+        .collect()
+}
 
 /// MPI process pool for distributed FFT computation.
 ///
@@ -82,10 +130,7 @@ impl<C: Communicator> MpiPool<C> {
         send_data: &[Complex<T>],
         recv_data: &mut [Complex<T>],
         count: usize,
-    ) -> Result<(), MpiError>
-    where
-        Complex<T>: mpi::datatype::Equivalence,
-    {
+    ) -> Result<(), MpiError> {
         let expected_len = count * self.size();
         if send_data.len() < expected_len {
             return Err(MpiError::SizeMismatch {
@@ -100,8 +145,9 @@ impl<C: Communicator> MpiPool<C> {
             });
         }
 
-        self.comm
-            .all_to_all_into(&send_data[..expected_len], &mut recv_data[..expected_len]);
+        let send = as_scalars(&send_data[..expected_len]);
+        let recv = as_scalars_mut(&mut recv_data[..expected_len]);
+        self.comm.all_to_all_into(send, recv);
         Ok(())
     }
 
@@ -119,17 +165,23 @@ impl<C: Communicator> MpiPool<C> {
         recv_data: &mut [Complex<T>],
         recv_counts: &[i32],
         recv_displs: &[i32],
-    ) -> Result<(), MpiError>
-    where
-        Complex<T>: mpi::datatype::Equivalence,
-    {
+    ) -> Result<(), MpiError> {
         use mpi::datatype::PartitionMut;
 
+        // Complex counts/displacements refer to `Complex<T>` elements; the
+        // underlying transfer is on scalars (2 per complex value), so double
+        // every count and displacement.
+        let send_counts = scalar_counts(send_counts)?;
+        let send_displs = scalar_counts(send_displs)?;
+        let recv_counts = scalar_counts(recv_counts)?;
+        let recv_displs = scalar_counts(recv_displs)?;
+
+        let send = as_scalars(send_data);
+        let recv = as_scalars_mut(recv_data);
+
         // Create partitions from counts and displacements
-        let send_partition =
-            mpi::datatype::Partition::new(send_data, send_counts.to_vec(), send_displs.to_vec());
-        let mut recv_partition =
-            PartitionMut::new(recv_data, recv_counts.to_vec(), recv_displs.to_vec());
+        let send_partition = mpi::datatype::Partition::new(send, send_counts, send_displs);
+        let mut recv_partition = PartitionMut::new(recv, recv_counts, recv_displs);
 
         // Use all_to_all_varcount for variable-sized messages
         self.comm
@@ -146,14 +198,11 @@ impl<C: Communicator> MpiPool<C> {
         &self,
         data: &mut [Complex<T>],
         root: usize,
-    ) -> Result<(), MpiError>
-    where
-        Complex<T>: mpi::datatype::Equivalence,
-    {
+    ) -> Result<(), MpiError> {
         use mpi::collective::Root;
 
         let root_process = self.comm.process_at_rank(root as i32);
-        root_process.broadcast_into(data);
+        root_process.broadcast_into(as_scalars_mut(data));
         Ok(())
     }
 
@@ -165,10 +214,7 @@ impl<C: Communicator> MpiPool<C> {
         &self,
         send_data: &[Complex<T>],
         recv_data: &mut [Complex<T>],
-    ) -> Result<(), MpiError>
-    where
-        Complex<T>: mpi::datatype::Equivalence,
-    {
+    ) -> Result<(), MpiError> {
         let expected_recv_len = send_data.len() * self.size();
         if recv_data.len() < expected_recv_len {
             return Err(MpiError::SizeMismatch {
@@ -177,7 +223,11 @@ impl<C: Communicator> MpiPool<C> {
             });
         }
 
-        self.comm.all_gather_into(send_data, recv_data);
+        // `all_gather_into` requires `recv.len() == send.len() * size` exactly,
+        // so slice the receive buffer to the expected length before gathering.
+        let send = as_scalars(send_data);
+        let recv = as_scalars_mut(&mut recv_data[..expected_recv_len]);
+        self.comm.all_gather_into(send, recv);
         Ok(())
     }
 
@@ -191,17 +241,18 @@ impl<C: Communicator> MpiPool<C> {
         recv_data: &mut [Complex<T>],
         recv_counts: &[i32],
         recv_displs: &[i32],
-    ) -> Result<(), MpiError>
-    where
-        Complex<T>: mpi::datatype::Equivalence,
-    {
+    ) -> Result<(), MpiError> {
         use mpi::datatype::PartitionMut;
 
-        let mut recv_partition =
-            PartitionMut::new(recv_data, recv_counts.to_vec(), recv_displs.to_vec());
+        let recv_counts = scalar_counts(recv_counts)?;
+        let recv_displs = scalar_counts(recv_displs)?;
+
+        let send = as_scalars(send_data);
+        let recv = as_scalars_mut(recv_data);
+        let mut recv_partition = PartitionMut::new(recv, recv_counts, recv_displs);
 
         self.comm
-            .all_gather_varcount_into(send_data, &mut recv_partition);
+            .all_gather_varcount_into(send, &mut recv_partition);
 
         Ok(())
     }

@@ -1,16 +1,15 @@
 //! 2D distributed FFT plan.
 
-use mpi::datatype::Equivalence;
 use mpi::topology::Communicator;
 
-use crate::api::{Direction, Plan};
-use crate::kernel::{Complex, Float};
+use oxifft::api::{Direction, Plan};
+use oxifft::kernel::{Complex, Float};
 
-use crate::mpi::distribution::LocalPartition;
-use crate::mpi::error::MpiError;
-use crate::mpi::pool::{MpiFloat, MpiPool};
-use crate::mpi::transpose::distributed_transpose;
-use crate::mpi::MpiFlags;
+use crate::distribution::{Distribution, LocalPartition};
+use crate::error::MpiError;
+use crate::pool::{MpiFloat, MpiPool};
+use crate::transpose::distributed_transpose;
+use crate::MpiFlags;
 
 /// 2D distributed FFT plan.
 ///
@@ -19,7 +18,7 @@ use crate::mpi::MpiFlags;
 /// 2. Distributed transpose
 /// 3. Local column-wise FFTs (now rows after transpose)
 /// 4. Optional: Distributed transpose back (unless TRANSPOSED_OUT)
-pub struct MpiPlan2D<T: Float, C: Communicator> {
+pub struct MpiPlan2D<'p, T: Float, C: Communicator> {
     /// Global number of rows.
     n0: usize,
     /// Global number of columns.
@@ -32,27 +31,18 @@ pub struct MpiPlan2D<T: Float, C: Communicator> {
     direction: Direction,
     /// Planning flags.
     flags: MpiFlags,
-    /// Reference to MPI pool.
-    pool: *const MpiPool<C>,
+    /// Borrow of the MPI pool; the borrow checker guarantees the pool outlives
+    /// the plan.
+    pool: &'p MpiPool<C>,
     /// Local plan for row transforms (size n1).
     row_plan: Plan<T>,
     /// Local plan for column transforms (size n0, after transpose).
     col_plan: Plan<T>,
     /// Scratch buffer for transpose.
     scratch: Vec<Complex<T>>,
-    /// Marker for T and C types.
-    _phantom: core::marker::PhantomData<(T, C)>,
 }
 
-// Safety: The raw pointer to MpiPool is only used during execute, and
-// the plan lifetime should not exceed the pool lifetime.
-unsafe impl<T: Float, C: Communicator + Send> Send for MpiPlan2D<T, C> {}
-unsafe impl<T: Float, C: Communicator + Sync> Sync for MpiPlan2D<T, C> {}
-
-impl<T: Float + MpiFloat, C: Communicator> MpiPlan2D<T, C>
-where
-    Complex<T>: Equivalence,
-{
+impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan2D<'p, T, C> {
     /// Create a new 2D distributed FFT plan.
     ///
     /// # Arguments
@@ -69,13 +59,20 @@ where
         n1: usize,
         direction: Direction,
         flags: MpiFlags,
-        pool: &MpiPool<C>,
+        pool: &'p MpiPool<C>,
     ) -> Result<Self, MpiError> {
         if n0 == 0 || n1 == 0 {
             return Err(MpiError::InvalidDimension {
                 dim: usize::from(n0 != 0),
                 size: if n0 == 0 { n0 } else { n1 },
                 message: "Dimension size cannot be zero".to_string(),
+            });
+        }
+
+        if flags.transposed_in {
+            return Err(MpiError::FftError {
+                message: "MpiFlags::transposed_in is not yet implemented for the 2D slab plan"
+                    .to_string(),
             });
         }
 
@@ -108,12 +105,16 @@ where
             local_0_start,
             direction,
             flags,
-            pool: std::ptr::from_ref(pool),
+            pool,
             row_plan,
             col_plan,
             scratch,
-            _phantom: core::marker::PhantomData,
         })
+    }
+
+    /// Data-distribution strategy used by this plan (always [`Distribution::Slab`]).
+    pub fn distribution(&self) -> Distribution {
+        Distribution::Slab
     }
 
     /// Get global dimensions.
@@ -139,16 +140,27 @@ where
     /// # Errors
     /// Returns `MpiError::SizeMismatch` if data buffer is too small.
     pub fn execute_inplace(&mut self, data: &mut [Complex<T>]) -> Result<(), MpiError> {
-        let expected_size = self.local_n0 * self.n1;
-        if data.len() < expected_size {
+        let pool = self.pool;
+
+        // The transposed-output path writes `local_n1 * n0` elements into `data`,
+        // which can exceed the `local_n0 * n1` input footprint. Validate the true
+        // worst-case size up front so an undersized buffer becomes an error rather
+        // than a slice-index panic later.
+        let transposed_partition = LocalPartition::new(self.n1, pool.size(), pool.rank());
+        let local_n1 = transposed_partition.local_n;
+        let in_size = self.local_n0 * self.n1;
+        let out_size = if self.flags.transposed_out {
+            local_n1 * self.n0
+        } else {
+            in_size
+        };
+        let required = in_size.max(out_size);
+        if data.len() < required {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: required,
                 actual: data.len(),
             });
         }
-
-        // Safety: we only access pool during execution
-        let pool = unsafe { &*self.pool };
 
         // Step 1: Local row FFTs
         let mut row_buffer = vec![Complex::<T>::zero(); self.n1];
@@ -173,9 +185,7 @@ where
         // Step 3: Local column FFTs (now stored as rows after transpose)
         // After transpose: scratch[local_col * n0 + global_row]
         // We need to FFT along the n0 dimension (columns of original, now contiguous)
-        let transposed_partition = LocalPartition::new(self.n1, pool.size(), pool.rank());
-        let local_n1 = transposed_partition.local_n;
-
+        // (`transposed_partition`/`local_n1` were computed above for buffer sizing.)
         let mut col_buffer = vec![Complex::<T>::zero(); self.n0];
         for col in 0..local_n1 {
             // Extract column (now a row in transposed layout)
@@ -226,8 +236,15 @@ where
                 actual: input.len(),
             });
         }
+        if output.len() < expected_size {
+            return Err(MpiError::SizeMismatch {
+                expected: expected_size,
+                actual: output.len(),
+            });
+        }
 
-        // Copy input to output and execute in-place
+        // Copy input to output and execute in-place. `execute_inplace` performs
+        // the full worst-case (transposed-output) size validation on `output`.
         output[..expected_size].copy_from_slice(&input[..expected_size]);
         self.execute_inplace(output)
     }
@@ -239,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_local_partition() {
-        use crate::mpi::distribution::LocalPartition;
+        use crate::distribution::LocalPartition;
 
         // Test partition calculation
         let p = LocalPartition::new(16, 4, 0);

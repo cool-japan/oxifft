@@ -12,13 +12,14 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::streaming::{mel_spectrogram, mfcc, MelConfig};
 //!
 //! let signal: Vec<f64> = (0..8000).map(|i| (i as f64 * 0.1).sin()).collect();
 //! let config = MelConfig::new(8000.0, 256, 128, 40);
-//! let mel_spec = mel_spectrogram(&signal, &config);  // Vec<Vec<f64>>
-//! let coeffs = mfcc(&signal, &config, 13);            // Vec<Vec<f64>>
+//! let mel_spec = mel_spectrogram(&signal, &config); // Vec<Vec<f64>>
+//! let coeffs = mfcc(&signal, &config, 13);           // Vec<Vec<f64>>
+//! # let _ = (mel_spec, coeffs);
 //! ```
 
 use num_traits::Float as NumFloat;

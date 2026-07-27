@@ -13,6 +13,12 @@
 use crate::prelude::OnceLock;
 #[cfg(not(feature = "std"))]
 use crate::prelude::OnceLockExt;
+// `f64::sin_cos` / `f32::sin_cos` are std-only inherent methods; under `no_std`
+// the same operation is provided by `num_traits::Float` (libm-backed). This
+// module is already gated on `x86_64 + avx512`, so the import only needs to be
+// scoped to `not(feature = "std")` to avoid an unused-import warning under std.
+#[cfg(not(feature = "std"))]
+use num_traits::Float as _;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Alignment wrappers

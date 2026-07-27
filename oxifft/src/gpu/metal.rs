@@ -46,16 +46,36 @@ pub fn is_available() -> bool {
 pub fn query_capabilities() -> GpuResult<GpuCapabilities> {
     let device = oxicuda_metal::device::MetalDevice::new()
         .map_err(|e| GpuError::InitializationFailed(e.to_string()))?;
+
+    // `max_buffer_length()` is the largest single Metal buffer allocation the
+    // device permits.  Derive the maximum FFT length from it (each element is a
+    // `Complex<f32>` = 8 bytes) rather than hardcoding a constant.
+    let max_buffer_bytes = device.max_buffer_length();
+    let elem_size = core::mem::size_of::<num_complex::Complex<f32>>() as u64;
+    let max_fft_size = if elem_size == 0 || max_buffer_bytes == 0 {
+        1 << 24
+    } else {
+        // Largest power-of-two element count that fits in one buffer.
+        let elems = (max_buffer_bytes / elem_size) as usize;
+        elems
+            .checked_next_power_of_two()
+            .map_or(elems, |p| if p > elems { p >> 1 } else { p })
+    };
+
     Ok(GpuCapabilities {
         backend: GpuBackend::Metal,
         device_name: device.name().to_string(),
-        total_memory: 0, // Metal does not expose total VRAM; max_buffer_length() is the max single-buffer allocation size, not device total
-        available_memory: 0, // Metal does not expose free memory directly
-        max_fft_size: 1 << 24,
-        supports_f64: false, // Metal has limited f64 support
+        // Metal's public API exposes the maximum single-buffer allocation, not
+        // total device VRAM.  Report it as the total-memory ceiling (best
+        // available proxy) and leave free-memory unknown (0).
+        total_memory: max_buffer_bytes,
+        available_memory: 0, // Metal does not expose free VRAM directly.
+        max_fft_size,
+        supports_f64: false, // Metal has limited f64 support.
         supports_f16: true,
-        compute_units: 0,
+        compute_units: 0, // oxicuda-metal does not expose the GPU core count.
         max_workgroup_size: 1024,
+        hardware_accelerated: true,
     })
 }
 
@@ -132,6 +152,18 @@ impl MetalFftPlan {
     /// natively operates on f32), dispatched to the GPU, and the results are
     /// converted back to `Complex<T>`.
     ///
+    /// # Normalisation convention
+    ///
+    /// This method returns the **unnormalised** transform in both directions
+    /// (the FFTW convention), matching the CUDA backend's CPU path.  The
+    /// underlying `oxicuda_metal` inverse transform applies an internal `1/N`
+    /// scale, so this method multiplies the inverse result back by `N` to undo
+    /// it.  The single, user-controllable `1/N` normalisation is applied once,
+    /// at the high-level [`crate::gpu::GpuFft`] layer, governed by
+    /// `GpuPlanConfig::normalize_inverse`.  This keeps both GPU backends
+    /// numerically identical and prevents the historical double-normalisation
+    /// bug where `GpuFft::inverse()` returned results scaled by `1/N²`.
+    ///
     /// # Errors
     ///
     /// Returns `GpuError::SizeMismatch` if buffer sizes do not match the plan,
@@ -178,10 +210,131 @@ impl MetalFftPlan {
             .execute(&input_f32, &mut output_f32, metal_dir)
             .map_err(GpuError::from)?;
 
+        // `oxicuda_metal` normalises the inverse transform by 1/N internally.
+        // Undo it here so this method is unnormalised (FFTW convention),
+        // matching the CUDA backend; the high-level GpuFft layer owns the
+        // single, opt-out `1/N` normalisation.  N is the per-transform size.
+        if direction == GpuDirection::Inverse {
+            let scale = self.size as f32;
+            for c in &mut output_f32 {
+                c.re *= scale;
+                c.im *= scale;
+            }
+        }
+
         // Convert output Complex<f32> → Complex<T>.
         let out_data = output.cpu_data_mut();
         for (i, c) in output_f32.iter().enumerate() {
             out_data[i] = Complex::new(T::from_f64(c.re as f64), T::from_f64(c.im as f64));
+        }
+
+        Ok(())
+    }
+
+    /// Execute a batch of independent size-`n` transforms, packing/unpacking
+    /// `Complex<T>` ↔ `Complex<f32>` around native oxicuda-metal dispatches.
+    ///
+    /// Each element of `inputs`/`outputs` is one transform of length
+    /// `self.size()`.  Transforms are processed in chunks of this plan's own
+    /// `batch_size`, packed into one contiguous buffer per chunk and submitted
+    /// through the **already-compiled** inner plan — so the cached MSL pipelines
+    /// are reused with no shader recompilation on any call (the plan built by
+    /// `GpuFft::batched(n, b, Metal)` batches `b` transforms per GPU submission).
+    /// The final partial chunk is zero-padded up to `batch_size`, and the padded
+    /// results are discarded.  This is the native-batch path used by
+    /// [`crate::gpu::batch::GpuBatchFft`]; because it never routes a size-`n`
+    /// buffer through the per-buffer `size * batch_size` check, it works for
+    /// plans built with any `batch_size` (the old per-element loop errored out
+    /// for `batch_size > 1`).
+    ///
+    /// Follows the same unnormalised convention as [`Self::execute`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates Metal execution errors, or `GpuError::SizeMismatch` if any
+    /// slice length differs from `self.size()`.
+    pub(crate) fn execute_batch_native<T: Float>(
+        &self,
+        inputs: &[&[Complex<T>]],
+        outputs: &mut [&mut [Complex<T>]],
+        direction: GpuDirection,
+    ) -> GpuResult<()> {
+        let n = self.size;
+        let chunk = self.batch_size.max(1);
+        let count = inputs.len();
+        debug_assert_eq!(count, outputs.len());
+        if count == 0 {
+            return Ok(());
+        }
+
+        let metal_dir = match direction {
+            GpuDirection::Forward => oxicuda_metal::fft::MetalFftDirection::Forward,
+            GpuDirection::Inverse => oxicuda_metal::fft::MetalFftDirection::Inverse,
+        };
+        let inv_scale = n as f32;
+
+        // Reusable pack/unpack scratch sized for one full `chunk` (n*chunk).
+        let mut packed_in = vec![num_complex::Complex::<f32>::new(0.0, 0.0); n * chunk];
+        let mut packed_out = vec![num_complex::Complex::<f32>::new(0.0, 0.0); n * chunk];
+
+        let mut start = 0;
+        while start < count {
+            let end = (start + chunk).min(count);
+
+            // Pack this chunk's inputs; zero the padding tail (if the last chunk
+            // is short) so the inner plan always sees exactly n*chunk elements.
+            for c in &mut packed_in {
+                *c = num_complex::Complex::new(0.0, 0.0);
+            }
+            for (ci, idx) in (start..end).enumerate() {
+                let inp = inputs[idx];
+                if inp.len() != n {
+                    return Err(GpuError::SizeMismatch {
+                        expected: n,
+                        got: inp.len(),
+                    });
+                }
+                let base = ci * n;
+                for (k, c) in inp.iter().enumerate() {
+                    let re = num_traits::ToPrimitive::to_f64(&c.re)
+                        .map(|v| v as f32)
+                        .unwrap_or(0.0_f32);
+                    let im = num_traits::ToPrimitive::to_f64(&c.im)
+                        .map(|v| v as f32)
+                        .unwrap_or(0.0_f32);
+                    packed_in[base + k] = num_complex::Complex::new(re, im);
+                }
+            }
+
+            self.inner
+                .execute(&packed_in, &mut packed_out, metal_dir)
+                .map_err(GpuError::from)?;
+
+            // Undo oxicuda-metal's internal 1/N on the inverse (see `execute`).
+            if direction == GpuDirection::Inverse {
+                for c in &mut packed_out {
+                    c.re *= inv_scale;
+                    c.im *= inv_scale;
+                }
+            }
+
+            // Unpack only the real (non-padding) transforms.
+            for (ci, idx) in (start..end).enumerate() {
+                let out = &mut outputs[idx];
+                if out.len() != n {
+                    return Err(GpuError::SizeMismatch {
+                        expected: n,
+                        got: out.len(),
+                    });
+                }
+                let base = ci * n;
+                for (k, slot) in out.iter_mut().enumerate() {
+                    let c = packed_out[base + k];
+                    *slot = Complex::new(T::from_f64(c.re as f64), T::from_f64(c.im as f64));
+                }
+            }
+
+            start = end;
         }
 
         Ok(())
@@ -448,6 +601,8 @@ mod tests {
             assert_eq!(caps.backend, GpuBackend::Metal);
             assert!(caps.supports_f16);
             assert!(!caps.supports_f64);
+            assert!(caps.hardware_accelerated, "Metal runs on the GPU");
+            assert!(caps.max_fft_size >= 1 << 20, "max_fft_size from device");
         }
     }
 
@@ -533,6 +688,14 @@ mod tests {
         let mut recovered = vec![Complex::<f32>::zero(); n];
         buf_out.download(&mut recovered).expect("download");
 
+        // `MetalFftPlan::execute` is unnormalised (FFTW convention), so the
+        // forward→inverse round trip returns N·x; normalise here for comparison.
+        let inv_n = 1.0_f32 / n as f32;
+        for c in &mut recovered {
+            c.re *= inv_n;
+            c.im *= inv_n;
+        }
+
         for i in 0..n {
             let err = ((recovered[i].re - original[i].re).powi(2)
                 + (recovered[i].im - original[i].im).powi(2))
@@ -580,6 +743,13 @@ mod tests {
 
             let mut recovered = vec![Complex::<f32>::zero(); n];
             buf_out.download(&mut recovered).expect("download");
+
+            // `execute` is unnormalised; normalise the round trip by 1/N.
+            let inv_n = 1.0_f32 / n as f32;
+            for c in &mut recovered {
+                c.re *= inv_n;
+                c.im *= inv_n;
+            }
 
             for (i, (orig, rec)) in original.iter().zip(recovered.iter()).enumerate() {
                 let err = ((rec.re - orig.re).powi(2) + (rec.im - orig.im).powi(2)).sqrt();

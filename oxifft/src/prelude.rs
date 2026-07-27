@@ -31,13 +31,20 @@ pub use hashbrown::HashMap;
 
 // Sync primitives - use spin for no_std, std::sync for std
 #[cfg(not(feature = "std"))]
-pub use spin::{Lazy, Mutex, Once, RwLock};
+pub use spin::{LazyLock as Lazy, Mutex, Once, RwLock};
 
 #[cfg(feature = "std")]
 pub use std::sync::{Mutex, OnceLock, RwLock};
 
 #[cfg(feature = "std")]
 pub use std::sync::LazyLock as Lazy;
+
+// Reference-counted pointer - std::sync::Arc for std, alloc::sync::Arc for no_std.
+#[cfg(feature = "std")]
+pub use std::sync::Arc;
+
+#[cfg(not(feature = "std"))]
+pub use alloc::sync::Arc;
 
 // Atomic types from core (available in both std and no_std)
 pub use core::sync::atomic::{AtomicUsize, Ordering};
@@ -73,23 +80,31 @@ pub use core::f64::consts::PI;
 
 // RwLock guard helpers — abstracts std (poisonable) vs spin (infallible) RwLock.
 //
-// `std::sync::RwLock::read()` returns `LockResult<Guard>` which must be unwrapped.
+// `std::sync::RwLock::read()` returns `LockResult<Guard>` which must be handled.
 // `spin::RwLock::read()` returns the guard directly with no poisoning concept.
 // These free functions hide that difference so callers compile in both modes.
+//
+// These helpers back the process-global twiddle-factor cache, which sits on the
+// hot path of every FFT execution and holds purely recomputable data. A poisoned
+// lock (caused by an unrelated panic elsewhere while a guard was held) must not
+// turn every subsequent FFT call into a fatal panic, so we recover the inner
+// guard via `PoisonError::into_inner` instead of propagating the poison.
 
 #[cfg(feature = "std")]
 #[inline]
 pub fn rwlock_read<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    // reason: spin::RwLock cannot be poisoned; std::sync::RwLock poisoning is
-    // propagated from a panicking writer, which we treat as fatal here.
-    lock.read().expect("RwLock poisoned")
+    // reason: recover from poisoning rather than treating it as fatal — the
+    // guarded data is recomputable cache state, never invariant-critical.
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(feature = "std")]
 #[inline]
 pub fn rwlock_write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     // reason: see rwlock_read above
-    lock.write().expect("RwLock poisoned")
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(not(feature = "std"))]

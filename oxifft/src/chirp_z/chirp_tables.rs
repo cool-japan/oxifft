@@ -9,6 +9,7 @@
 //! methods, avoiding any integer overflow from squaring large indices.
 
 use crate::kernel::{Complex, Float};
+use crate::prelude::*;
 
 /// Compute `A^{-n} · W^{n²/2}` for `n = 0 .. N`.
 ///

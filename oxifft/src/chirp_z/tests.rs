@@ -6,7 +6,8 @@
 //! 3. Off-unit-circle: |A|≠1, |W|≠1 against naive formula.
 //! 4. Different N/M: N=256, M=64 against naive formula.
 //! 5. f32 identity: same as (1) at lower precision.
-//! 6. Error-path validation.
+//! 6. `with_flags`: ESTIMATE (default) and explicit MEASURE both match DFT.
+//! 7. Error-path validation.
 
 use super::{CztError, CztPlan};
 use crate::api::{Direction, Flags, Plan};
@@ -249,7 +250,56 @@ fn identity_czt_matches_dft_f32() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Error-path validation
+// Test 6: `with_flags` constructor — ESTIMATE default and explicit MEASURE
+// both produce numerically correct output.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn with_flags_estimate_and_measure_match_dft() {
+    let n = 32_usize;
+    let two_pi_over_n = -2.0 * core::f64::consts::PI / n as f64;
+    let a = Complex::<f64>::one();
+    let w = Complex::from_polar(1.0_f64, two_pi_over_n);
+
+    let input: Vec<Complex<f64>> = (0..n)
+        .map(|i| Complex::new((i as f64 * 0.19).sin(), (i as f64 * 0.53).cos()))
+        .collect();
+
+    let dft_plan =
+        Plan::<f64>::dft_1d(n, Direction::Forward, Flags::ESTIMATE).expect("DFT plan failed");
+    let mut dft_out = vec![Complex::zero(); n];
+    dft_plan.execute(&input, &mut dft_out);
+
+    // `new` now defaults to Flags::ESTIMATE internally (previously hardcoded
+    // to Flags::MEASURE); verify it still produces correct output.
+    let plan_default = CztPlan::<f64>::new(n, n, a, w).expect("default CZT plan failed");
+    let mut out_default = vec![Complex::zero(); n];
+    plan_default
+        .execute(&input, &mut out_default)
+        .expect("default CZT execute failed");
+    let err_default = max_err_f64(&out_default, &dft_out);
+    assert!(
+        err_default < 1e-10,
+        "default (ESTIMATE) CZT vs DFT error {err_default:.2e} > 1e-10"
+    );
+
+    // Explicit `with_flags(..., Flags::MEASURE)` must also produce correct
+    // output (planning strategy affects speed, not correctness).
+    let plan_measure =
+        CztPlan::<f64>::with_flags(n, n, a, w, Flags::MEASURE).expect("MEASURE CZT plan failed");
+    let mut out_measure = vec![Complex::zero(); n];
+    plan_measure
+        .execute(&input, &mut out_measure)
+        .expect("MEASURE CZT execute failed");
+    let err_measure = max_err_f64(&out_measure, &dft_out);
+    assert!(
+        err_measure < 1e-10,
+        "MEASURE CZT vs DFT error {err_measure:.2e} > 1e-10"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Error-path validation
 // ---------------------------------------------------------------------------
 
 #[test]

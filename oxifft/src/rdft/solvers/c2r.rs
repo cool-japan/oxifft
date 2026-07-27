@@ -22,6 +22,12 @@ pub struct C2rSolver<T: Float> {
     n: usize,
     /// Precomputed twiddle factors for packing
     twiddles: Vec<Complex<T>>,
+    /// Planning flags forwarded to the internal complex sub-transform.
+    ///
+    /// This lets `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` (and wisdom caching)
+    /// actually influence the inner `N/2`-point FFT instead of always using
+    /// `Flags::ESTIMATE`.
+    flags: Flags,
 }
 
 impl<T: Float> Default for C2rSolver<T> {
@@ -31,13 +37,20 @@ impl<T: Float> Default for C2rSolver<T> {
 }
 
 impl<T: Float> C2rSolver<T> {
-    /// Create a new C2R solver for the given output size.
+    /// Create a new C2R solver for the given output size (using `Flags::ESTIMATE`).
     #[must_use]
     pub fn new(n: usize) -> Self {
+        Self::new_with_flags(n, Flags::ESTIMATE)
+    }
+
+    /// Create a new C2R solver, forwarding `flags` to the internal complex FFT.
+    #[must_use]
+    pub fn new_with_flags(n: usize, flags: Flags) -> Self {
         if n == 0 {
             return Self {
                 n: 0,
                 twiddles: Vec::new(),
+                flags,
             };
         }
 
@@ -49,7 +62,7 @@ impl<T: Float> C2rSolver<T> {
             twiddles.push(Complex::cis(angle));
         }
 
-        Self { n, twiddles }
+        Self { n, twiddles, flags }
     }
 
     /// Solver name.
@@ -115,6 +128,27 @@ impl<T: Float> C2rSolver<T> {
             return;
         }
 
+        // Odd sizes: mirror the odd-`n` path in `R2cSolver`. Reconstruct the
+        // full N-bin Hermitian spectrum (`X[N-k] = conj(X[k])`, no Nyquist bin
+        // for odd `N`), run a full N-point inverse complex FFT, and take the
+        // real parts. Unnormalized, matching this method's contract.
+        if n % 2 == 1 {
+            let mut full = vec![Complex::zero(); n];
+            let half = n / 2 + 1;
+            full[..half].copy_from_slice(&input[..half]);
+            for k in half..n {
+                full[k] = input[n - k].conj();
+            }
+            let mut recon = vec![Complex::zero(); n];
+            if let Some(plan) = Plan::dft_1d(n, Direction::Backward, self.flags) {
+                plan.execute(&full, &mut recon);
+            }
+            for (out, c) in output.iter_mut().zip(recon.iter()) {
+                *out = c.re;
+            }
+            return;
+        }
+
         let half_n = n / 2;
 
         // Step 1: Pack the complex input into Z[k] for N/2-point IFFT
@@ -160,7 +194,7 @@ impl<T: Float> C2rSolver<T> {
 
         // Step 2: Compute N/2-point inverse complex FFT
         let mut z_ifft = vec![Complex::zero(); half_n];
-        if let Some(plan) = Plan::dft_1d(half_n, Direction::Backward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(half_n, Direction::Backward, self.flags) {
             plan.execute(&z, &mut z_ifft);
         }
 
@@ -177,6 +211,26 @@ impl<T: Float> C2rSolver<T> {
     ///
     /// The output is divided by N to give the true inverse of R2C.
     pub fn execute_normalized(&self, input: &[Complex<T>], output: &mut [T]) {
+        // Overflow-resistant fast path for `N == 2`.
+        //
+        // The generic path first forms the *unnormalized* transform (which for
+        // `N == 2` is `x[0]·2 = X[0] + X[1]`) and only then divides by `N`.
+        // When `|x[0]|` is near `T::MAX / 2` the intermediate `X[0] + X[1]`
+        // overflows to `±inf` even though the normalized result is perfectly
+        // representable. Dividing each frequency bin by `N` *before* summing
+        // avoids that gratuitous overflow. (Regression: the `r2c_roundtrip`
+        // fuzz target crashed on exactly this input.)
+        if self.n == 2 {
+            assert_eq!(input.len(), 2, "Input size must be N/2+1");
+            assert_eq!(output.len(), 2, "Output size must be N");
+            let two = T::from_usize(2);
+            let a = input[0].re / two;
+            let b = input[1].re / two;
+            output[0] = a + b;
+            output[1] = a - b;
+            return;
+        }
+
         self.execute(input, output);
 
         let n = T::from_usize(self.n);

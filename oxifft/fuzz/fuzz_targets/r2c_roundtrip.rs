@@ -30,6 +30,15 @@ fuzz_target!(|data: &[u8]| {
         if !v.is_finite() {
             return; // skip NaN / Inf
         }
+        // Bound the amplitude, mirroring the proptest suite (plan_fuzz.rs).
+        // A round trip intrinsically forms intermediate sums up to ~N * |x|
+        // (e.g. the DC bin); for f32 those overflow to +/-inf once |x| nears
+        // f32::MAX / N. That is a fundamental floating-point range limit, not a
+        // library bug, so we exclude such gratuitously huge magnitudes here.
+        // (With N <= 1024, 1e18 keeps N * |x| far below f32::MAX ~= 3.4e38.)
+        if v.abs() > 1.0e18 {
+            return;
+        }
         input.push(v);
     }
 

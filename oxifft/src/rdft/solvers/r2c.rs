@@ -22,6 +22,12 @@ pub struct R2cSolver<T: Float> {
     n: usize,
     /// Precomputed twiddle factors for unpacking
     twiddles: Vec<Complex<T>>,
+    /// Planning flags forwarded to the internal complex sub-transform.
+    ///
+    /// This lets `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` (and wisdom caching)
+    /// actually influence the inner `N/2`-point FFT instead of always using
+    /// `Flags::ESTIMATE`.
+    flags: Flags,
 }
 
 impl<T: Float> Default for R2cSolver<T> {
@@ -31,13 +37,20 @@ impl<T: Float> Default for R2cSolver<T> {
 }
 
 impl<T: Float> R2cSolver<T> {
-    /// Create a new R2C solver for the given size.
+    /// Create a new R2C solver for the given size (using `Flags::ESTIMATE`).
     #[must_use]
     pub fn new(n: usize) -> Self {
+        Self::new_with_flags(n, Flags::ESTIMATE)
+    }
+
+    /// Create a new R2C solver, forwarding `flags` to the internal complex FFT.
+    #[must_use]
+    pub fn new_with_flags(n: usize, flags: Flags) -> Self {
         if n == 0 {
             return Self {
                 n: 0,
                 twiddles: Vec::new(),
+                flags,
             };
         }
 
@@ -49,7 +62,7 @@ impl<T: Float> R2cSolver<T> {
             twiddles.push(Complex::cis(angle));
         }
 
-        Self { n, twiddles }
+        Self { n, twiddles, flags }
     }
 
     /// Solver name.
@@ -109,6 +122,22 @@ impl<T: Float> R2cSolver<T> {
             return;
         }
 
+        // Odd sizes: the even-only pair-packing scheme below drops the final
+        // sample (it iterates `k in 0..n/2` reading `x[2k]`/`x[2k+1]`, which
+        // never touches `x[n-1]` when `n` is odd). Route odd `n` through a full
+        // N-point complex FFT of the real input and keep the first `n/2+1`
+        // (non-redundant) bins — correct for any size.
+        if n % 2 == 1 {
+            let complex_input: Vec<Complex<T>> =
+                input.iter().map(|&x| Complex::new(x, T::ZERO)).collect();
+            let mut full = vec![Complex::zero(); n];
+            if let Some(plan) = Plan::dft_1d(n, Direction::Forward, self.flags) {
+                plan.execute(&complex_input, &mut full);
+            }
+            output[..=n / 2].copy_from_slice(&full[..=n / 2]);
+            return;
+        }
+
         // Step 1: Pack N real values into N/2 complex values
         // z[k] = x[2k] + i*x[2k+1]
         let half_n = n / 2;
@@ -119,7 +148,7 @@ impl<T: Float> R2cSolver<T> {
 
         // Step 2: Compute N/2-point complex FFT
         let mut z_fft = vec![Complex::zero(); half_n];
-        if let Some(plan) = Plan::dft_1d(half_n, Direction::Forward, Flags::ESTIMATE) {
+        if let Some(plan) = Plan::dft_1d(half_n, Direction::Forward, self.flags) {
             plan.execute(&z, &mut z_fft);
         }
 

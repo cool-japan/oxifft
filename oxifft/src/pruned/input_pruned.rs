@@ -20,7 +20,7 @@ use crate::prelude::*;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use oxifft::pruned::fft_pruned_input;
 /// use oxifft::Complex;
 ///

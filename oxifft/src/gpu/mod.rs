@@ -1,30 +1,42 @@
 //! GPU-accelerated FFT support.
 //!
-//! This module provides GPU backends for high-performance FFT computation.
+//! This module provides GPU backends for FFT computation.
 //!
-//! # Supported Backends
+//! # Supported backends and where they actually execute
 //!
-//! | Backend | Platform | Feature Flag | Library |
-//! |---------|----------|--------------|---------|
-//! | CUDA | NVIDIA GPUs | `cuda` | cuFFT |
-//! | Metal | Apple GPUs | `metal` | Metal Performance Shaders |
+//! | Backend | Platform | Feature | Execution today |
+//! |---------|----------|---------|-----------------|
+//! | Metal | Apple GPUs (macOS) | `metal` | **GPU** — native dispatch via `oxicuda-metal` |
+//! | CUDA | NVIDIA GPUs | `cuda` | **CPU emulation** — real device kernels pending in `oxicuda-fft` |
+//!
+//! The Metal backend genuinely runs transforms on the GPU.  The CUDA backend
+//! opens a real CUDA context/stream/plan but currently evaluates every
+//! transform on the CPU: `oxicuda-fft`'s own execution path is still a host
+//! fallback (device → host copy, CPU FFT, host → device copy) rather than a
+//! kernel launch.  This status is not hidden — query it at runtime with
+//! [`GpuFft::execution_target`] (returns [`ExecutionTarget::Cpu`] for CUDA) or
+//! [`GpuCapabilities::hardware_accelerated`].
 //!
 //! # Example
 //!
-//! ```ignore
-//! use oxifft::gpu::{GpuFft, GpuBackend};
+//! ```no_run
+//! use oxifft::gpu::{GpuFft, GpuBackend, GpuError};
 //! use oxifft::Complex;
 //!
-//! // Auto-detect best available backend
-//! let gpu = GpuFft::new(1024, GpuBackend::Auto)?;
+//! fn main() -> Result<(), GpuError> {
+//!     // Auto-detect the best available backend.
+//!     let mut gpu = GpuFft::new(1024, GpuBackend::Auto)?;
 //!
-//! let input: Vec<Complex<f32>> = vec![Complex::new(1.0, 0.0); 1024];
-//! let output = gpu.forward(&input)?;
+//!     let input: Vec<Complex<f32>> = vec![Complex::new(1.0, 0.0); 1024];
+//!     let output = gpu.forward(&input)?;
+//!     let _ = output;
+//!     Ok(())
+//! }
 //! ```
 //!
-//! # Performance Notes
+//! # Performance notes
 //!
-//! GPU FFT is most beneficial for:
+//! GPU FFT (Metal) is most beneficial for:
 //! - Large transforms (N > 4096)
 //! - Batched transforms
 //! - Single-precision (f32) data
@@ -55,7 +67,7 @@ pub use backend::{GpuBackend, GpuCapabilities};
 pub use batch::GpuBatchFft;
 pub use buffer::GpuBuffer;
 pub use error::{GpuError, GpuResult};
-pub use plan::{GpuDirection, GpuFft, GpuPlan};
+pub use plan::{ExecutionTarget, GpuDirection, GpuFft, GpuPlan};
 pub use pool::{BufferKind, GpuBufferPool, PoolKey};
 
 /// Return a reference to the process-global GPU buffer pool.

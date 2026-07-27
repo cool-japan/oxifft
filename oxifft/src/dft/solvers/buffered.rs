@@ -146,27 +146,45 @@ impl<T: Float> BufferedSolver<T> {
     }
 
     /// Execute using Cooley-Tukey for power-of-2 sizes.
-    pub fn execute_ct(&self, input: &[Complex<T>], output: &mut [Complex<T>], sign: Sign) {
+    ///
+    /// # Errors
+    /// Returns `Err` if the configured size `n` is not a power of two, since the
+    /// Cooley-Tukey radix-2 path only applies to power-of-two sizes.
+    pub fn execute_ct(
+        &self,
+        input: &[Complex<T>],
+        output: &mut [Complex<T>],
+        sign: Sign,
+    ) -> Result<(), &'static str> {
         use super::{CooleyTukeySolver, CtVariant};
 
         if !CooleyTukeySolver::<T>::applicable(self.n) {
-            panic!("BufferedSolver::execute_ct requires power-of-2 size");
+            return Err("BufferedSolver::execute_ct requires power-of-2 size");
         }
 
         let solver = CooleyTukeySolver::new(CtVariant::Dit);
         self.execute(input, output, sign, |i, o, s| solver.execute(i, o, s));
+        Ok(())
     }
 
     /// Execute in-place using Cooley-Tukey.
-    pub fn execute_ct_inplace(&self, data: &mut [Complex<T>], sign: Sign) {
+    ///
+    /// # Errors
+    /// Returns `Err` if the configured size `n` is not a power of two.
+    pub fn execute_ct_inplace(
+        &self,
+        data: &mut [Complex<T>],
+        sign: Sign,
+    ) -> Result<(), &'static str> {
         use super::{CooleyTukeySolver, CtVariant};
 
         if !CooleyTukeySolver::<T>::applicable(self.n) {
-            panic!("BufferedSolver::execute_ct_inplace requires power-of-2 size");
+            return Err("BufferedSolver::execute_ct_inplace requires power-of-2 size");
         }
 
         let solver = CooleyTukeySolver::new(CtVariant::Dit);
         self.execute_inplace(data, sign, |d, s| solver.execute_inplace(d, s));
+        Ok(())
     }
 }
 
@@ -200,7 +218,9 @@ mod tests {
         let input: Vec<Complex<f64>> = (0..n).map(|i| Complex::new(i as f64, 0.0)).collect();
         let mut output = vec![Complex::zero(); n];
 
-        solver.execute_ct(&input, &mut output, Sign::Forward);
+        solver
+            .execute_ct(&input, &mut output, Sign::Forward)
+            .expect("power-of-two size");
 
         // DC should be sum
         assert!(complex_approx_eq(output[0], Complex::new(28.0, 0.0), 1e-10));
@@ -226,7 +246,9 @@ mod tests {
         ];
         let mut output = vec![Complex::zero(); 8];
 
-        solver.execute_ct(&input, &mut output, Sign::Forward);
+        solver
+            .execute_ct(&input, &mut output, Sign::Forward)
+            .expect("power-of-two size");
 
         // DC at index 0 should be sum: 0+1+2+3 = 6
         assert!(complex_approx_eq(output[0], Complex::new(6.0, 0.0), 1e-10));
@@ -245,8 +267,12 @@ mod tests {
         let mut transformed = vec![Complex::zero(); n];
         let mut recovered = vec![Complex::zero(); n];
 
-        solver.execute_ct(&original, &mut transformed, Sign::Forward);
-        solver.execute_ct(&transformed, &mut recovered, Sign::Backward);
+        solver
+            .execute_ct(&original, &mut transformed, Sign::Forward)
+            .expect("power-of-two size");
+        solver
+            .execute_ct(&transformed, &mut recovered, Sign::Backward)
+            .expect("power-of-two size");
 
         // Normalize and compare
         let scale = n as f64;
@@ -265,11 +291,15 @@ mod tests {
 
         // Out-of-place
         let mut out_of_place = vec![Complex::zero(); n];
-        solver.execute_ct(&input, &mut out_of_place, Sign::Forward);
+        solver
+            .execute_ct(&input, &mut out_of_place, Sign::Forward)
+            .expect("power-of-two size");
 
         // In-place
         let mut in_place = input;
-        solver.execute_ct_inplace(&mut in_place, Sign::Forward);
+        solver
+            .execute_ct_inplace(&mut in_place, Sign::Forward)
+            .expect("power-of-two size");
 
         for (a, b) in out_of_place.iter().zip(in_place.iter()) {
             assert!(complex_approx_eq(*a, *b, 1e-10));
@@ -310,5 +340,19 @@ mod tests {
 
         // DC at strided position 0
         assert!(complex_approx_eq(output[0], Complex::new(28.0, 0.0), 1e-10));
+    }
+
+    #[test]
+    fn test_execute_ct_non_power_of_two_returns_err() {
+        // A non-power-of-two size must return Err instead of panicking.
+        let solver = BufferedSolver::<f64>::new_contiguous(3);
+        let input = vec![Complex::<f64>::zero(); 3];
+        let mut output = vec![Complex::<f64>::zero(); 3];
+        assert!(solver
+            .execute_ct(&input, &mut output, Sign::Forward)
+            .is_err());
+
+        let mut data = vec![Complex::<f64>::zero(); 3];
+        assert!(solver.execute_ct_inplace(&mut data, Sign::Forward).is_err());
     }
 }

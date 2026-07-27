@@ -4,6 +4,7 @@
 
 use oxifft::api::{Direction, Flags, Plan};
 use oxifft::Complex;
+use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
@@ -31,15 +32,16 @@ fn main() {
 
         // Warm up
         for _ in 0..100 {
-            plan.execute(&input, &mut output);
+            plan.execute(black_box(&input), black_box(&mut output));
         }
 
         // Measure execution
         let exec_start = Instant::now();
         for _ in 0..iterations {
-            plan.execute(&input, &mut output);
+            plan.execute(black_box(&input), black_box(&mut output));
         }
         let exec_ns = exec_start.elapsed().as_nanos() as f64 / iterations as f64;
+        black_box(&output);
 
         // Compare with RustFFT
         let mut planner = rustfft::FftPlanner::<f64>::new();
@@ -51,13 +53,14 @@ fn main() {
         // Warm up
         for _ in 0..100 {
             let mut data = rust_data.clone();
-            fft.process(&mut data);
+            fft.process(black_box(&mut data));
         }
 
         let rust_start = Instant::now();
         for _ in 0..iterations {
             let mut data = rust_data.clone();
-            fft.process(&mut data);
+            fft.process(black_box(&mut data));
+            black_box(&data);
         }
         let rust_ns = rust_start.elapsed().as_nanos() as f64 / iterations as f64;
 

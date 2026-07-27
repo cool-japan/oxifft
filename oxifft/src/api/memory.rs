@@ -20,27 +20,63 @@ pub struct AlignedBuffer<T> {
 }
 
 impl<T: Clone + Default> AlignedBuffer<T> {
+    /// Compute the exact allocation layout for `size` elements of `T`.
+    ///
+    /// Uses [`Layout::array`] (which multiplies with `checked_mul` internally)
+    /// and then widens the alignment to [`DEFAULT_ALIGNMENT`]. This returns
+    /// `Err` on overflow instead of silently wrapping the byte count, which
+    /// previously produced an undersized allocation followed by out-of-bounds
+    /// writes on 32-bit targets (e.g. wasm32).
+    fn layout_for(size: usize) -> Result<Layout, core::alloc::LayoutError> {
+        Layout::array::<T>(size)?.align_to(DEFAULT_ALIGNMENT.max(core::mem::align_of::<T>()))
+    }
+
     /// Create a new aligned buffer with the given size, initialized to default values.
     ///
     /// # Panics
-    /// Panics if memory allocation fails.
+    /// Panics if memory allocation fails, or if `size` is so large that
+    /// `size * size_of::<T>()` overflows the address space. Use [`Self::try_new`]
+    /// to handle the overflow case without panicking.
     #[must_use]
     pub fn new(size: usize) -> Self {
+        match Self::try_new(size) {
+            Ok(buf) => buf,
+            Err(err) => panic!(
+                "AlignedBuffer::new: allocation size overflow for {size} elements of {} bytes: {err}",
+                core::mem::size_of::<T>()
+            ),
+        }
+    }
+
+    /// Fallibly create a new aligned buffer, returning `Err` on size overflow.
+    ///
+    /// Unlike [`Self::new`], this reports an overflowing size request as an
+    /// error rather than panicking. The size computation is checked, so an
+    /// adversarially large `size` can never wrap to a small allocation.
+    ///
+    /// # Errors
+    /// Returns [`core::alloc::LayoutError`] when `size * size_of::<T>()` (rounded
+    /// up to the alignment) exceeds `isize::MAX`, i.e. cannot be represented as a
+    /// valid allocation layout.
+    ///
+    /// # Panics
+    /// Panics only via [`handle_alloc_error`](std::alloc::handle_alloc_error) if
+    /// the underlying allocator returns null (out of memory), matching the
+    /// standard-library convention.
+    pub fn try_new(size: usize) -> Result<Self, core::alloc::LayoutError> {
         if size == 0 {
-            return Self {
+            return Ok(Self {
                 ptr: core::ptr::NonNull::dangling().as_ptr(),
                 len: 0,
                 capacity: 0,
-            };
+            });
         }
 
-        let layout = Layout::from_size_align(
-            size * core::mem::size_of::<T>(),
-            DEFAULT_ALIGNMENT.max(core::mem::align_of::<T>()),
-        )
-        .expect("Invalid layout");
+        // Checked layout construction: returns Err on overflow rather than
+        // wrapping the byte count.
+        let layout = Self::layout_for(size)?;
 
-        // SAFETY: layout is non-zero size
+        // SAFETY: layout is non-zero size (size > 0 checked above)
         #[cfg(feature = "std")]
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) as *mut T };
         #[cfg(not(feature = "std"))]
@@ -55,17 +91,17 @@ impl<T: Clone + Default> AlignedBuffer<T> {
 
         // Initialize with default values
         for i in 0..size {
-            // SAFETY: ptr is valid for size elements, and we're within bounds
+            // SAFETY: ptr is valid for `size` elements, and `i` is within bounds
             unsafe {
                 core::ptr::write(ptr.add(i), T::default());
             }
         }
 
-        Self {
+        Ok(Self {
             ptr,
             len: size,
             capacity: size,
-        }
+        })
     }
 
     /// Get the length of the buffer.
@@ -118,22 +154,25 @@ impl<T: Clone + Default> AlignedBuffer<T> {
 impl<T> Drop for AlignedBuffer<T> {
     fn drop(&mut self) {
         if self.capacity > 0 {
-            let layout = Layout::from_size_align(
-                self.capacity * core::mem::size_of::<T>(),
-                DEFAULT_ALIGNMENT.max(core::mem::align_of::<T>()),
-            )
-            .expect("Invalid layout");
-
-            // SAFETY: ptr was allocated with this layout
-            unsafe {
-                // Drop all elements first
-                for i in 0..self.len {
-                    core::ptr::drop_in_place(self.ptr.add(i));
+            // Reconstruct the exact layout used at allocation time using the
+            // same checked path. This cannot fail here because `capacity` was
+            // validated by `try_new` before the buffer was created; the
+            // `if let Ok` guard simply avoids any possibility of a panic in
+            // `drop`.
+            let layout = Layout::array::<T>(self.capacity)
+                .and_then(|l| l.align_to(DEFAULT_ALIGNMENT.max(core::mem::align_of::<T>())));
+            if let Ok(layout) = layout {
+                // SAFETY: ptr was allocated with this exact layout
+                unsafe {
+                    // Drop all elements first
+                    for i in 0..self.len {
+                        core::ptr::drop_in_place(self.ptr.add(i));
+                    }
+                    #[cfg(feature = "std")]
+                    std::alloc::dealloc(self.ptr as *mut u8, layout);
+                    #[cfg(not(feature = "std"))]
+                    alloc::alloc::dealloc(self.ptr as *mut u8, layout);
                 }
-                #[cfg(feature = "std")]
-                std::alloc::dealloc(self.ptr as *mut u8, layout);
-                #[cfg(not(feature = "std"))]
-                alloc::alloc::dealloc(self.ptr as *mut u8, layout);
             }
         }
     }
@@ -269,5 +308,41 @@ mod tests {
         let buf: AlignedBuffer<f64> = AlignedBuffer::new(4);
         let slice = buf.as_slice();
         assert_eq!(slice.len(), 4);
+    }
+
+    #[test]
+    fn test_try_new_overflow_returns_err() {
+        // An adversarial size whose byte count (size * size_of::<Complex<f64>>() = size * 16)
+        // overflows the address space must return Err rather than silently allocating a
+        // wrapped, undersized buffer and then writing out of bounds.
+        assert!(AlignedBuffer::<Complex<f64>>::try_new(usize::MAX).is_err());
+        // Just under usize::MAX still overflows once multiplied by 16 bytes.
+        assert!(AlignedBuffer::<Complex<f64>>::try_new(usize::MAX / 4).is_err());
+        // A byte-sized element still overflows when size > isize::MAX.
+        assert!(AlignedBuffer::<u8>::try_new(usize::MAX).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "allocation size overflow")]
+    fn test_new_overflow_panics_loudly() {
+        // The infallible constructor must panic loudly (not corrupt memory) on overflow.
+        let _buf: AlignedBuffer<Complex<f64>> = AlignedBuffer::new(usize::MAX);
+    }
+
+    #[test]
+    fn test_try_new_small_size_ok() {
+        let buf = AlignedBuffer::<Complex<f64>>::try_new(16).expect("small alloc must succeed");
+        assert_eq!(buf.len(), 16);
+        assert!(is_aligned(buf.as_ptr()));
+    }
+
+    // The exact wasm32 wrap boundary from the audit (2^28 + 1 elements * 16 bytes = 2^32 + 16,
+    // which wraps to 16 on a 32-bit usize). Only meaningful on 32-bit targets; on 64-bit the
+    // multiplication does not wrap and the request is simply a (very large) valid layout.
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn test_try_new_wasm32_wrap_boundary() {
+        let size = (1usize << 28) + 1;
+        assert!(AlignedBuffer::<Complex<f64>>::try_new(size).is_err());
     }
 }

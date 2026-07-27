@@ -39,6 +39,12 @@ pub struct R2rSolver<T: Float> {
     ///
     /// Used for the DCT-IV post-extraction step.
     pub(super) twiddles_dct4: Vec<Complex<T>>,
+    /// Planning flags forwarded to the internal complex sub-transforms.
+    ///
+    /// Threaded into every `Plan::dft_1d` call the fast paths make so that
+    /// `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` (and wisdom caching) actually
+    /// influence real-to-real transform planning instead of being ignored.
+    pub(super) flags: Flags,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +99,16 @@ impl<T: Float> R2rSolver<T> {
     /// * `n`    – transform size (0 means "unknown / stateless")
     #[must_use]
     pub fn new(kind: R2rKind, n: usize) -> Self {
+        Self::new_with_flags(kind, n, Flags::ESTIMATE)
+    }
+
+    /// Create a new `R2rSolver`, forwarding `flags` to the internal complex FFTs.
+    ///
+    /// Behaves exactly like [`new`](Self::new) but threads `flags` into every
+    /// cached and per-call `Plan::dft_1d` construction, so that
+    /// `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` influence real-to-real planning.
+    #[must_use]
+    pub fn new_with_flags(kind: R2rKind, n: usize, flags: Flags) -> Self {
         if n < 2 {
             // For n < 2 or unknown size all paths fall back to direct computation;
             // we skip plan construction.
@@ -103,11 +119,12 @@ impl<T: Float> R2rSolver<T> {
                 plan_fwd_4n: None,
                 twiddles_dct2: Vec::new(),
                 twiddles_dct4: Vec::new(),
+                flags,
             };
         }
 
-        let plan_fwd_n = Plan::dft_1d(n, Direction::Forward, Flags::ESTIMATE);
-        let plan_fwd_4n = Plan::dft_1d(4 * n, Direction::Forward, Flags::ESTIMATE);
+        let plan_fwd_n = Plan::dft_1d(n, Direction::Forward, flags);
+        let plan_fwd_4n = Plan::dft_1d(4 * n, Direction::Forward, flags);
 
         let twiddles_dct2 = build_twiddles_dct2::<T>(n);
         let twiddles_dct4 = build_twiddles_dct4::<T>(n);
@@ -119,6 +136,7 @@ impl<T: Float> R2rSolver<T> {
             plan_fwd_4n,
             twiddles_dct2,
             twiddles_dct4,
+            flags,
         }
     }
 

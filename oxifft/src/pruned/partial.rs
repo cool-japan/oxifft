@@ -10,8 +10,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use oxifft::pruned::{PartialFft, PartialStrategy};
+//! ```
+//! use oxifft::pruned::PartialFft;
 //! use oxifft::Complex;
 //!
 //! let input: Vec<Complex<f64>> = vec![Complex::new(1.0, 0.0); 1024];

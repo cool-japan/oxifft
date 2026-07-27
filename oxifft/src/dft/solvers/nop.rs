@@ -44,6 +44,11 @@ impl<T: Float> NopSolver<T> {
     ///
     /// For size 0: does nothing
     /// For size 1: copies input\[0\] to output\[0\]
+    ///
+    /// # Panics
+    /// Panics if `input.len() > 1`. This is a low-level solver whose contract is
+    /// size 0 or 1; callers reaching it from arbitrary input should go through
+    /// [`dft_nop`], which validates the length and returns an error instead.
     #[inline]
     pub fn execute(&self, input: &[Complex<T>], output: &mut [Complex<T>]) {
         match input.len() {
@@ -72,10 +77,22 @@ impl<T: Float> NopSolver<T> {
     }
 }
 
-/// Convenience function for size-1 DFT.
+/// Convenience function for size-0 or size-1 DFT.
+///
+/// # Errors
+/// Returns `Err` if `input.len() > 1`, since a no-op solver only handles the
+/// trivial base cases (size 0 or 1). Larger transforms require a real FFT
+/// solver such as [`crate::fft`].
 #[inline]
-pub fn dft_nop<T: Float>(input: &[Complex<T>], output: &mut [Complex<T>]) {
+pub fn dft_nop<T: Float>(
+    input: &[Complex<T>],
+    output: &mut [Complex<T>],
+) -> Result<(), &'static str> {
+    if input.len() > 1 {
+        return Err("dft_nop only handles size 0 or 1");
+    }
     NopSolver::new().execute(input, output);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -108,5 +125,27 @@ mod tests {
         assert!(NopSolver::<f64>::applicable(1));
         assert!(!NopSolver::<f64>::applicable(2));
         assert!(!NopSolver::<f64>::applicable(100));
+    }
+
+    #[test]
+    fn test_dft_nop_valid_sizes_ok() {
+        // Size 1: copies the single element.
+        let input = [Complex::new(3.0_f64, 4.0)];
+        let mut output = [Complex::zero()];
+        assert!(dft_nop(&input, &mut output).is_ok());
+        assert!((output[0].re - 3.0).abs() < 1e-12 && (output[0].im - 4.0).abs() < 1e-12);
+
+        // Size 0: no-op, still Ok.
+        let empty: [Complex<f64>; 0] = [];
+        let mut empty_out: [Complex<f64>; 0] = [];
+        assert!(dft_nop(&empty, &mut empty_out).is_ok());
+    }
+
+    #[test]
+    fn test_dft_nop_invalid_size_returns_err() {
+        // Size > 1 must return Err instead of panicking.
+        let input = vec![Complex::<f64>::zero(); 5];
+        let mut output = vec![Complex::<f64>::zero(); 5];
+        assert!(dft_nop(&input, &mut output).is_err());
     }
 }

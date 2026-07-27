@@ -1,7 +1,19 @@
 # OxiFFT Benchmark Results
 
+> **This is a blank template.** The `[...]` fields are placeholders to fill in
+> per run. For the FFTW parity gates you usually do **not** need to fill this by
+> hand: `fftw_ratio_report` (see [BENCHMARKING.md](BENCHMARKING.md#fftw-parity-gates-fftw_ratio_report))
+> emits an equivalent, already-filled markdown/JSON table. Use this template for
+> narrative reports (SIMD scaling, threading, cache behaviour) around that data.
+>
+> **Current committed numbers** (`benches/baselines/v0.3.0/fftw_ratios_2026-04-20.json`,
+> Apple Silicon, mid-development): geomean ratio **1.50×**, **4/7** v1.0 gates
+> passing. Failing gates: `1d_cplx_2e20` 3.67× (target <2.0), `1d_real_2e10`
+> 3.95× (target <2.0), `dct2_1024` 3.90× (target <3.0). Refresh with
+> `fftw_ratio_report -- --commit-baseline` before quoting parity anywhere.
+
 **Date:** [YYYY-MM-DD]
-**Version:** [e.g., v0.1.0]
+**Version:** [e.g., v0.4.0]
 **Tester:** [Name or Team]
 
 ## System Configuration
@@ -19,8 +31,8 @@
 
 ### Software
 - **OS:** [e.g., macOS 13.5, Ubuntu 22.04, Windows 11]
-- **Rust Compiler:** [rustc version, e.g., 1.75.0]
-- **Cargo Version:** [e.g., 1.75.0]
+- **Rust Compiler:** [rustc version, e.g., 1.87.0 — the project MSRV]
+- **Cargo Version:** [e.g., 1.87.0]
 - **LLVM Version:** [if known]
 - **RUSTFLAGS:** [e.g., `-C target-cpu=native -C opt-level=3`]
 

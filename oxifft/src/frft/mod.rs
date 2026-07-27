@@ -27,16 +27,18 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use oxifft::frft::{frft, ifrft};
+//! use oxifft::Complex;
 //!
-//! let signal = vec![Complex::new(1.0, 0.0); 256];
+//! let signal = vec![Complex::new(1.0_f64, 0.0); 256];
 //!
-//! // Fractional Fourier Transform with order 0.5
+//! // Fractional Fourier Transform with order 0.5.
 //! let result = frft(&signal, 0.5).expect("FrFT failed");
 //!
-//! // Inverse (order -0.5)
+//! // Inverse (order -0.5).
 //! let recovered = ifrft(&result, 0.5).expect("iFrFT failed");
+//! # let _ = recovered;
 //! ```
 
 #[cfg(not(feature = "std"))]
@@ -93,6 +95,9 @@ pub struct Frft<T: Float> {
     fft_plan: Option<Plan<T>>,
     /// IFFT plan for padded convolution.
     ifft_plan: Option<Plan<T>>,
+    /// Planning flags used for internal FFT plans (including the ad-hoc
+    /// integer-order plans built in [`Self::execute_integer_order`]).
+    flags: Flags,
 }
 
 impl<T: Float> Frft<T> {
@@ -122,7 +127,25 @@ impl<T: Float> Frft<T> {
     /// assert!((output[0].re - input[0].re).abs() < 1e-9);
     /// assert!((output[3].re - input[3].re).abs() < 1e-9);
     /// ```
+    ///
+    /// Uses [`Flags::ESTIMATE`] for the internal convolution FFT plans (fast
+    /// planning, no benchmarking). Use [`Frft::with_flags`] to request a
+    /// different planning strategy (e.g. `Flags::MEASURE` when the same plan
+    /// will be executed many times and the extra planning cost is amortized).
     pub fn new(n: usize, order: f64) -> FrftResult<Self> {
+        Self::with_flags(n, order, Flags::ESTIMATE)
+    }
+
+    /// Create a new Fractional Fourier Transform plan with an explicit FFT
+    /// planning strategy.
+    ///
+    /// Equivalent to [`Frft::new`] but lets the caller choose the [`Flags`]
+    /// used for the internal convolution forward/inverse FFT plans.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`Frft::new`].
+    pub fn with_flags(n: usize, order: f64, flags: Flags) -> FrftResult<Self> {
         if n == 0 {
             return Err(FrftError::InvalidSize(0));
         }
@@ -146,6 +169,7 @@ impl<T: Float> Frft<T> {
                 padded_size: 0,
                 fft_plan: None,
                 ifft_plan: None,
+                flags,
             });
         }
 
@@ -191,8 +215,8 @@ impl<T: Float> Frft<T> {
             .collect();
 
         // Precompute kernel FFT
-        let fft_plan = Plan::dft_1d(padded_size, Direction::Forward, Flags::MEASURE);
-        let ifft_plan = Plan::dft_1d(padded_size, Direction::Backward, Flags::MEASURE);
+        let fft_plan = Plan::dft_1d(padded_size, Direction::Forward, flags);
+        let ifft_plan = Plan::dft_1d(padded_size, Direction::Backward, flags);
 
         let kernel_fft = if let Some(ref plan) = fft_plan {
             let mut result = vec![Complex::<T>::zero(); padded_size];
@@ -211,6 +235,7 @@ impl<T: Float> Frft<T> {
             padded_size,
             fft_plan,
             ifft_plan,
+            flags,
         })
     }
 
@@ -252,7 +277,7 @@ impl<T: Float> Frft<T> {
             }
             1 => {
                 // Standard DFT
-                if let Some(ref plan) = Plan::dft_1d(self.n, Direction::Forward, Flags::ESTIMATE) {
+                if let Some(ref plan) = Plan::dft_1d(self.n, Direction::Forward, self.flags) {
                     let mut result = vec![Complex::<T>::zero(); self.n];
                     plan.execute(input, &mut result);
                     // Normalize
@@ -277,7 +302,7 @@ impl<T: Float> Frft<T> {
             }
             3 => {
                 // Inverse DFT (up to normalization)
-                if let Some(ref plan) = Plan::dft_1d(self.n, Direction::Backward, Flags::ESTIMATE) {
+                if let Some(ref plan) = Plan::dft_1d(self.n, Direction::Backward, self.flags) {
                     let mut result = vec![Complex::<T>::zero(); self.n];
                     plan.execute(input, &mut result);
                     let n_t = T::from_usize(self.n);
@@ -358,6 +383,11 @@ impl<T: Float> Frft<T> {
     /// Get the fractional order.
     pub fn order(&self) -> f64 {
         self.order
+    }
+
+    /// Get the FFT planning flags used to build this plan's internal FFT plans.
+    pub fn flags(&self) -> Flags {
+        self.flags
     }
 }
 
@@ -537,5 +567,53 @@ mod tests {
         // Empty input
         let result = Frft::<f64>::new(0, 0.5);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_frft_new_defaults_to_estimate_flag() {
+        // `new` must no longer hardcode Flags::MEASURE internally.
+        let plan = Frft::<f64>::new(16, 0.5).expect("FrFT plan creation failed");
+        assert_eq!(plan.flags(), Flags::ESTIMATE);
+    }
+
+    #[test]
+    fn test_frft_with_flags_estimate_and_measure_match() {
+        // Planning strategy must not change the numerical result.
+        let input: Vec<Complex<f64>> = (0..32)
+            .map(|k| Complex::new((f64::from(k) * 0.1).cos(), (f64::from(k) * 0.1).sin()))
+            .collect();
+        let order = 0.6;
+
+        let plan_estimate =
+            Frft::<f64>::with_flags(32, order, Flags::ESTIMATE).expect("ESTIMATE plan failed");
+        let plan_measure =
+            Frft::<f64>::with_flags(32, order, Flags::MEASURE).expect("MEASURE plan failed");
+
+        assert_eq!(plan_estimate.flags(), Flags::ESTIMATE);
+        assert_eq!(plan_measure.flags(), Flags::MEASURE);
+
+        let out_estimate = plan_estimate
+            .execute(&input)
+            .expect("ESTIMATE execute failed");
+        let out_measure = plan_measure
+            .execute(&input)
+            .expect("MEASURE execute failed");
+
+        for (a, b) in out_estimate.iter().zip(out_measure.iter()) {
+            assert!(approx_eq(a.re, b.re, 1e-9));
+            assert!(approx_eq(a.im, b.im, 1e-9));
+        }
+    }
+
+    #[test]
+    fn test_frft_with_flags_integer_order_honors_flags() {
+        // Integer orders (0,1,2,3) take a special-case path; verify the
+        // requested flags are still recorded and execution still succeeds.
+        let plan = Frft::<f64>::with_flags(8, 1.0, Flags::MEASURE).expect("plan failed");
+        assert_eq!(plan.flags(), Flags::MEASURE);
+
+        let input: Vec<Complex<f64>> = (0..8).map(|k| Complex::new(f64::from(k), 0.0)).collect();
+        let result = plan.execute(&input).expect("execute failed");
+        assert_eq!(result.len(), 8);
     }
 }
