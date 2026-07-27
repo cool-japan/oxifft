@@ -1,16 +1,15 @@
 # OxiFFT on `no_std`
 
-> **⚠ Status (v0.4.0): the `--no-default-features` (`no_std`) core build does not
-> currently compile.** The 2026-07-22 audit found the codegen `gen_simd` path
-> still emits `std`-only code, and several feature crates gained `std`
-> requirements. Restoring a clean `no_std` build is a tracked remaining item (see
-> the "nostd-features" entry in [TODO.md](../TODO.md)). This document describes
-> the **intended** `no_std` design and the feature gating as it stands in
-> `oxifft/Cargo.toml` today — treat it as target-state, not a green build.
+> **Status (as of 0.4.1): the `--no-default-features` (`no_std`) core build
+> compiles clean.** The `gen_simd`/`std`-only issues found by the 2026-07-22
+> audit were fixed during the 0.4.0 sprint (see the "nostd-features" entry in
+> [TODO.md](../TODO.md)); verified again for 0.4.1 below. A full feature-matrix
+> sweep (every non-default feature individually under `no_std`) has not been
+> exhaustively verified — that remains a tracked follow-up.
 
 OxiFFT is designed to support `no_std` builds for embedded and WebAssembly
 targets: the core FFT algorithms and codegen codelets require only the `alloc`
-crate. Note that, as of v0.4.0, most **feature extensions are gated on `std`**
+crate. Note that, as of 0.4.1, most **feature extensions are gated on `std`**
 (see the matrix below) — only the core, `avx512`, `portable_simd`, `const-fft`
 and `fftw-compat` features are `no_std`-shaped.
 
@@ -75,8 +74,8 @@ Intended `no_std` targets:
 - `thumbv7em-none-eabihf` — ARMv7E-M embedded, no OS (with `embedded-alloc`)
 - `wasm32-unknown-unknown` — WebAssembly, no OS (alloc via JS heap)
 
-Verification commands (⚠ these do **not** pass as of v0.4.0 — see the status
-banner at the top; only `no_std`-shaped features may be enabled here):
+Verification commands (all pass as of 0.4.1; only `no_std`-shaped features
+may be enabled here):
 
 ```bash
 cargo check -p oxifft --no-default-features --target thumbv7em-none-eabihf

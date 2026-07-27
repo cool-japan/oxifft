@@ -1,6 +1,6 @@
 # oxifft-codegen-impl
 
-**Version:** 0.4.0
+**Version:** 0.4.1
 
 Internal codelet generation logic for [OxiFFT](https://github.com/cool-japan/oxifft).
 
