@@ -16,6 +16,13 @@ mod large_sizes;
 mod small_sizes;
 #[cfg(test)]
 mod tests;
+/// WebAssembly `simd128` codelets (`WasmSimdF64` / `WasmSimdF32` dispatch targets).
+///
+/// Compiled whenever the `wasm` feature is on so the butterfly algebra can be
+/// unit-tested on the development host against the scalar stand-in backend; only
+/// reached at run time on `wasm32` with `target_feature = "simd128"`.
+#[cfg(feature = "wasm")]
+pub mod wasm_backend;
 
 pub use large_sizes::*;
 pub use small_sizes::*;
@@ -50,6 +57,26 @@ pub fn notw_2_dispatch<T: Float>(x: &mut [Complex<T>]) {
             return;
         }
     }
+    // WebAssembly SIMD tier: route f64/f32 through the `simd128` backend.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "wasm"))]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // Safety: verified T is f64, so the memory layout is identical.
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            wasm_backend::notw_2_wasm_f64(x_f64);
+            return;
+        }
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // Safety: verified T is f32, so the memory layout is identical.
+            let x_f32 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f32>>(), x.len())
+            };
+            wasm_backend::notw_2_wasm_f32(x_f32);
+            return;
+        }
+    }
     // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
     // The size-2 butterfly is sign-independent; pass 1 as a no-op placeholder.
     super::generated_simd::generated_simd_2_dispatch(x);
@@ -75,6 +102,26 @@ pub fn notw_4_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
             return;
         }
     }
+    // WebAssembly SIMD tier: route f64/f32 through the `simd128` backend.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "wasm"))]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // Safety: verified T is f64, so the memory layout is identical.
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            wasm_backend::notw_4_wasm_f64(x_f64, sign);
+            return;
+        }
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // Safety: verified T is f32, so the memory layout is identical.
+            let x_f32 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f32>>(), x.len())
+            };
+            wasm_backend::notw_4_wasm_f32(x_f32, sign);
+            return;
+        }
+    }
     // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
     super::generated_simd::generated_simd_4_dispatch(x, sign);
 }
@@ -87,6 +134,26 @@ pub fn notw_4_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
 /// supported architectures.
 #[inline]
 pub fn notw_8_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
+    // WebAssembly SIMD tier: route f64/f32 through the `simd128` backend.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "wasm"))]
+    {
+        if TypeId::of::<T>() == TypeId::of::<f64>() {
+            // Safety: verified T is f64, so the memory layout is identical.
+            let x_f64 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f64>>(), x.len())
+            };
+            wasm_backend::notw_8_wasm_f64(x_f64, sign);
+            return;
+        }
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // Safety: verified T is f32, so the memory layout is identical.
+            let x_f32 = unsafe {
+                core::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<Complex<f32>>(), x.len())
+            };
+            wasm_backend::notw_8_wasm_f32(x_f32, sign);
+            return;
+        }
+    }
     // Delegate to the generated dispatcher: handles both f64 (SIMD) and f32 (SIMD).
     super::generated_simd::generated_simd_8_dispatch(x, sign);
 }
@@ -95,8 +162,17 @@ pub fn notw_8_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
 ///
 /// On x86_64 with AVX-512F: uses hand-tuned AVX-512 codelet (f64 and f32).
 /// Otherwise uses scalar optimized codelet.
+///
+/// # Panics
+/// Panics unless `x.len() == 16`.
 #[inline]
 pub fn notw_16_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
+    // Length guard: on x86_64 + `avx512` this forwards into a raw-pointer
+    // codelet that always touches exactly 16 elements, and the transmuting
+    // `from_raw_parts_mut` below reinterprets the caller's slice. Rejecting
+    // any other length here keeps this safe, publicly reachable entry point
+    // from turning a short slice into out-of-bounds access.
+    assert_eq!(x.len(), 16, "notw_16_dispatch requires exactly 16 elements");
     // --- x86_64: try hand-tuned AVX-512 first ---
     #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     {
@@ -136,8 +212,17 @@ fn notw_16_simd_f64_fallback<T: Float>(x: &mut [Complex<T>], sign: i32) {
 ///
 /// On x86_64 with AVX-512F: uses hand-tuned AVX-512 codelet (f64 and f32).
 /// Otherwise uses scalar optimized codelet.
+///
+/// # Panics
+/// Panics unless `x.len() == 32`.
 #[inline]
 pub fn notw_32_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
+    // Length guard: on x86_64 + `avx512` this forwards into a raw-pointer
+    // codelet that always touches exactly 32 elements, and the transmuting
+    // `from_raw_parts_mut` below reinterprets the caller's slice. Rejecting
+    // any other length here keeps this safe, publicly reachable entry point
+    // from turning a short slice into out-of-bounds access.
+    assert_eq!(x.len(), 32, "notw_32_dispatch requires exactly 32 elements");
     // --- x86_64: try hand-tuned AVX-512 first ---
     #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     {
@@ -177,8 +262,17 @@ fn notw_32_simd_f64_fallback<T: Float>(x: &mut [Complex<T>], sign: i32) {
 ///
 /// On x86_64 with AVX-512F: uses hand-tuned AVX-512 codelet (f64 and f32).
 /// Otherwise uses SIMD or scalar optimized codelet.
+///
+/// # Panics
+/// Panics unless `x.len() == 64`.
 #[inline]
 pub fn notw_64_dispatch<T: Float>(x: &mut [Complex<T>], sign: i32) {
+    // Length guard: on x86_64 + `avx512` this forwards into a raw-pointer
+    // codelet that always touches exactly 64 elements, and the transmuting
+    // `from_raw_parts_mut` below reinterprets the caller's slice. Rejecting
+    // any other length here keeps this safe, publicly reachable entry point
+    // from turning a short slice into out-of-bounds access.
+    assert_eq!(x.len(), 64, "notw_64_dispatch requires exactly 64 elements");
     // --- x86_64: try hand-tuned AVX-512 first ---
     #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     {

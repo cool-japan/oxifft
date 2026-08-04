@@ -167,11 +167,18 @@ benchmark candidates and cache the winner.
 
 ## SIMD Architecture
 
-Runtime CPU feature detection selects the best backend:
+Runtime CPU feature detection selects the best backend. **Reached today** are
+the x86_64 (SSE2/AVX/AVX2/AVX-512) and aarch64 NEON tiers, on small fixed-size
+codelets and Rader/Bluestein pointwise multiplies, plus the wasm32 `simd128`
+tier for the size-2/4/8 codelets (`dft::codelets::simd::wasm_backend`, reached
+from `notw_{2,4,8}_dispatch` when compiled with `-C target-feature=+simd128`).
+SVE is the one entry below that is still **planned rather than reached**: it is
+capability/vector-length detection only, because stable Rust exposes no
+scalable-vector intrinsics to build a real SVE kernel with.
 
 - **x86_64**: AVX-512 > AVX2 > AVX > SSE2 > scalar
-- **aarch64**: SVE > NEON > scalar
-- **wasm32**: simd128 > scalar
+- **aarch64**: (SVE, planned — no stable intrinsics) > NEON > scalar
+- **wasm32**: simd128 (sizes 2/4/8) > scalar
 - **other**: scalar fallback
 
 For detailed algorithm citations and implementation notes, see the inline rustdoc comments

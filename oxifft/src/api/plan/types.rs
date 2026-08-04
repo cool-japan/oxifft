@@ -247,23 +247,47 @@ pub struct Plan<T: Float> {
 
 /// Attempt to reconstruct an [`Algorithm<T>`] from a stored solver name string.
 ///
-/// Returns `None` when the name is unrecognised or the algorithm requires
-/// state that cannot be reconstructed from the name alone (e.g. `Generic`
-/// needs a `GenericSolver` which stores pre-computed twiddle tables).  The
-/// caller should fall back to heuristic planning in that case.
+/// Returns `None` when the name is unrecognised, when the named algorithm is
+/// **not applicable to `n`**, or when the algorithm requires state that cannot
+/// be reconstructed from the name alone (e.g. `Generic` needs a
+/// `GenericSolver` which stores pre-computed twiddle tables).  The caller
+/// should fall back to heuristic planning in that case.
+///
+/// # Untrusted input
+///
+/// Solver names reach this function straight from wisdom, and wisdom can be
+/// imported from a file, a string, or the system wisdom paths — i.e. it is
+/// attacker-influenceable data.  A wisdom entry only stores `(size, name,
+/// cost)`, so *every* arm must re-derive applicability from `n` rather than
+/// trusting the name.  Skipping that check is not merely a performance bug:
+/// a planted `(1024 "nop" 1.0)` line would reconstruct [`Algorithm::Nop`] for
+/// a 1024-point transform, and `execute_inplace` would then hand the caller
+/// its own input back as an "FFT result", silently.  Likewise `(6 "ct-dit")`
+/// would drive the radix-2 engine at a non-power-of-two size, whose own
+/// applicability guards are `debug_assert!` only and therefore absent in
+/// release builds.
 #[cfg(feature = "std")]
 fn algorithm_from_solver_name<T: Float>(name: &str, n: usize) -> Option<Algorithm<T>> {
     use crate::dft::solvers::CtVariant;
 
+    // Every Cooley-Tukey variant (DIT, DIF, radix-4, radix-8, split-radix)
+    // bit-reverses over `n` and therefore requires a power of two; the
+    // radix-4/8 engines internally fall back to radix-2 stages for exponents
+    // that are not multiples of 2/3, so a power of two is the full condition.
+    let ct_ok = CooleyTukeySolver::<T>::applicable(n);
+
     match name {
-        "nop" => Some(Algorithm::Nop),
+        // Nop is only correct for the trivial transforms; for anything larger
+        // it either panics (`execute`) or silently no-ops (`execute_inplace`).
+        "nop" if NopSolver::<T>::applicable(n) => Some(Algorithm::Nop),
+        // The O(n²) reference solver is correct for every size.
         "direct" => Some(Algorithm::Direct),
-        "ct-dit" => Some(Algorithm::CooleyTukey(CtVariant::Dit)),
-        "ct-dif" => Some(Algorithm::CooleyTukey(CtVariant::Dif)),
-        "ct-radix4" => Some(Algorithm::CooleyTukey(CtVariant::DitRadix4)),
-        "ct-radix8" => Some(Algorithm::CooleyTukey(CtVariant::DitRadix8)),
-        "ct-splitradix" => Some(Algorithm::CooleyTukey(CtVariant::SplitRadix)),
-        "stockham" => Some(Algorithm::Stockham),
+        "ct-dit" if ct_ok => Some(Algorithm::CooleyTukey(CtVariant::Dit)),
+        "ct-dif" if ct_ok => Some(Algorithm::CooleyTukey(CtVariant::Dif)),
+        "ct-radix4" if ct_ok => Some(Algorithm::CooleyTukey(CtVariant::DitRadix4)),
+        "ct-radix8" if ct_ok => Some(Algorithm::CooleyTukey(CtVariant::DitRadix8)),
+        "ct-splitradix" if ct_ok => Some(Algorithm::CooleyTukey(CtVariant::SplitRadix)),
+        "stockham" if StockhamSolver::<T>::applicable(n) => Some(Algorithm::Stockham),
         "composite" if crate::dft::codelets::has_composite_codelet(n) => {
             Some(Algorithm::Composite(n))
         }
@@ -296,7 +320,9 @@ fn algorithm_from_solver_name<T: Float>(name: &str, n: usize) -> Option<Algorith
         // Stateful solvers — reconstructed from the transform size `n`, which is
         // the only extra state they need.  This is what lets measured/imported
         // wisdom actually feed back into plan selection.
-        "bluestein" => Some(Algorithm::Bluestein(Box::new(BluesteinSolver::new(n)))),
+        "bluestein" if BluesteinSolver::<T>::applicable(n) => {
+            Some(Algorithm::Bluestein(Box::new(BluesteinSolver::new(n))))
+        }
         "generic" if GenericSolver::<T>::applicable(n) => {
             Some(Algorithm::Generic(Box::new(GenericSolver::new(n))))
         }
@@ -1673,5 +1699,89 @@ mod parallel_plan_tests {
             t_four < t_single * 0.80,
             "4-thread ({t_four:.4}s) not significantly faster than 1-thread ({t_single:.4}s)"
         );
+    }
+}
+
+// ============================================================================
+// Regression tests: wisdom solver-name applicability gating
+// ============================================================================
+
+/// Wisdom is untrusted input (it can be imported from a string, a file, or the
+/// system wisdom paths), and a wisdom entry is only `(size, solver_name,
+/// cost)`.  `algorithm_from_solver_name` therefore has to re-derive
+/// applicability from the size for *every* name.  These tests pin the arms
+/// that previously had no gate at all.
+#[cfg(all(test, feature = "std"))]
+mod solver_name_gate_tests {
+    use super::*;
+
+    /// A planted `(1024 "nop" …)` entry used to reconstruct
+    /// [`Algorithm::Nop`], after which `Plan::execute_inplace` handed the
+    /// caller its own input back as an "FFT result" — silently wrong output
+    /// from untrusted data.  `Plan::execute` panicked instead.
+    #[test]
+    fn nop_name_rejected_above_the_trivial_sizes() {
+        for n in [2_usize, 3, 64, 1024] {
+            assert!(
+                Plan::<f64>::from_solver_name(n, Direction::Forward, "nop").is_none(),
+                "\"nop\" must not be accepted for n={n}"
+            );
+        }
+        // Still accepted where it is genuinely the right answer.
+        assert!(Plan::<f64>::from_solver_name(0, Direction::Forward, "nop").is_some());
+        assert!(Plan::<f64>::from_solver_name(1, Direction::Forward, "nop").is_some());
+    }
+
+    /// `(6 "ct-dit" …)` used to build a radix-2 Cooley-Tukey plan for a
+    /// non-power-of-two size; the solver's own guard is `debug_assert!` only,
+    /// so release builds computed garbage.  Same for every CT variant and for
+    /// Stockham.
+    #[test]
+    fn power_of_two_only_names_rejected_for_other_sizes() {
+        const NAMES: [&str; 6] = [
+            "ct-dit",
+            "ct-dif",
+            "ct-radix4",
+            "ct-radix8",
+            "ct-splitradix",
+            "stockham",
+        ];
+        for name in NAMES {
+            for n in [0_usize, 3, 6, 10, 12, 100, 1023] {
+                assert!(
+                    Plan::<f64>::from_solver_name(n, Direction::Forward, name).is_none(),
+                    "{name:?} must not be accepted for non-power-of-two n={n}"
+                );
+            }
+            assert!(
+                Plan::<f64>::from_solver_name(64, Direction::Forward, name).is_some(),
+                "{name:?} must still be accepted for n=64"
+            );
+        }
+    }
+
+    /// Bluestein needs a non-empty transform; `BluesteinSolver::new(0)` is not
+    /// a meaningful plan.
+    #[test]
+    fn bluestein_name_rejected_for_empty_transform() {
+        assert!(Plan::<f64>::from_solver_name(0, Direction::Forward, "bluestein").is_none());
+        assert!(Plan::<f64>::from_solver_name(11, Direction::Forward, "bluestein").is_some());
+    }
+
+    /// A gated-out name must not silently degrade the transform: planning
+    /// falls back to the heuristic, which still produces a correct FFT.
+    #[test]
+    fn rejected_name_falls_back_to_a_correct_plan() {
+        // `from_solver_name` refuses, so the caller (dft_1d) keeps searching.
+        assert!(Plan::<f64>::from_solver_name(6, Direction::Forward, "ct-dit").is_none());
+
+        let plan = Plan::<f64>::dft_1d(6, Direction::Forward, Flags::ESTIMATE)
+            .expect("heuristic planning for n=6 must succeed");
+        let input: Vec<Complex<f64>> = (0..6).map(|i| Complex::new(i as f64, 0.0)).collect();
+        let mut output = vec![Complex::<f64>::zero(); 6];
+        plan.execute(&input, &mut output);
+        // DC bin is the sum: 0+1+2+3+4+5 = 15.
+        assert!((output[0].re - 15.0).abs() < 1e-10);
+        assert!(output[0].im.abs() < 1e-10);
     }
 }

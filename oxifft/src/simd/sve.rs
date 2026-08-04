@@ -20,9 +20,22 @@
 //!
 //! # Current Implementation
 //!
-//! This module provides SVE-compatible wrappers that use the portable SIMD
-//! backend internally, providing a migration path for when Rust's SVE
-//! intrinsics stabilize.
+//! The `sve` feature currently provides **capability and vector-length
+//! detection only** — it is *not* yet wired into any transform (butterfly /
+//! twiddle) path:
+//!
+//! - [`has_sve`] reports whether the running CPU implements SVE (via
+//!   `std::arch::is_aarch64_feature_detected!`, pure Rust — no `libc`).
+//! - [`sve_vector_length_bytes`] / [`sve_f64_lanes`] / [`sve_f32_lanes`] report
+//!   the runtime SVE vector length. On aarch64 Linux this is read from the
+//!   kernel's `/proc/sys/abi/sve_default_vector_length` sysctl with std file
+//!   I/O and validated by [`parse_sve_vector_length_bytes`]; on other targets
+//!   (no such sysctl exists) they report `0`, signalling a NEON/scalar
+//!   fallback.
+//! - [`Sve256F64`] / [`Sve256F32`] are fixed-width **portable scalar** wrappers
+//!   (plain `[f64; 4]` / `[f32; 8]` arithmetic), not SVE intrinsics. They exist
+//!   as a migration target for when Rust's scalable-vector intrinsics stabilize
+//!   and are currently reached by no FFT codelet.
 
 use super::traits::{SimdComplex, SimdVector};
 
@@ -47,12 +60,42 @@ pub fn sve_vector_length_bytes() -> usize {
     0
 }
 
+/// Parse a raw SVE vector-length string into a length in bytes.
+///
+/// The input is the textual contents of the kernel's
+/// `/proc/sys/abi/sve_default_vector_length` sysctl (or an equivalent source).
+/// Surrounding whitespace / a trailing newline is ignored.
+///
+/// Returns `Some(bytes)` only for a value the SVE architecture permits: a
+/// non-zero multiple of 16 bytes (128 bits) that is at most 256 bytes
+/// (2048 bits). Every other input — non-numeric, zero, not a multiple of 16,
+/// or out of range — yields `None`, so a corrupt or unexpected sysctl value can
+/// never be mistaken for a real vector length.
+///
+/// This helper is target-independent so it can be unit-tested on any host, and
+/// is re-exported (see [`crate::simd`]) so it is part of the crate's public
+/// surface rather than dead code on non-Linux targets.
+#[must_use]
+pub fn parse_sve_vector_length_bytes(raw: &str) -> Option<usize> {
+    let bytes: usize = raw.trim().parse().ok()?;
+    if bytes == 0 || !bytes.is_multiple_of(16) || bytes > 256 {
+        return None;
+    }
+    Some(bytes)
+}
+
 /// Detect SVE vector length.
 #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
 fn detect_sve_length() -> usize {
-    // Read from /proc/sys/abi/sve_default_vector_length or use getauxval
-    // For safety, return 0 and let caller fallback to NEON
-    0
+    // The Linux kernel exposes the current default SVE vector length (in bytes)
+    // via this sysctl. Read it with std file I/O — pure Rust, no `libc`/HWCAP
+    // FFI — and validate before trusting it. Any error (feature absent, file
+    // missing, unreadable, or a value outside the architectural range) falls
+    // back to 0, which callers treat as "no SVE, use NEON/scalar".
+    std::fs::read_to_string("/proc/sys/abi/sve_default_vector_length")
+        .ok()
+        .and_then(|contents| parse_sve_vector_length_bytes(&contents))
+        .unwrap_or(0)
 }
 
 #[cfg(all(target_arch = "aarch64", not(target_os = "linux")))]
@@ -721,6 +764,39 @@ mod tests {
         // First complex: (3+4i) * (1+2i) = -5 + 10i
         assert!((c.extract(0) - (-5.0)).abs() < tol);
         assert!((c.extract(1) - 10.0).abs() < tol);
+    }
+
+    #[test]
+    fn test_parse_sve_vector_length_bytes() {
+        // Valid architectural lengths (multiples of 16, 128..=2048 bits).
+        assert_eq!(parse_sve_vector_length_bytes("16\n"), Some(16)); // 128-bit
+        assert_eq!(parse_sve_vector_length_bytes("32\n"), Some(32)); // Graviton3 256-bit
+        assert_eq!(parse_sve_vector_length_bytes("  64 "), Some(64)); // A64FX 512-bit
+        assert_eq!(parse_sve_vector_length_bytes("256"), Some(256)); // max 2048-bit
+
+        // Rejected: zero, non-numeric, empty, non-multiple-of-16, out of range.
+        assert_eq!(parse_sve_vector_length_bytes("0"), None);
+        assert_eq!(parse_sve_vector_length_bytes("garbage"), None);
+        assert_eq!(parse_sve_vector_length_bytes(""), None);
+        assert_eq!(parse_sve_vector_length_bytes("24"), None); // not a multiple of 16
+        assert_eq!(parse_sve_vector_length_bytes("8192"), None); // > 256 bytes
+        assert_eq!(parse_sve_vector_length_bytes("-16"), None); // negative
+    }
+
+    #[test]
+    fn test_sve_lanes_consistent_with_length() {
+        // On the primary (non-Linux aarch64 / non-SVE) hosts the reported length
+        // is 0, and the lane helpers must agree rather than dividing by a stale
+        // width. Where a real length is present it is a validated multiple of 16.
+        let bytes = sve_vector_length_bytes();
+        if bytes == 0 {
+            assert_eq!(sve_f64_lanes(), 0);
+            assert_eq!(sve_f32_lanes(), 0);
+        } else {
+            assert_eq!(bytes % 16, 0);
+            assert_eq!(sve_f64_lanes(), bytes / 8);
+            assert_eq!(sve_f32_lanes(), bytes / 4);
+        }
     }
 
     #[test]

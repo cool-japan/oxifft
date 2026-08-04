@@ -32,12 +32,25 @@ impl Sign {
 /// operations ([`Self::zero`] via the [`Problem`] trait, and the `solve` method
 /// of [`crate::dft::DftPlan`]) rely on the construction-time contract for their
 /// soundness.
+///
+/// For that reasoning to hold, the *size* fields must be immutable from safe
+/// code too: if `sz` were publicly writable, a caller holding a legitimately
+/// constructed descriptor could enlarge it after the fact and make `solve`
+/// build a slice far longer than the buffer the `unsafe` constructor was
+/// promised. They are therefore `pub(crate)` and exposed read-only through
+/// [`Self::sz`] / [`Self::vecsz`]. As belt-and-braces, the element count
+/// recorded at construction time (`buffer_len`) — not the possibly-derived
+/// tensor product — is what bounds every raw-pointer access.
 #[derive(Debug, Clone)]
 pub struct DftProblem<T: Float> {
     /// Transform dimensions with strides.
-    pub sz: Tensor,
+    pub(crate) sz: Tensor,
     /// Batch/vector dimensions.
-    pub vecsz: Tensor,
+    pub(crate) vecsz: Tensor,
+    /// Number of `Complex<T>` elements the constructor's caller promised each
+    /// buffer is valid for. This is the authoritative bound for all
+    /// raw-pointer access; it can never be changed after construction.
+    pub(crate) buffer_len: usize,
     /// Input buffer pointer.
     pub(crate) input: *mut Complex<T>,
     /// Output buffer pointer.
@@ -78,6 +91,7 @@ impl<T: Float> DftProblem<T> {
         Self {
             sz: Tensor::rank1(n),
             vecsz: Tensor::empty(),
+            buffer_len: n,
             input,
             output,
             sign,
@@ -88,7 +102,9 @@ impl<T: Float> DftProblem<T> {
     ///
     /// # Safety
     /// Same contract as [`Self::new_1d`], with the element count taken to be
-    /// `n0 * n1`.
+    /// `n0 * n1`. If that product overflows `usize` the problem is degenerate
+    /// (no buffer can be that long); it is recorded as empty, so `solve`/`zero`
+    /// become no-ops rather than reading a wrapped length.
     #[must_use]
     pub unsafe fn new_2d(
         n0: usize,
@@ -100,10 +116,34 @@ impl<T: Float> DftProblem<T> {
         Self {
             sz: Tensor::rank2(n0, n1),
             vecsz: Tensor::empty(),
+            buffer_len: n0.checked_mul(n1).unwrap_or(0),
             input,
             output,
             sign,
         }
+    }
+
+    /// Transform dimensions with strides.
+    ///
+    /// Read-only: see the type-level documentation for why safe code must not
+    /// be able to change the descriptor's extent after construction.
+    #[must_use]
+    pub const fn sz(&self) -> &Tensor {
+        &self.sz
+    }
+
+    /// Batch/vector dimensions.
+    ///
+    /// Read-only for the same reason as [`Self::sz`].
+    #[must_use]
+    pub const fn vecsz(&self) -> &Tensor {
+        &self.vecsz
+    }
+
+    /// Number of `Complex<T>` elements each buffer is guaranteed valid for.
+    #[must_use]
+    pub const fn buffer_len(&self) -> usize {
+        self.buffer_len
     }
 
     /// Check if this is an in-place transform.
@@ -144,8 +184,11 @@ impl<T: Float> Problem for DftProblem<T> {
     }
 
     fn zero(&self) {
-        // Zero the output buffer
-        let size = self.sz.total_size() * self.vecsz.total_size().max(1);
+        // Zero the output buffer.  The bound is the construction-time element
+        // count, never a product recomputed from the tensors: that product is
+        // what the `unsafe` constructor's caller actually vouched for, and it
+        // cannot overflow or be enlarged afterwards.
+        let size = self.buffer_len;
         unsafe {
             for i in 0..size {
                 *self.output.add(i) = Complex::zero();
@@ -154,7 +197,10 @@ impl<T: Float> Problem for DftProblem<T> {
     }
 
     fn total_size(&self) -> usize {
-        self.transform_size() * self.batch_size()
+        // Saturating: a descriptor whose extents overflow describes no buffer
+        // that can exist, and this is a plain reporting accessor — it must not
+        // become a panic (debug) / wrapping surprise (release).
+        self.transform_size().saturating_mul(self.batch_size())
     }
 
     fn is_inplace(&self) -> bool {
@@ -187,6 +233,57 @@ mod tests {
         for bin in &output[1..] {
             assert!(bin.re.abs() < 1e-10 && bin.im.abs() < 1e-10);
         }
+    }
+
+    /// Regression: the size tensors must not be reachable (let alone writable)
+    /// from safe code, and every raw-pointer access must be bounded by the
+    /// element count the `unsafe` constructor was given.
+    ///
+    /// Previously `sz` was a `pub` field, so a caller holding a legitimately
+    /// constructed 8-element problem could write
+    /// `problem.sz = Tensor::rank1(1 << 20);` in entirely safe code and then
+    /// call the safe `DftPlan::solve`, which built an 8-element buffer into a
+    /// 1 Mi-element slice via `from_raw_parts_mut`.
+    #[test]
+    fn buffer_len_records_the_construction_time_element_count() {
+        let mut input = vec![Complex::new(1.0_f64, 0.0); 8];
+        let mut output = vec![Complex::zero(); 8];
+
+        // SAFETY: valid, non-overlapping, aligned length-8 buffers used only here.
+        let problem = unsafe {
+            DftProblem::new_1d(8, input.as_mut_ptr(), output.as_mut_ptr(), Sign::Forward)
+        };
+        assert_eq!(problem.buffer_len(), 8);
+        assert_eq!(problem.sz().total_size(), 8);
+        assert!(problem.vecsz().is_empty());
+        // `sz` is read-only: `problem.sz = ...` no longer compiles.
+    }
+
+    /// A 2D problem whose `n0 * n1` overflows cannot describe any real buffer;
+    /// it must be recorded as empty so `solve`/`zero` stay no-ops instead of
+    /// writing through a wrapped length.
+    #[test]
+    fn overflowing_2d_extent_is_recorded_as_empty() {
+        let mut buf = vec![Complex::new(1.0_f64, 2.0); 4];
+        // SAFETY: the extents are degenerate, which is exactly what is under
+        // test; `buffer_len` becomes 0 so no element is ever accessed.
+        let problem = unsafe {
+            DftProblem::new_2d(
+                1_usize << 63,
+                2,
+                buf.as_mut_ptr(),
+                buf.as_mut_ptr(),
+                Sign::Forward,
+            )
+        };
+        assert_eq!(problem.buffer_len(), 0);
+
+        let plan = DftPlan::<f64>::new("test-dft", OpCount::zero());
+        plan.solve(&problem);
+        problem.zero();
+
+        // Nothing was touched.
+        assert!(buf.iter().all(|c| c.re == 1.0 && c.im == 2.0));
     }
 
     #[test]

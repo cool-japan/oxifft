@@ -876,3 +876,89 @@ fn test_user_wisdom_path() {
     // Just verify it doesn't panic
     let _path = get_user_wisdom_path();
 }
+
+// ── Hostile wisdom: solver names must be re-validated against the size ─────
+
+/// End-to-end version of the `algorithm_from_solver_name` gating regression.
+///
+/// A wisdom line `(64 "nop" 1.0)` is entirely well-formed — the hash is
+/// non-zero, the name is non-empty, the cost is finite — so `is_valid_entry`
+/// accepts it and it lands in the global cache.  Before the fix, planning a
+/// 64-point transform in a wisdom-backed mode reconstructed `Algorithm::Nop`
+/// from it, and `execute_inplace` (a no-op for Nop) returned the caller's
+/// input unchanged as an "FFT result".
+#[test]
+fn test_planted_nop_wisdom_cannot_forge_an_identity_fft() {
+    let _guard = GLOBAL_WISDOM_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    forget();
+
+    let hostile = format!("({WISDOM_MARKER}\n  (format_version 1)\n  (64 \"nop\" 1.0)\n)");
+    let result = import_from_string(&hostile).expect("hostile wisdom is structurally valid");
+    assert_eq!(result.imported, 1, "the entry itself is well-formed");
+
+    let plan = crate::api::Plan::<f64>::dft_1d(
+        64,
+        crate::api::Direction::Forward,
+        crate::api::Flags::MEASURE,
+    )
+    .expect("planning must succeed despite the hostile entry");
+
+    let mut data: Vec<crate::Complex<f64>> = (0..64)
+        .map(|i| crate::Complex::new(i as f64, 0.0))
+        .collect();
+    let original = data.clone();
+    plan.execute_inplace(&mut data);
+
+    // DC bin of 0..63 is 63*64/2 = 2016 — i.e. a real transform ran.
+    assert!(
+        (data[0].re - 2016.0).abs() < 1e-6,
+        "expected a real 64-point FFT, got {:?}",
+        data[0]
+    );
+    assert!(
+        data.iter()
+            .zip(&original)
+            .any(|(a, b)| (a.re - b.re).abs() > 1e-9),
+        "the buffer must not have been returned unchanged"
+    );
+
+    forget();
+}
+
+/// The same shape for a Cooley-Tukey name at a non-power-of-two size:
+/// `(6 "ct-dit" 1.0)` must not drive the radix-2 engine (whose applicability
+/// guard is `debug_assert!` only, hence absent in release builds).
+#[test]
+fn test_planted_ct_wisdom_at_non_power_of_two_is_ignored() {
+    let _guard = GLOBAL_WISDOM_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    forget();
+
+    let hostile = format!("({WISDOM_MARKER}\n  (format_version 1)\n  (6 \"ct-dit\" 1.0)\n)");
+    let imported = import_from_string(&hostile).expect("hostile wisdom is structurally valid");
+    assert_eq!(imported.imported, 1, "the entry itself is well-formed");
+
+    let plan = crate::api::Plan::<f64>::dft_1d(
+        6,
+        crate::api::Direction::Forward,
+        crate::api::Flags::MEASURE,
+    )
+    .expect("planning must succeed despite the hostile entry");
+
+    let input: Vec<crate::Complex<f64>> =
+        (0..6).map(|i| crate::Complex::new(i as f64, 0.0)).collect();
+    let mut output = vec![crate::Complex::<f64>::zero(); 6];
+    plan.execute(&input, &mut output);
+
+    // DC bin = 0+1+2+3+4+5 = 15.
+    assert!(
+        (output[0].re - 15.0).abs() < 1e-9,
+        "expected a real 6-point FFT, got {:?}",
+        output[0]
+    );
+
+    forget();
+}

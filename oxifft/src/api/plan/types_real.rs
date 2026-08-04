@@ -398,6 +398,14 @@ impl<T: Float> RealPlan3D<T> {
         })
     }
     /// Execute R2C transform.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input`/`output` don't have the expected lengths, or if the
+    /// internal 2D plan constructor rejects `self.n1`/`self.n2`. The latter
+    /// cannot currently happen: [`Self::r2c`] already rejects `n0 == 0 ||
+    /// n1 == 0 || n2 == 0` at construction, which is the only condition the
+    /// internal constructor checks.
     pub fn execute_r2c(&self, input: &[T], output: &mut [Complex<T>]) {
         assert_eq!(self.kind, RealPlanKind::R2C);
         let expected_in = self.n0 * self.n1 * self.n2;
@@ -436,6 +444,14 @@ impl<T: Float> RealPlan3D<T> {
     /// normalization convention (it deliberately differs from FFTW). Use
     /// [`execute_c2r_unnormalized`](Self::execute_c2r_unnormalized) for the raw,
     /// FFTW-style result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input`/`output` don't have the expected lengths, or if the
+    /// internal 2D plan constructor rejects `self.n1`/`self.n2`. The latter
+    /// cannot currently happen: [`Self::c2r`] already rejects `n0 == 0 ||
+    /// n1 == 0 || n2 == 0` at construction, which is the only condition the
+    /// internal constructor checks.
     pub fn execute_c2r(&self, input: &[Complex<T>], output: &mut [T]) {
         self.c2r_into_raw(input, output);
         let scale = T::one() / T::from_usize(self.n0 * self.n1 * self.n2);
@@ -447,6 +463,11 @@ impl<T: Float> RealPlan3D<T> {
     ///
     /// The result is scaled by `n0 * n1 * n2` relative to
     /// [`execute_c2r`](Self::execute_c2r).
+    ///
+    /// # Panics
+    ///
+    /// See [`execute_c2r`](Self::execute_c2r) — both share the same
+    /// underlying pipeline and panic conditions.
     pub fn execute_c2r_unnormalized(&self, input: &[Complex<T>], output: &mut [T]) {
         self.c2r_into_raw(input, output);
     }

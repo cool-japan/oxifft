@@ -58,7 +58,14 @@ pub fn mod_inv(a: usize, m: usize) -> Option<usize> {
 /// * `sign`    — −1 for forward DFT, +1 for inverse DFT
 ///
 /// # Panics
-/// Panics if `n1 * n2 != input.len()` or gcd(n1, n2) != 1 (in debug builds).
+/// Panics if `n1 * n2 != input.len()` or `output.len()` (**debug builds
+/// only** — `debug_assert_eq!`). Panics if `n1` and `n2` are not coprime
+/// (`gcd(n1, n2) != 1`, so no modular inverse exists) — **in every build
+/// profile**, since the two `mod_inv(..).expect(..)` calls below are not
+/// `debug_assert`-gated. Every call site inside this crate only ever passes
+/// one of the coprime pairs `(3, 5)`, `(3, 7)`, `(5, 7)` (giving N = 15, 21,
+/// 35), for which `mod_inv` always succeeds; a caller supplying a non-coprime
+/// pair directly will hit the second panic.
 pub fn pfa_compose<T, K1, K2>(
     input: &[Complex<T>],
     output: &mut [Complex<T>],

@@ -827,9 +827,20 @@ pub(crate) unsafe fn hand_avx512_size64_f32(data: *mut Complex<f32>, sign: i32) 
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Dispatch size-16 f64 DFT to hand-tuned AVX-512 if available, else scalar.
+///
+/// # Panics
+/// Panics unless `data.len() == 16`. The AVX-512 codelet below is a
+/// raw-pointer kernel that unconditionally touches 16 elements, so this
+/// public, *safe* entry point must reject any other length here — otherwise
+/// safe caller code could drive an out-of-bounds read/write.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size16_f64(data: &mut [Complex<f64>], sign: i32) {
+    assert_eq!(
+        data.len(),
+        16,
+        "dispatch_hand_avx512_size16_f64 requires exactly 16 elements"
+    );
     if crate::detect_x86_feature!("avx512f") {
         // Safety: avx512f confirmed, data has exactly 16 elements.
         unsafe {
@@ -841,9 +852,20 @@ pub fn dispatch_hand_avx512_size16_f64(data: &mut [Complex<f64>], sign: i32) {
 }
 
 /// Dispatch size-32 f64 DFT to hand-tuned AVX-512 if available, else scalar.
+///
+/// # Panics
+/// Panics unless `data.len() == 32`. The AVX-512 codelet below is a
+/// raw-pointer kernel that unconditionally touches 32 elements, so this
+/// public, *safe* entry point must reject any other length here — otherwise
+/// safe caller code could drive an out-of-bounds read/write.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size32_f64(data: &mut [Complex<f64>], sign: i32) {
+    assert_eq!(
+        data.len(),
+        32,
+        "dispatch_hand_avx512_size32_f64 requires exactly 32 elements"
+    );
     if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size32_f64(data.as_mut_ptr(), sign);
@@ -854,9 +876,20 @@ pub fn dispatch_hand_avx512_size32_f64(data: &mut [Complex<f64>], sign: i32) {
 }
 
 /// Dispatch size-64 f64 DFT to hand-tuned AVX-512 if available, else scalar.
+///
+/// # Panics
+/// Panics unless `data.len() == 64`. The AVX-512 codelet below is a
+/// raw-pointer kernel that unconditionally touches 64 elements, so this
+/// public, *safe* entry point must reject any other length here — otherwise
+/// safe caller code could drive an out-of-bounds read/write.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size64_f64(data: &mut [Complex<f64>], sign: i32) {
+    assert_eq!(
+        data.len(),
+        64,
+        "dispatch_hand_avx512_size64_f64 requires exactly 64 elements"
+    );
     if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size64_f64(data.as_mut_ptr(), sign);
@@ -867,9 +900,20 @@ pub fn dispatch_hand_avx512_size64_f64(data: &mut [Complex<f64>], sign: i32) {
 }
 
 /// Dispatch size-16 f32 DFT to hand-tuned AVX-512 if available, else scalar.
+///
+/// # Panics
+/// Panics unless `data.len() == 16`. The AVX-512 codelet below is a
+/// raw-pointer kernel that unconditionally touches 16 elements, so this
+/// public, *safe* entry point must reject any other length here — otherwise
+/// safe caller code could drive an out-of-bounds read/write.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size16_f32(data: &mut [Complex<f32>], sign: i32) {
+    assert_eq!(
+        data.len(),
+        16,
+        "dispatch_hand_avx512_size16_f32 requires exactly 16 elements"
+    );
     if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size16_f32(data.as_mut_ptr(), sign);
@@ -880,9 +924,20 @@ pub fn dispatch_hand_avx512_size16_f32(data: &mut [Complex<f32>], sign: i32) {
 }
 
 /// Dispatch size-32 f32 DFT to hand-tuned AVX-512 if available, else scalar.
+///
+/// # Panics
+/// Panics unless `data.len() == 32`. The AVX-512 codelet below is a
+/// raw-pointer kernel that unconditionally touches 32 elements, so this
+/// public, *safe* entry point must reject any other length here — otherwise
+/// safe caller code could drive an out-of-bounds read/write.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size32_f32(data: &mut [Complex<f32>], sign: i32) {
+    assert_eq!(
+        data.len(),
+        32,
+        "dispatch_hand_avx512_size32_f32 requires exactly 32 elements"
+    );
     if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size32_f32(data.as_mut_ptr(), sign);
@@ -893,9 +948,20 @@ pub fn dispatch_hand_avx512_size32_f32(data: &mut [Complex<f32>], sign: i32) {
 }
 
 /// Dispatch size-64 f32 DFT to hand-tuned AVX-512 if available, else scalar.
+///
+/// # Panics
+/// Panics unless `data.len() == 64`. The AVX-512 codelet below is a
+/// raw-pointer kernel that unconditionally touches 64 elements, so this
+/// public, *safe* entry point must reject any other length here — otherwise
+/// safe caller code could drive an out-of-bounds read/write.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn dispatch_hand_avx512_size64_f32(data: &mut [Complex<f32>], sign: i32) {
+    assert_eq!(
+        data.len(),
+        64,
+        "dispatch_hand_avx512_size64_f32 requires exactly 64 elements"
+    );
     if crate::detect_x86_feature!("avx512f") {
         unsafe {
             hand_avx512_size64_f32(data.as_mut_ptr(), sign);

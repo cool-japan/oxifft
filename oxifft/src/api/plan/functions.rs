@@ -140,6 +140,12 @@ fn normalize_split<T: Float>(re: &mut [T], im: &mut [T], total: usize) {
 /// Convenience function for split-complex FFT.
 ///
 /// Computes the forward FFT of split-complex input.
+///
+/// # Panics
+///
+/// Panics if the internal plan constructor rejects the transform size. This
+/// function always plans with `Flags::ESTIMATE`, which does not reject any
+/// size in the current implementation, so this should not happen.
 pub fn fft_split<T: Float>(in_real: &[T], in_imag: &[T]) -> (Vec<T>, Vec<T>) {
     let n = in_real.len();
     assert_eq!(
@@ -160,6 +166,12 @@ pub fn fft_split<T: Float>(in_real: &[T], in_imag: &[T]) -> (Vec<T>, Vec<T>) {
 /// Convenience function for split-complex IFFT.
 ///
 /// Computes the inverse FFT of split-complex input, with normalization.
+///
+/// # Panics
+///
+/// Panics if the internal plan constructor rejects the transform size. This
+/// function always plans with `Flags::ESTIMATE`, which does not reject any
+/// size in the current implementation, so this should not happen.
 pub fn ifft_split<T: Float>(in_real: &[T], in_imag: &[T]) -> (Vec<T>, Vec<T>) {
     let n = in_real.len();
     assert_eq!(
@@ -253,6 +265,13 @@ pub fn irfft_batch<T: Float>(input: &[Complex<T>], n: usize, howmany: usize) -> 
 /// Convenience function for 2D Real-to-Complex FFT.
 ///
 /// Takes n0×n1 real values and produces n0×(n1/2+1) complex values.
+///
+/// # Panics
+///
+/// Panics if the internal plan constructor rejects a non-zero `n0`/`n1` (zero
+/// dimensions are already handled above and never reach it). This function
+/// always plans with `Flags::ESTIMATE`, which does not reject any size in the
+/// current implementation, so this should not happen.
 pub fn rfft2d<T: Float>(input: &[T], n0: usize, n1: usize) -> Vec<Complex<T>> {
     // Degenerate zero-size transform: return empty, matching `fft_split`'s
     // convention, instead of panicking inside the plan constructor.
@@ -270,6 +289,13 @@ pub fn rfft2d<T: Float>(input: &[T], n0: usize, n1: usize) -> Vec<Complex<T>> {
 /// Convenience function for 2D Complex-to-Real FFT with normalization.
 ///
 /// Takes n0×(n1/2+1) complex values and produces n0×n1 real values.
+///
+/// # Panics
+///
+/// Panics if the internal plan constructor rejects a non-zero `n0`/`n1` (zero
+/// dimensions are already handled above and never reach it). This function
+/// always plans with `Flags::ESTIMATE`, which does not reject any size in the
+/// current implementation, so this should not happen.
 pub fn irfft2d<T: Float>(input: &[Complex<T>], n0: usize, n1: usize) -> Vec<T> {
     if n0 == 0 || n1 == 0 {
         return Vec::new();
@@ -291,6 +317,13 @@ pub fn irfft2d<T: Float>(input: &[Complex<T>], n0: usize, n1: usize) -> Vec<T> {
 /// Convenience function for 3D Real-to-Complex FFT.
 ///
 /// Takes n0×n1×n2 real values and produces n0×n1×(n2/2+1) complex values.
+///
+/// # Panics
+///
+/// Panics if the internal plan constructor rejects non-zero dimensions (zero
+/// dimensions are already handled above and never reach it). This function
+/// always plans with `Flags::ESTIMATE`, which does not reject any size in the
+/// current implementation, so this should not happen.
 pub fn rfft3d<T: Float>(input: &[T], n0: usize, n1: usize, n2: usize) -> Vec<Complex<T>> {
     if n0 == 0 || n1 == 0 || n2 == 0 {
         return Vec::new();
@@ -310,6 +343,13 @@ pub fn rfft3d<T: Float>(input: &[T], n0: usize, n1: usize, n2: usize) -> Vec<Com
 /// Convenience function for 3D Complex-to-Real FFT with normalization.
 ///
 /// Takes n0×n1×(n2/2+1) complex values and produces n0×n1×n2 real values.
+///
+/// # Panics
+///
+/// Panics if the internal plan constructor rejects non-zero dimensions (zero
+/// dimensions are already handled above and never reach it). This function
+/// always plans with `Flags::ESTIMATE`, which does not reject any size in the
+/// current implementation, so this should not happen.
 pub fn irfft3d<T: Float>(input: &[Complex<T>], n0: usize, n1: usize, n2: usize) -> Vec<T> {
     if n0 == 0 || n1 == 0 || n2 == 0 {
         return Vec::new();
@@ -330,6 +370,14 @@ pub fn irfft3d<T: Float>(input: &[Complex<T>], n0: usize, n1: usize, n2: usize) 
 /// Convenience function for N-dimensional Real-to-Complex FFT.
 ///
 /// Takes product(dims) real values and produces prefix×(last/2+1) complex values.
+///
+/// # Panics
+///
+/// Panics if `dims` is empty, or if the internal plan constructor rejects a
+/// `dims` slice that contains no zero (a zero dimension is already handled
+/// above and never reaches it). This function always plans with
+/// `Flags::ESTIMATE`, which does not reject any size in the current
+/// implementation, so the latter should not happen.
 pub fn rfft_nd<T: Float>(input: &[T], dims: &[usize]) -> Vec<Complex<T>> {
     assert!(!dims.is_empty(), "Dimensions cannot be empty");
     // Degenerate zero-size transform: return empty instead of panicking inside
@@ -356,6 +404,14 @@ pub fn rfft_nd<T: Float>(input: &[T], dims: &[usize]) -> Vec<Complex<T>> {
 /// Convenience function for N-dimensional Complex-to-Real FFT with normalization.
 ///
 /// Takes prefix×(last/2+1) complex values and produces product(dims) real values.
+///
+/// # Panics
+///
+/// Panics if `dims` is empty, or if the internal plan constructor rejects a
+/// `dims` slice that contains no zero (a zero dimension is already handled
+/// above and never reaches it). This function always plans with
+/// `Flags::ESTIMATE`, which does not reject any size in the current
+/// implementation, so the latter should not happen.
 pub fn irfft_nd<T: Float>(input: &[Complex<T>], dims: &[usize]) -> Vec<T> {
     assert!(!dims.is_empty(), "Dimensions cannot be empty");
     if dims.contains(&0) {
@@ -379,6 +435,13 @@ pub fn irfft_nd<T: Float>(input: &[Complex<T>], dims: &[usize]) -> Vec<T> {
     output
 }
 /// Convenience function for 2D split-complex forward FFT.
+///
+/// # Panics
+///
+/// Panics if `in_real`/`in_imag` don't have length `n0 * n1`, or if the
+/// internal plan constructor rejects `n0`/`n1`. This function always plans
+/// with `Flags::ESTIMATE`, which does not reject any size (including 0) in
+/// the current implementation, so the latter should not happen.
 pub fn fft2d_split<T: Float>(
     in_real: &[T],
     in_imag: &[T],
@@ -396,6 +459,13 @@ pub fn fft2d_split<T: Float>(
     (out_real, out_imag)
 }
 /// Convenience function for 2D split-complex inverse FFT with normalization.
+///
+/// # Panics
+///
+/// Panics if `in_real`/`in_imag` don't have length `n0 * n1`, or if the
+/// internal plan constructor rejects `n0`/`n1`. This function always plans
+/// with `Flags::ESTIMATE`, which does not reject any size (including 0) in
+/// the current implementation, so the latter should not happen.
 pub fn ifft2d_split<T: Float>(
     in_real: &[T],
     in_imag: &[T],
@@ -416,6 +486,13 @@ pub fn ifft2d_split<T: Float>(
     (out_real, out_imag)
 }
 /// Convenience function for 3D split-complex forward FFT.
+///
+/// # Panics
+///
+/// Panics if `in_real`/`in_imag` don't have length `n0 * n1 * n2`, or if the
+/// internal plan constructor rejects `n0`/`n1`/`n2`. This function always
+/// plans with `Flags::ESTIMATE`, which does not reject any size (including 0)
+/// in the current implementation, so the latter should not happen.
 pub fn fft3d_split<T: Float>(
     in_real: &[T],
     in_imag: &[T],
@@ -434,6 +511,13 @@ pub fn fft3d_split<T: Float>(
     (out_real, out_imag)
 }
 /// Convenience function for 3D split-complex inverse FFT with normalization.
+///
+/// # Panics
+///
+/// Panics if `in_real`/`in_imag` don't have length `n0 * n1 * n2`, or if the
+/// internal plan constructor rejects `n0`/`n1`/`n2`. This function always
+/// plans with `Flags::ESTIMATE`, which does not reject any size (including 0)
+/// in the current implementation, so the latter should not happen.
 pub fn ifft3d_split<T: Float>(
     in_real: &[T],
     in_imag: &[T],
@@ -455,6 +539,13 @@ pub fn ifft3d_split<T: Float>(
     (out_real, out_imag)
 }
 /// Convenience function for N-dimensional split-complex forward FFT.
+///
+/// # Panics
+///
+/// Panics if `in_real`/`in_imag` don't have length `dims.iter().product()`,
+/// or if the internal plan constructor rejects `dims` (including an empty
+/// `dims`). This function always plans with `Flags::ESTIMATE`, which does
+/// not reject any non-empty `dims` in the current implementation.
 pub fn fft_nd_split<T: Float>(in_real: &[T], in_imag: &[T], dims: &[usize]) -> (Vec<T>, Vec<T>) {
     let total: usize = dims.iter().product();
     assert_eq!(in_real.len(), total);
@@ -467,6 +558,13 @@ pub fn fft_nd_split<T: Float>(in_real: &[T], in_imag: &[T], dims: &[usize]) -> (
     (out_real, out_imag)
 }
 /// Convenience function for N-dimensional split-complex inverse FFT with normalization.
+///
+/// # Panics
+///
+/// Panics if `in_real`/`in_imag` don't have length `dims.iter().product()`,
+/// or if the internal plan constructor rejects `dims` (including an empty
+/// `dims`). This function always plans with `Flags::ESTIMATE`, which does
+/// not reject any non-empty `dims` in the current implementation.
 pub fn ifft_nd_split<T: Float>(in_real: &[T], in_imag: &[T], dims: &[usize]) -> (Vec<T>, Vec<T>) {
     let total: usize = dims.iter().product();
     assert_eq!(in_real.len(), total);

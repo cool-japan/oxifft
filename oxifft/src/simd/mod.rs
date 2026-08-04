@@ -156,8 +156,8 @@ pub use neon::{NeonF32, NeonF64};
 
 #[cfg(feature = "sve")]
 pub use sve::{
-    has_sve, sve_f32_lanes, sve_f64_lanes, sve_vector_length_bytes, Sve256F32, Sve256F64,
-    SvePredicate,
+    has_sve, parse_sve_vector_length_bytes, sve_f32_lanes, sve_f64_lanes, sve_vector_length_bytes,
+    Sve256F32, Sve256F64, SvePredicate,
 };
 
 #[cfg(oxifft_portable_simd)]

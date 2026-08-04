@@ -10,31 +10,109 @@ use crate::threading::ThreadPool;
 use super::plan::Plan;
 use super::types::{Direction, Flags};
 
-/// Send/Sync wrapper for raw pointer as usize.
-/// SAFETY: The caller must ensure the pointer is valid and that no data races occur.
+/// `Send`/`Sync` wrapper carrying a raw pointer across the [`ThreadPool`]
+/// boundary.
+///
+/// The payload is a **pointer**, not a `usize`. An earlier version stored
+/// `ptr as usize` and cast back with `usize as *mut T`; that round trip is an
+/// integer-to-pointer cast, which strips the pointer's provenance and leaves the
+/// reconstructed pointer with only whatever provenance the compiler can guess.
+/// Miri flags every such site (`warning: integer-to-pointer cast`) precisely
+/// because the resulting accesses are no longer provably in-bounds of the
+/// original allocation under Stacked/Tree Borrows. Storing `*mut u8` and casting
+/// pointer-to-pointer keeps the original provenance intact, so the derived
+/// `add`/`from_raw_parts` accesses stay attached to the buffer they came from.
+///
+/// SAFETY: The caller must ensure the pointer is valid for the accesses it
+/// performs and that no data races occur. See [`IndexClaims`] for the guard that
+/// keeps a misbehaving pool from producing overlapping accesses.
 #[derive(Clone, Copy)]
-struct RawPtr(usize);
+struct RawPtr(*mut u8);
 
 impl RawPtr {
     fn from_ptr<T>(ptr: *const T) -> Self {
-        Self(ptr as usize)
+        Self(ptr.cast::<u8>().cast_mut())
     }
 
     fn from_mut_ptr<T>(ptr: *mut T) -> Self {
-        Self(ptr as usize)
+        Self(ptr.cast::<u8>())
     }
 
     fn as_ptr<T>(self) -> *const T {
-        self.0 as *const T
+        self.0.cast_const().cast::<T>()
     }
 
     fn as_mut_ptr<T>(self) -> *mut T {
-        self.0 as *mut T
+        self.0.cast::<T>()
     }
 }
 
 unsafe impl Send for RawPtr {}
 unsafe impl Sync for RawPtr {}
+
+/// One-shot claim table guarding raw-pointer index arithmetic against a
+/// misbehaving [`ThreadPool`].
+///
+/// [`ThreadPool::parallel_for`] is a **safe** trait method, so a third-party
+/// implementation may legally call the closure with an index outside
+/// `0..count`, or call it twice (even concurrently) for the same index. Every
+/// raw-pointer partitioning site in this module derives a disjoint sub-buffer
+/// from the index alone, so either misbehaviour would create out-of-bounds
+/// writes or `&mut` aliasing without a single `unsafe` block in the user's
+/// code.
+///
+/// `IndexClaims::claim` closes that hole: it returns `true` at most once per
+/// index and never for an out-of-range index, so a broken pool yields
+/// incomplete results instead of undefined behaviour.
+struct IndexClaims {
+    claimed: Vec<core::sync::atomic::AtomicBool>,
+}
+
+impl IndexClaims {
+    fn new(count: usize) -> Self {
+        Self {
+            claimed: (0..count)
+                .map(|_| core::sync::atomic::AtomicBool::new(false))
+                .collect(),
+        }
+    }
+
+    /// Returns `true` exactly once for each index in `0..count`, and `false`
+    /// for repeated or out-of-range indices.
+    fn claim(&self, index: usize) -> bool {
+        match self.claimed.get(index) {
+            Some(flag) => !flag.swap(true, core::sync::atomic::Ordering::AcqRel),
+            None => false,
+        }
+    }
+}
+
+/// Multiply two extents, panicking with a clear message instead of wrapping.
+///
+/// The wrapped product would otherwise be compared against the caller's buffer
+/// length by an `assert_eq!`, letting an undersized buffer pass the guard and
+/// then be indexed with the *unwrapped* extents through raw pointers.
+#[inline]
+fn checked_extent(a: usize, b: usize, what: &str) -> usize {
+    match a.checked_mul(b) {
+        Some(total) => total,
+        None => panic!("{what} overflows usize"),
+    }
+}
+
+/// Product of all dimensions, panicking instead of wrapping. See
+/// [`checked_extent`] for why the wrapped value must never be used.
+#[inline]
+fn checked_dims_product(dims: &[usize]) -> usize {
+    let mut total: usize = 1;
+    for &d in dims {
+        total = match total.checked_mul(d) {
+            Some(t) => t,
+            None => panic!("product of dimensions overflows usize"),
+        };
+    }
+    total
+}
 
 /// A parallel plan for executing 2D FFT transforms.
 ///
@@ -44,6 +122,8 @@ pub struct ParallelPlan2D<T: Float, P: ThreadPool> {
     n0: usize,
     /// Number of columns
     n1: usize,
+    /// Total element count (`n0 * n1`), computed once with checked arithmetic.
+    total_size: usize,
     /// Transform direction
     direction: Direction,
     /// 1D plan for rows (size n1)
@@ -66,14 +146,20 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
     ///
     /// # Returns
     /// A plan that can be executed on row-major input/output buffers of size n0 x n1.
+    ///
+    /// Returns `None` when either 1D plan cannot be built, or when `n0 * n1`
+    /// overflows `usize` (a wrapped total would make the buffer-length asserts
+    /// in [`Self::execute`] accept an undersized buffer).
     #[must_use]
     pub fn new(n0: usize, n1: usize, direction: Direction, flags: Flags, pool: P) -> Option<Self> {
+        let total_size = n0.checked_mul(n1)?;
         let row_plan = Plan::dft_1d(n1, direction, flags)?;
         let col_plan = Plan::dft_1d(n0, direction, flags)?;
 
         Some(Self {
             n0,
             n1,
+            total_size,
             direction,
             row_plan,
             col_plan,
@@ -96,7 +182,7 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
     /// Get the total size (n0 x n1).
     #[must_use]
     pub fn size(&self) -> usize {
-        self.n0 * self.n1
+        self.total_size
     }
 
     /// Get the transform direction.
@@ -118,7 +204,7 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
     /// # Panics
     /// Panics if buffer sizes don't match n0 x n1.
     pub fn execute(&self, input: &[Complex<T>], output: &mut [Complex<T>]) {
-        let total = self.n0 * self.n1;
+        let total = self.total_size;
         assert_eq!(input.len(), total, "Input size must match n0 x n1");
         assert_eq!(output.len(), total, "Output size must match n0 x n1");
 
@@ -130,12 +216,19 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
         let mut temp = vec![Complex::<T>::zero(); total];
 
         // Step 1: Apply 1D FFT to each row in parallel
-        // SAFETY: Each thread accesses disjoint row slices
+        // SAFETY: Each thread accesses disjoint row slices. `row_claims`
+        // enforces that even if `pool` calls the closure with a repeated or
+        // out-of-range index (see `IndexClaims`).
         let temp_ptr = RawPtr::from_mut_ptr(temp.as_mut_ptr());
         let input_ptr = RawPtr::from_ptr(input.as_ptr());
         let n1 = self.n1;
         let row_plan = &self.row_plan;
+        let row_claims = IndexClaims::new(self.n0);
+        let row_claims_ref = &row_claims;
         self.pool.parallel_for(self.n0, move |i| {
+            if !row_claims_ref.claim(i) {
+                return;
+            }
             let row_start = i * n1;
             unsafe {
                 let in_ptr: *const Complex<T> = input_ptr.as_ptr();
@@ -152,7 +245,12 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
         let temp_ptr = RawPtr::from_ptr(temp.as_ptr());
         let n0 = self.n0;
         let col_plan = &self.col_plan;
+        let col_claims = IndexClaims::new(self.n1);
+        let col_claims_ref = &col_claims;
         self.pool.parallel_for(self.n1, move |j| {
+            if !col_claims_ref.claim(j) {
+                return;
+            }
             // Each thread needs its own column buffers
             let mut col_in = vec![Complex::<T>::zero(); n0];
             let mut col_out = vec![Complex::<T>::zero(); n0];
@@ -183,7 +281,7 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
     /// # Panics
     /// Panics if buffer size doesn't match n0 x n1.
     pub fn execute_inplace(&self, data: &mut [Complex<T>]) {
-        let total = self.n0 * self.n1;
+        let total = self.total_size;
         assert_eq!(data.len(), total, "Data size must match n0 x n1");
 
         if total == 0 {
@@ -195,7 +293,12 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
         let n1 = self.n1;
         let n0 = self.n0;
         let row_plan = &self.row_plan;
+        let row_claims = IndexClaims::new(self.n0);
+        let row_claims_ref = &row_claims;
         self.pool.parallel_for(self.n0, move |i| {
+            if !row_claims_ref.claim(i) {
+                return;
+            }
             let row_start = i * n1;
             unsafe {
                 let ptr: *mut Complex<T> = data_ptr.as_mut_ptr();
@@ -206,7 +309,12 @@ impl<T: Float, P: ThreadPool> ParallelPlan2D<T, P> {
 
         // Step 2: Apply 1D FFT to each column in parallel
         let col_plan = &self.col_plan;
+        let col_claims = IndexClaims::new(self.n1);
+        let col_claims_ref = &col_claims;
         self.pool.parallel_for(self.n1, move |j| {
+            if !col_claims_ref.claim(j) {
+                return;
+            }
             let mut col = vec![Complex::<T>::zero(); n0];
 
             // Extract column j
@@ -411,7 +519,13 @@ impl<T: Float, P: ThreadPool> ParallelPlanND<T, P> {
         let fiber_starts_ptr = RawPtr::from_ptr(fiber_starts.as_ptr());
         let plan = &self.plans[dim_idx];
 
+        let fiber_claims = IndexClaims::new(num_fibers);
+        let fiber_claims_ref = &fiber_claims;
+
         self.pool.parallel_for(num_fibers, move |fiber_idx| {
+            if !fiber_claims_ref.claim(fiber_idx) {
+                return;
+            }
             // Get precomputed starting index for this fiber
             let start_idx = unsafe {
                 let ptr: *const usize = fiber_starts_ptr.as_ptr();
@@ -493,8 +607,9 @@ pub fn fft2d_parallel<T: Float, P: ThreadPool + Clone>(
     n1: usize,
     pool: &P,
 ) -> Vec<Complex<T>> {
-    assert_eq!(input.len(), n0 * n1, "Input size must match n0 x n1");
-    let mut output = vec![Complex::<T>::zero(); n0 * n1];
+    let total = checked_extent(n0, n1, "n0 * n1");
+    assert_eq!(input.len(), total, "Input size must match n0 x n1");
+    let mut output = vec![Complex::<T>::zero(); total];
 
     if let Some(plan) =
         ParallelPlan2D::new(n0, n1, Direction::Forward, Flags::ESTIMATE, pool.clone())
@@ -514,8 +629,9 @@ pub fn ifft2d_parallel<T: Float, P: ThreadPool + Clone>(
     n1: usize,
     pool: &P,
 ) -> Vec<Complex<T>> {
-    assert_eq!(input.len(), n0 * n1, "Input size must match n0 x n1");
-    let mut output = vec![Complex::<T>::zero(); n0 * n1];
+    let total = checked_extent(n0, n1, "n0 * n1");
+    assert_eq!(input.len(), total, "Input size must match n0 x n1");
+    let mut output = vec![Complex::<T>::zero(); total];
 
     if let Some(plan) =
         ParallelPlan2D::new(n0, n1, Direction::Backward, Flags::ESTIMATE, pool.clone())
@@ -523,7 +639,7 @@ pub fn ifft2d_parallel<T: Float, P: ThreadPool + Clone>(
         plan.execute(input, &mut output);
 
         // Normalize
-        let scale = T::from_usize(n0 * n1);
+        let scale = T::from_usize(total);
         for x in &mut output {
             *x = *x / scale;
         }
@@ -540,7 +656,7 @@ pub fn fft_nd_parallel<T: Float, P: ThreadPool + Clone>(
     dims: &[usize],
     pool: &P,
 ) -> Vec<Complex<T>> {
-    let total: usize = dims.iter().product();
+    let total = checked_dims_product(dims);
     assert_eq!(
         input.len(),
         total,
@@ -565,7 +681,7 @@ pub fn ifft_nd_parallel<T: Float, P: ThreadPool + Clone>(
     dims: &[usize],
     pool: &P,
 ) -> Vec<Complex<T>> {
-    let total: usize = dims.iter().product();
+    let total = checked_dims_product(dims);
     assert_eq!(
         input.len(),
         total,
@@ -599,13 +715,10 @@ pub fn fft_batch_parallel<T: Float, P: ThreadPool>(
     howmany: usize,
     pool: &P,
 ) -> Vec<Complex<T>> {
-    assert_eq!(
-        input.len(),
-        n * howmany,
-        "Input size must match n * howmany"
-    );
+    let total = checked_extent(n, howmany, "n * howmany");
+    assert_eq!(input.len(), total, "Input size must match n * howmany");
 
-    let mut output = vec![Complex::<T>::zero(); n * howmany];
+    let mut output = vec![Complex::<T>::zero(); total];
 
     // Create 1D plan
     if let Some(plan) = Plan::<T>::dft_1d(n, Direction::Forward, Flags::ESTIMATE) {
@@ -613,7 +726,12 @@ pub fn fft_batch_parallel<T: Float, P: ThreadPool>(
         let output_ptr = RawPtr::from_mut_ptr(output.as_mut_ptr());
 
         // Process each batch in parallel
+        let claims = IndexClaims::new(howmany);
+        let claims_ref = &claims;
         pool.parallel_for(howmany, move |batch_idx| {
+            if !claims_ref.claim(batch_idx) {
+                return;
+            }
             let offset = batch_idx * n;
             unsafe {
                 let in_p: *const Complex<T> = input_ptr.as_ptr();
@@ -638,13 +756,10 @@ pub fn ifft_batch_parallel<T: Float, P: ThreadPool>(
     howmany: usize,
     pool: &P,
 ) -> Vec<Complex<T>> {
-    assert_eq!(
-        input.len(),
-        n * howmany,
-        "Input size must match n * howmany"
-    );
+    let total = checked_extent(n, howmany, "n * howmany");
+    assert_eq!(input.len(), total, "Input size must match n * howmany");
 
-    let mut output = vec![Complex::<T>::zero(); n * howmany];
+    let mut output = vec![Complex::<T>::zero(); total];
 
     // Create 1D plan
     if let Some(plan) = Plan::<T>::dft_1d(n, Direction::Backward, Flags::ESTIMATE) {
@@ -652,7 +767,12 @@ pub fn ifft_batch_parallel<T: Float, P: ThreadPool>(
         let output_ptr = RawPtr::from_mut_ptr(output.as_mut_ptr());
 
         // Process each batch in parallel
+        let claims = IndexClaims::new(howmany);
+        let claims_ref = &claims;
         pool.parallel_for(howmany, move |batch_idx| {
+            if !claims_ref.claim(batch_idx) {
+                return;
+            }
             let offset = batch_idx * n;
             unsafe {
                 let in_p: *const Complex<T> = input_ptr.as_ptr();
@@ -685,21 +805,24 @@ pub fn rfft_batch_parallel<T: Float, P: ThreadPool>(
 ) -> Vec<Complex<T>> {
     use crate::rdft::solvers::R2cSolver;
 
-    assert_eq!(
-        input.len(),
-        n * howmany,
-        "Input size must match n * howmany"
-    );
+    let total = checked_extent(n, howmany, "n * howmany");
+    assert_eq!(input.len(), total, "Input size must match n * howmany");
 
     let out_len = n / 2 + 1;
-    let mut output = vec![Complex::<T>::zero(); out_len * howmany];
+    let mut output =
+        vec![Complex::<T>::zero(); checked_extent(out_len, howmany, "(n/2+1) * howmany")];
 
     let solver = R2cSolver::new(n);
     let input_ptr = RawPtr::from_ptr(input.as_ptr());
     let output_ptr = RawPtr::from_mut_ptr(output.as_mut_ptr());
 
     // Process each batch in parallel
+    let claims = IndexClaims::new(howmany);
+    let claims_ref = &claims;
     pool.parallel_for(howmany, move |batch_idx| {
+        if !claims_ref.claim(batch_idx) {
+            return;
+        }
         let in_offset = batch_idx * n;
         let out_offset = batch_idx * out_len;
         unsafe {
@@ -729,18 +852,23 @@ pub fn irfft_batch_parallel<T: Float, P: ThreadPool>(
     let in_len = n / 2 + 1;
     assert_eq!(
         input.len(),
-        in_len * howmany,
+        checked_extent(in_len, howmany, "(n/2+1) * howmany"),
         "Input size must match (n/2+1) * howmany"
     );
 
-    let mut output = vec![T::ZERO; n * howmany];
+    let mut output = vec![T::ZERO; checked_extent(n, howmany, "n * howmany")];
 
     let solver = C2rSolver::new(n);
     let input_ptr = RawPtr::from_ptr(input.as_ptr());
     let output_ptr = RawPtr::from_mut_ptr(output.as_mut_ptr());
 
     // Process each batch in parallel
+    let claims = IndexClaims::new(howmany);
+    let claims_ref = &claims;
     pool.parallel_for(howmany, move |batch_idx| {
+        if !claims_ref.claim(batch_idx) {
+            return;
+        }
         let in_offset = batch_idx * in_len;
         let out_offset = batch_idx * n;
         unsafe {
@@ -1017,5 +1145,234 @@ mod tests {
         for (a, b) in original.iter().zip(recovered.iter()) {
             assert!(approx_eq(*a, *b, 1e-10), "got {b}, expected {a}");
         }
+    }
+}
+
+// ============================================================================
+// Regression tests: hostile `ThreadPool` impls and extent overflow
+// ============================================================================
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::threading::SerialPool;
+
+    /// A 100% safe `ThreadPool` implementation that violates the "call `f`
+    /// exactly once per index in `0..count`" contract.
+    ///
+    /// Every raw-pointer partitioning site in this module derives its
+    /// sub-buffer from the index alone, so before `IndexClaims` existed this
+    /// pool made safe user code produce out-of-bounds raw-pointer writes
+    /// (`f(count * 4)` → `row_start` past the end of the buffer) and `&mut`
+    /// aliasing (`f(0)` repeatedly) without a single `unsafe` block.
+    struct HostilePool;
+
+    impl ThreadPool for HostilePool {
+        fn parallel_for<F>(&self, count: usize, f: F)
+        where
+            F: Fn(usize) + Send + Sync,
+        {
+            // Out-of-range indices first...
+            if count > 0 {
+                f(count);
+                f(count * 4 + 1);
+                f(usize::MAX);
+            }
+            // ...then every valid index, each one twice.
+            for i in 0..count {
+                f(i);
+                f(i);
+            }
+        }
+
+        fn num_threads(&self) -> usize {
+            1
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            (a(), b())
+        }
+    }
+
+    fn complex_approx_eq(a: Complex<f64>, b: Complex<f64>, eps: f64) -> bool {
+        (a.re - b.re).abs() < eps && (a.im - b.im).abs() < eps
+    }
+
+    fn make_input(total: usize) -> Vec<Complex<f64>> {
+        (0..total)
+            .map(|i| Complex::new((i as f64 * 0.11).sin(), (i as f64 * 0.07).cos()))
+            .collect()
+    }
+
+    #[test]
+    fn parallel_plan2d_survives_a_contract_breaking_pool() {
+        let (n0, n1) = (8_usize, 8_usize);
+        let input = make_input(n0 * n1);
+
+        let mut expected = vec![Complex::<f64>::zero(); n0 * n1];
+        ParallelPlan2D::new(
+            n0,
+            n1,
+            Direction::Forward,
+            Flags::ESTIMATE,
+            SerialPool::new(),
+        )
+        .expect("serial plan")
+        .execute(&input, &mut expected);
+
+        let mut got = vec![Complex::<f64>::zero(); n0 * n1];
+        ParallelPlan2D::new(n0, n1, Direction::Forward, Flags::ESTIMATE, HostilePool)
+            .expect("hostile plan")
+            .execute(&input, &mut got);
+
+        // Out-of-range indices are ignored and each row/column is transformed
+        // exactly once, so the result still matches the serial reference.
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                complex_approx_eq(*a, *b, 1e-10),
+                "element {i}: serial={a:?} hostile={b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_plan2d_inplace_survives_a_contract_breaking_pool() {
+        let (n0, n1) = (8_usize, 8_usize);
+        let input = make_input(n0 * n1);
+
+        let mut expected = input.clone();
+        ParallelPlan2D::new(
+            n0,
+            n1,
+            Direction::Forward,
+            Flags::ESTIMATE,
+            SerialPool::new(),
+        )
+        .expect("serial plan")
+        .execute_inplace(&mut expected);
+
+        let mut got = input;
+        ParallelPlan2D::new(n0, n1, Direction::Forward, Flags::ESTIMATE, HostilePool)
+            .expect("hostile plan")
+            .execute_inplace(&mut got);
+
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                complex_approx_eq(*a, *b, 1e-10),
+                "element {i}: serial={a:?} hostile={b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_plan_nd_survives_a_contract_breaking_pool() {
+        let dims = [4_usize, 4, 2];
+        let total: usize = dims.iter().product();
+        let input = make_input(total);
+
+        let mut expected = vec![Complex::<f64>::zero(); total];
+        ParallelPlanND::new(
+            &dims,
+            Direction::Forward,
+            Flags::ESTIMATE,
+            SerialPool::new(),
+        )
+        .expect("serial plan")
+        .execute(&input, &mut expected);
+
+        let mut got = vec![Complex::<f64>::zero(); total];
+        ParallelPlanND::new(&dims, Direction::Forward, Flags::ESTIMATE, HostilePool)
+            .expect("hostile plan")
+            .execute(&input, &mut got);
+
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                complex_approx_eq(*a, *b, 1e-10),
+                "element {i}: serial={a:?} hostile={b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_helpers_survive_a_contract_breaking_pool() {
+        let (n, howmany) = (8_usize, 4_usize);
+        let input = make_input(n * howmany);
+
+        let expected = fft_batch_parallel(&input, n, howmany, &SerialPool::new());
+        let got = fft_batch_parallel(&input, n, howmany, &HostilePool);
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                complex_approx_eq(*a, *b, 1e-10),
+                "element {i}: serial={a:?} hostile={b:?}"
+            );
+        }
+
+        let real_input: Vec<f64> = (0..(n * howmany)).map(|i| (i as f64).sin()).collect();
+        let expected_r = rfft_batch_parallel(&real_input, n, howmany, &SerialPool::new());
+        let got_r = rfft_batch_parallel(&real_input, n, howmany, &HostilePool);
+        for (i, (a, b)) in expected_r.iter().zip(got_r.iter()).enumerate() {
+            assert!(
+                complex_approx_eq(*a, *b, 1e-10),
+                "bin {i}: serial={a:?} hostile={b:?}"
+            );
+        }
+
+        let expected_c = irfft_batch_parallel(&expected_r, n, howmany, &SerialPool::new());
+        let got_c = irfft_batch_parallel(&expected_r, n, howmany, &HostilePool);
+        for (i, (a, b)) in expected_c.iter().zip(got_c.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-10, "sample {i}: serial={a} hostile={b}");
+        }
+    }
+
+    #[test]
+    fn parallel_plan2d_rejects_overflowing_extents() {
+        // `n0 * n1` wraps to 0 here.  The old code then let a zero-length (or
+        // any wrapped-length) buffer pass `assert_eq!(input.len(), total)` and
+        // afterwards indexed with the *unwrapped* `n0`/`n1` through raw
+        // pointers.
+        let n0 = 1_usize << 63;
+        let n1 = 2_usize;
+        assert!(n0.wrapping_mul(n1) == 0, "test premise: the product wraps");
+        assert!(
+            ParallelPlan2D::<f64, SerialPool>::new(
+                n0,
+                n1,
+                Direction::Forward,
+                Flags::ESTIMATE,
+                SerialPool::new(),
+            )
+            .is_none(),
+            "an overflowing n0 * n1 must not produce a plan"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "overflows usize")]
+    fn fft2d_parallel_panics_on_overflowing_extents() {
+        let pool = SerialPool::new();
+        let empty: Vec<Complex<f64>> = Vec::new();
+        let _ = fft2d_parallel(&empty, 1_usize << 63, 2, &pool);
+    }
+
+    #[test]
+    #[should_panic(expected = "overflows usize")]
+    fn fft_nd_parallel_panics_on_overflowing_extents() {
+        let pool = SerialPool::new();
+        let empty: Vec<Complex<f64>> = Vec::new();
+        let _ = fft_nd_parallel(&empty, &[1_usize << 62, 4, 4], &pool);
+    }
+
+    #[test]
+    #[should_panic(expected = "overflows usize")]
+    fn fft_batch_parallel_panics_on_overflowing_extents() {
+        let pool = SerialPool::new();
+        let empty: Vec<Complex<f64>> = Vec::new();
+        let _ = fft_batch_parallel(&empty, 1_usize << 63, 4, &pool);
     }
 }

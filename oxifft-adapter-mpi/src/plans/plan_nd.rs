@@ -15,6 +15,17 @@ use crate::MpiFlags;
 ///
 /// Generalizes the distributed FFT to arbitrary dimensions using slab decomposition.
 /// The first dimension is distributed across processes.
+///
+/// # Transposed layouts
+///
+/// The trailing axes are treated as one flat `stride = product(dims[1..])`
+/// dimension, so the transposed distribution is `[local_stride][n0]` — the N-D
+/// generalisation of the 2-D `[local_n1][n0]` layout.
+/// [`MpiFlags::transposed_out`](crate::MpiFlags::transposed_out) emits that
+/// layout (skipping the final transpose) and
+/// [`MpiFlags::transposed_in`](crate::MpiFlags::transposed_in) consumes it, so a
+/// `transposed_out` forward followed by a `transposed_in` inverse costs one
+/// `alltoallv` per transform instead of two.
 pub struct MpiPlanND<'p, T: Float, C: Communicator> {
     /// Global dimensions.
     dims: Vec<usize>,
@@ -60,13 +71,6 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlanND<'p, T, C> {
                 dim: 0,
                 size: 0,
                 message: "Cannot create plan with zero dimensions".to_string(),
-            });
-        }
-
-        if flags.transposed_in {
-            return Err(MpiError::FftError {
-                message: "MpiFlags::transposed_in is not yet implemented for the N-D slab plan"
-                    .to_string(),
             });
         }
 
@@ -150,28 +154,55 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlanND<'p, T, C> {
         self.flags
     }
 
+    /// Local element counts this plan reads and writes, `(input, output)`.
+    ///
+    /// `transposed_in` / `transposed_out` each swap the corresponding side to the
+    /// `[local_stride][n0]` footprint, so the two can differ; `execute_inplace`
+    /// requires a buffer at least as large as their maximum.
+    pub fn local_footprints(&self) -> (usize, usize) {
+        let stride: usize = self.dims[1..].iter().product();
+        let local_stride = LocalPartition::new(stride, self.pool.size(), self.pool.rank()).local_n;
+        let normal = self.local_n0 * stride;
+        let transposed = self.dims[0] * local_stride;
+        (
+            if self.flags.transposed_in {
+                transposed
+            } else {
+                normal
+            },
+            if self.flags.transposed_out {
+                transposed
+            } else {
+                normal
+            },
+        )
+    }
+
     /// Execute the distributed N-D FFT in-place.
     ///
-    /// For dimensions 1-3, delegates to optimized implementations.
-    /// For higher dimensions, uses a general row-major traversal.
+    /// Input layout is the `[local_n0][stride]` slab, or the `[local_stride][n0]`
+    /// transposed distribution when `transposed_in` is set; the output layout is
+    /// chosen the same way by `transposed_out`.
     ///
     /// # Errors
     /// Returns `MpiError::SizeMismatch` if data buffer is too small.
     pub fn execute_inplace(&mut self, data: &mut [Complex<T>]) -> Result<(), MpiError> {
         let ndim = self.dims.len();
 
-        // Calculate expected local size
-        let remaining_product: usize = self.dims[1..].iter().product();
-        let expected_size = self.local_n0 * remaining_product;
-
-        if data.len() < expected_size {
+        let (in_size, out_size) = self.local_footprints();
+        let required = in_size.max(out_size);
+        if data.len() < required {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: required,
                 actual: data.len(),
             });
         }
 
         let pool = self.pool;
+
+        if self.flags.transposed_in {
+            return self.execute_transposed_in(data);
+        }
 
         // Step 1: FFTs along all local dimensions (dims[1..]).
         // For a 1D problem this range is empty; the single (distributed)
@@ -185,6 +216,73 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlanND<'p, T, C> {
         // this degenerates to gathering the single distributed axis onto rank 0,
         // transforming it, and scattering it back.
         self.distributed_fft_dim0(data, pool)?;
+
+        Ok(())
+    }
+
+    /// Transposed-input pipeline: `data` already holds the `[local_stride][n0]`
+    /// distribution that `transposed_out` produces, carrying *untransformed*
+    /// values.
+    ///
+    /// The distributed `n0` axis is contiguous and complete on this rank in that
+    /// layout, so it is transformed first with no communication at all; one
+    /// `alltoallv` then restores the `[local_n0][stride]` slab for the remaining
+    /// (purely local) axes. A second `alltoallv` runs only when `transposed_out`
+    /// is also requested.
+    fn execute_transposed_in(&mut self, data: &mut [Complex<T>]) -> Result<(), MpiError> {
+        let ndim = self.dims.len();
+        let n0 = self.dims[0];
+        let stride: usize = self.dims[1..].iter().product();
+        let pool = self.pool;
+
+        let trans_partition = LocalPartition::new(stride, pool.size(), pool.rank());
+        let local_stride = trans_partition.local_n;
+        let transposed_size = n0 * local_stride;
+        let normal_size = self.local_n0 * stride;
+
+        // Step 1: local 1-D FFTs along the contiguous n0 fibers.
+        {
+            let plan_n0 = &self.local_plans[0];
+            let mut fiber_in = vec![Complex::<T>::zero(); n0];
+            let mut fiber_out = vec![Complex::<T>::zero(); n0];
+            for col in 0..local_stride {
+                let base = col * n0;
+                fiber_in.copy_from_slice(&data[base..base + n0]);
+                plan_n0.execute(&fiber_in, &mut fiber_out);
+                data[base..base + n0].copy_from_slice(&fiber_out);
+            }
+        }
+
+        // Step 2: transpose `[local_stride][n0]` -> `[local_n0][stride]`.
+        distributed_transpose(
+            pool,
+            &data[..transposed_size],
+            &mut self.scratch,
+            stride,
+            n0,
+            local_stride,
+            trans_partition.local_start,
+        )?;
+        data[..normal_size].copy_from_slice(&self.scratch[..normal_size]);
+
+        // Step 3: FFTs along every local dimension. Empty for a 1-D problem.
+        for d in (1..ndim).rev() {
+            self.fft_along_dimension(data, d)?;
+        }
+
+        // Step 4: emit in the requested output distribution.
+        if self.flags.transposed_out {
+            distributed_transpose(
+                pool,
+                &data[..normal_size],
+                &mut self.scratch,
+                n0,
+                stride,
+                self.local_n0,
+                self.local_0_start,
+            )?;
+            data[..transposed_size].copy_from_slice(&self.scratch[..transposed_size]);
+        }
 
         Ok(())
     }
@@ -288,16 +386,23 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlanND<'p, T, C> {
         }
 
         // Step 3: transpose back `[local_stride][n0]` -> `[local_n0][stride]` with a
-        // second alltoallv, restoring the original slab layout in `data`.
-        distributed_transpose(
-            pool,
-            &self.scratch[..transposed_len],
-            data,
-            stride,
-            n0,
-            local_stride,
-            local_stride_start,
-        )?;
+        // second alltoallv, restoring the original slab layout in `data` — unless
+        // the caller asked for transposed output, in which case the transposed
+        // layout already in `scratch` *is* the requested result and the second
+        // collective is skipped entirely.
+        if self.flags.transposed_out {
+            data[..transposed_len].copy_from_slice(&self.scratch[..transposed_len]);
+        } else {
+            distributed_transpose(
+                pool,
+                &self.scratch[..transposed_len],
+                data,
+                stride,
+                n0,
+                local_stride,
+                local_stride_start,
+            )?;
+        }
 
         Ok(())
     }
@@ -311,23 +416,22 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlanND<'p, T, C> {
         input: &[Complex<T>],
         output: &mut [Complex<T>],
     ) -> Result<(), MpiError> {
-        let remaining_product: usize = self.dims[1..].iter().product();
-        let expected_size = self.local_n0 * remaining_product;
+        let (in_size, out_size) = self.local_footprints();
 
-        if input.len() < expected_size {
+        if input.len() < in_size {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: in_size,
                 actual: input.len(),
             });
         }
-        if output.len() < expected_size {
+        if output.len() < in_size.max(out_size) {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: in_size.max(out_size),
                 actual: output.len(),
             });
         }
 
-        output[..expected_size].copy_from_slice(&input[..expected_size]);
+        output[..in_size].copy_from_slice(&input[..in_size]);
         self.execute_inplace(output)
     }
 }

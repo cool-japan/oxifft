@@ -449,4 +449,110 @@ mod tests {
         let expected = 4 * (25 * 24 / 2);
         assert_eq!(counter.load(Ordering::SeqCst), expected);
     }
+
+    // ── Regression: degenerate arguments to the provided trait methods ─────
+    //
+    // `parallel_for_chunks` and `parallel_split` are *default* trait bodies on
+    // a public trait with no documented preconditions, so any argument
+    // combination a user can type has to be survivable.  The previous bodies
+    // divided by `chunk_size` (panic at 0), computed `count + chunk_size - 1`
+    // (underflow at count 0, overflow near `usize::MAX`), subtracted
+    // `count - start` for the tail chunk, and recursed forever when
+    // `min_chunk_size` was 0.
+
+    /// Reports several threads while executing serially, so `parallel_split`
+    /// actually takes its recursive branch under `cargo test`.
+    struct MultiThreadReportingPool;
+
+    impl ThreadPool for MultiThreadReportingPool {
+        fn parallel_for<F>(&self, count: usize, f: F)
+        where
+            F: Fn(usize) + Send + Sync,
+        {
+            for i in 0..count {
+                f(i);
+            }
+        }
+
+        fn num_threads(&self) -> usize {
+            4
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            (a(), b())
+        }
+    }
+
+    #[test]
+    fn test_parallel_for_chunks_zero_chunk_size_is_a_no_op() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pool = SerialPool::new();
+        let calls = AtomicUsize::new(0);
+        // Used to divide by zero (or underflow `count + 0 - 1` at count 0).
+        pool.parallel_for_chunks(100, 0, |_start, _len| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+        pool.parallel_for_chunks(0, 0, |_start, _len| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+        pool.parallel_for_chunks(0, 16, |_start, _len| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_parallel_for_chunks_extreme_sizes_do_not_overflow() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pool = SerialPool::new();
+        let total = AtomicUsize::new(0);
+        // `count + chunk_size - 1` overflowed here.
+        pool.parallel_for_chunks(10, usize::MAX, |start, len| {
+            assert_eq!(start, 0);
+            total.fetch_add(len, Ordering::SeqCst);
+        });
+        assert_eq!(total.load(Ordering::SeqCst), 10);
+    }
+
+    #[test]
+    fn test_parallel_for_chunks_ragged_tail_stays_in_range() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pool = SerialPool::new();
+        let total = AtomicUsize::new(0);
+        // 10 is not a multiple of 3: the last chunk must report length 1, and
+        // no chunk may start at or past `count`.
+        pool.parallel_for_chunks(10, 3, |start, len| {
+            assert!(start < 10, "chunk start {start} out of range");
+            assert!(
+                start + len <= 10,
+                "chunk {start}..{} out of range",
+                start + len
+            );
+            total.fetch_add(len, Ordering::SeqCst);
+        });
+        assert_eq!(total.load(Ordering::SeqCst), 10);
+    }
+
+    #[test]
+    fn test_parallel_split_zero_min_chunk_terminates() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pool = MultiThreadReportingPool;
+        let total = AtomicUsize::new(0);
+        // With `min_chunk_size == 0` the right half of a length-1 range stayed
+        // at length 1 forever and overflowed the stack.
+        pool.parallel_split(0, 7, 0, &|_start, count| {
+            total.fetch_add(count, Ordering::SeqCst);
+        });
+        assert_eq!(total.load(Ordering::SeqCst), 7);
+    }
 }
