@@ -1,6 +1,6 @@
 # oxifft-codegen
 
-**Version:** 0.4.2
+**Version:** 0.4.3
 **Status:** Stable — codelet generation implemented for all supported sizes (scalar + SIMD).
 
 Procedural macro crate for OxiFFT codelet generation.
