@@ -252,6 +252,14 @@ impl<T: Float> RealPlanND<T> {
         })
     }
     /// Execute R2C transform.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input`/`output` don't have the expected lengths, or if the
+    /// internal 2D/3D plan constructor (rank 2/3) rejects `self.dims`. The
+    /// latter cannot currently happen: [`Self::r2c`] already rejects an empty
+    /// `dims` or any zero dimension at construction, which is the only
+    /// condition the internal constructors check.
     pub fn execute_r2c(&self, input: &[T], output: &mut [Complex<T>]) {
         assert_eq!(self.kind, RealPlanKind::R2C);
         let expected_in: usize = self.dims.iter().product();
@@ -358,6 +366,14 @@ impl<T: Float> RealPlanND<T> {
     /// normalization convention (it deliberately differs from FFTW). Use
     /// [`execute_c2r_unnormalized`](Self::execute_c2r_unnormalized) for the raw,
     /// FFTW-style result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input`/`output` don't have the expected lengths, or if the
+    /// internal 2D/3D plan constructor (rank 2/3) rejects `self.dims`. The
+    /// latter cannot currently happen: [`Self::c2r`] already rejects an empty
+    /// `dims` or any zero dimension at construction, which is the only
+    /// condition the internal constructors check.
     pub fn execute_c2r(&self, input: &[Complex<T>], output: &mut [T]) {
         self.c2r_into_raw(input, output);
         let total: usize = self.dims.iter().product();
@@ -371,6 +387,11 @@ impl<T: Float> RealPlanND<T> {
     ///
     /// The result is scaled by `product(dims)` relative to
     /// [`execute_c2r`](Self::execute_c2r).
+    ///
+    /// # Panics
+    ///
+    /// See [`execute_c2r`](Self::execute_c2r) — both share the same
+    /// underlying pipeline and panic conditions.
     pub fn execute_c2r_unnormalized(&self, input: &[Complex<T>], output: &mut [T]) {
         self.c2r_into_raw(input, output);
     }

@@ -42,7 +42,11 @@ impl<T: Float> Plan for DftPlan<T> {
             BluesteinSolver, CooleyTukeySolver, CtVariant, DirectSolver, GenericSolver, NopSolver,
         };
 
-        let n = problem.transform_size();
+        // Bound every raw-pointer access by the element count recorded when the
+        // (unsafe) constructor ran, not by a value re-derived from the size
+        // tensors: that is exactly the count the caller vouched for, and unlike
+        // the tensors it cannot be changed from safe code afterwards.
+        let n = problem.buffer_len;
         if n == 0 || problem.input.is_null() || problem.output.is_null() {
             return;
         }
@@ -70,16 +74,14 @@ impl<T: Float> Plan for DftPlan<T> {
         }
     }
 
-    fn awake(&mut self, mode: WakeMode) {
-        match mode {
-            WakeMode::Full => {
-                // Initialize twiddle factors, etc.
-                self.state = WakeState::Awake;
-            }
-            WakeMode::Minimal => {
-                self.state = WakeState::Awake;
-            }
-        }
+    fn awake(&mut self, _mode: WakeMode) {
+        // `DftPlan` carries no precomputed per-plan state: `solve` constructs its
+        // solver (and any twiddle factors it needs) on demand from `problem`, so
+        // there is nothing for `WakeMode::Full` to prime that `WakeMode::Minimal`
+        // does not. Both modes therefore only flip the wake state. If this plan
+        // ever gains an owned twiddle cache, `WakeMode::Full` is where it would be
+        // populated.
+        self.state = WakeState::Awake;
     }
 
     fn ops(&self) -> OpCount {
@@ -96,5 +98,24 @@ impl<T: Float> Plan for DftPlan<T> {
 
     fn solver_name(&self) -> &'static str {
         self.solver_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn awake_transitions_from_sleeping_to_awake_in_both_modes() {
+        for mode in [WakeMode::Full, WakeMode::Minimal] {
+            let mut plan = DftPlan::<f64>::new("test", OpCount::zero());
+            assert_eq!(plan.wake_state(), WakeState::Sleeping);
+            plan.awake(mode);
+            assert_eq!(
+                plan.wake_state(),
+                WakeState::Awake,
+                "awake({mode:?}) must wake the plan"
+            );
+        }
     }
 }

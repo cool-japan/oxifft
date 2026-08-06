@@ -18,6 +18,17 @@ use crate::MpiFlags;
 /// 2. Distributed transpose
 /// 3. Local column-wise FFTs (now rows after transpose)
 /// 4. Optional: Distributed transpose back (unless TRANSPOSED_OUT)
+///
+/// # Transposed layouts
+///
+/// [`MpiFlags::transposed_out`](crate::MpiFlags::transposed_out) leaves the
+/// result distributed over `n1` in `[local_n1][n0]` order (step 4 skipped), and
+/// [`MpiFlags::transposed_in`](crate::MpiFlags::transposed_in) declares that the
+/// *input* already arrives in that same `[local_n1][n0]` distribution. With
+/// `transposed_in` the pipeline is mirrored — the `n0` axis (contiguous and
+/// complete locally) is transformed first, then one transpose restores the slab
+/// layout for the `n1` transforms — so a `transposed_out` forward followed by a
+/// `transposed_in` inverse costs one `alltoallv` per transform instead of two.
 pub struct MpiPlan2D<'p, T: Float, C: Communicator> {
     /// Global number of rows.
     n0: usize,
@@ -66,13 +77,6 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan2D<'p, T, C> {
                 dim: usize::from(n0 != 0),
                 size: if n0 == 0 { n0 } else { n1 },
                 message: "Dimension size cannot be zero".to_string(),
-            });
-        }
-
-        if flags.transposed_in {
-            return Err(MpiError::FftError {
-                message: "MpiFlags::transposed_in is not yet implemented for the 2D slab plan"
-                    .to_string(),
             });
         }
 
@@ -132,34 +136,57 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan2D<'p, T, C> {
         self.direction
     }
 
+    /// Local element counts this plan reads and writes, `(input, output)`.
+    ///
+    /// `transposed_in` / `transposed_out` each swap the corresponding side to the
+    /// `[local_n1][n0]` footprint, so the two can differ; `execute_inplace`
+    /// requires a buffer at least as large as their maximum.
+    pub fn local_footprints(&self) -> (usize, usize) {
+        let local_n1 = LocalPartition::new(self.n1, self.pool.size(), self.pool.rank()).local_n;
+        let normal = self.local_n0 * self.n1;
+        let transposed = local_n1 * self.n0;
+        (
+            if self.flags.transposed_in {
+                transposed
+            } else {
+                normal
+            },
+            if self.flags.transposed_out {
+                transposed
+            } else {
+                normal
+            },
+        )
+    }
+
     /// Execute the distributed FFT in-place.
     ///
-    /// Input layout: `data[row * n1 + col]` where `row` is local (0..local_n0).
-    /// Output layout depends on `transposed_out` flag.
+    /// Input layout: `data[row * n1 + col]` where `row` is local (0..local_n0),
+    /// or `data[local_col * n0 + row]` when `transposed_in` is set.
+    /// Output layout depends on the `transposed_out` flag.
     ///
     /// # Errors
     /// Returns `MpiError::SizeMismatch` if data buffer is too small.
     pub fn execute_inplace(&mut self, data: &mut [Complex<T>]) -> Result<(), MpiError> {
         let pool = self.pool;
 
-        // The transposed-output path writes `local_n1 * n0` elements into `data`,
-        // which can exceed the `local_n0 * n1` input footprint. Validate the true
-        // worst-case size up front so an undersized buffer becomes an error rather
-        // than a slice-index panic later.
+        // A transposed side writes/reads `local_n1 * n0` elements, which can
+        // exceed the `local_n0 * n1` slab footprint. Validate the true worst case
+        // up front so an undersized buffer becomes an error rather than a
+        // slice-index panic later.
         let transposed_partition = LocalPartition::new(self.n1, pool.size(), pool.rank());
         let local_n1 = transposed_partition.local_n;
-        let in_size = self.local_n0 * self.n1;
-        let out_size = if self.flags.transposed_out {
-            local_n1 * self.n0
-        } else {
-            in_size
-        };
+        let (in_size, out_size) = self.local_footprints();
         let required = in_size.max(out_size);
         if data.len() < required {
             return Err(MpiError::SizeMismatch {
                 expected: required,
                 actual: data.len(),
             });
+        }
+
+        if self.flags.transposed_in {
+            return self.execute_transposed_in(data, transposed_partition);
         }
 
         // Step 1: Local row FFTs
@@ -220,6 +247,72 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan2D<'p, T, C> {
         Ok(())
     }
 
+    /// Transposed-input pipeline: the caller's `data` already holds the
+    /// `[local_n1][n0]` distribution that `transposed_out` produces, carrying
+    /// *untransformed* values.
+    ///
+    /// Mirrors the normal pipeline: the `n0` axis is contiguous and complete on
+    /// this rank, so it is transformed first; a single distributed transpose then
+    /// restores the `[local_n0][n1]` slab for the `n1` transforms. When
+    /// `transposed_out` is also set a second transpose puts the result back into
+    /// the transposed distribution.
+    fn execute_transposed_in(
+        &mut self,
+        data: &mut [Complex<T>],
+        transposed_partition: LocalPartition,
+    ) -> Result<(), MpiError> {
+        let pool = self.pool;
+        let (n0, n1) = (self.n0, self.n1);
+        let local_n1 = transposed_partition.local_n;
+        let transposed_size = local_n1 * n0;
+        let normal_size = self.local_n0 * n1;
+
+        // Step 1: local FFTs along n0, which is contiguous in this layout.
+        let mut fiber = vec![Complex::<T>::zero(); n0];
+        for col in 0..local_n1 {
+            let base = col * n0;
+            fiber.copy_from_slice(&data[base..base + n0]);
+            self.col_plan.execute(&fiber, &mut data[base..base + n0]);
+        }
+
+        // Step 2: distributed transpose `[local_n1][n0]` -> `[local_n0][n1]`.
+        distributed_transpose(
+            pool,
+            &data[..transposed_size],
+            &mut self.scratch,
+            n1,
+            n0,
+            local_n1,
+            transposed_partition.local_start,
+        )?;
+
+        // Step 3: local FFTs along n1 (contiguous rows of the restored slab).
+        let mut row_buffer = vec![Complex::<T>::zero(); n1];
+        for row in 0..self.local_n0 {
+            let base = row * n1;
+            row_buffer.copy_from_slice(&self.scratch[base..base + n1]);
+            self.row_plan
+                .execute(&row_buffer, &mut self.scratch[base..base + n1]);
+        }
+
+        // Step 4: emit in the requested output distribution.
+        if self.flags.transposed_out {
+            distributed_transpose(
+                pool,
+                &self.scratch[..normal_size],
+                data,
+                n0,
+                n1,
+                self.local_n0,
+                self.local_0_start,
+            )?;
+        } else {
+            data[..normal_size].copy_from_slice(&self.scratch[..normal_size]);
+        }
+
+        Ok(())
+    }
+
     /// Execute the distributed FFT out-of-place.
     ///
     /// # Errors
@@ -229,23 +322,23 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan2D<'p, T, C> {
         input: &[Complex<T>],
         output: &mut [Complex<T>],
     ) -> Result<(), MpiError> {
-        let expected_size = self.local_n0 * self.n1;
-        if input.len() < expected_size {
+        let (in_size, out_size) = self.local_footprints();
+        if input.len() < in_size {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: in_size,
                 actual: input.len(),
             });
         }
-        if output.len() < expected_size {
+        if output.len() < in_size.max(out_size) {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: in_size.max(out_size),
                 actual: output.len(),
             });
         }
 
-        // Copy input to output and execute in-place. `execute_inplace` performs
-        // the full worst-case (transposed-output) size validation on `output`.
-        output[..expected_size].copy_from_slice(&input[..expected_size]);
+        // Copy input to output and execute in-place. `execute_inplace` repeats the
+        // worst-case size validation on `output`.
+        output[..in_size].copy_from_slice(&input[..in_size]);
         self.execute_inplace(output)
     }
 }

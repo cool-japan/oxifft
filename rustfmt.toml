@@ -1,0 +1,9 @@
+# rustfmt configuration for the OxiFFT workspace.
+#
+# Deliberately minimal: the existing codebase already conforms to rustfmt's
+# stable defaults (verified via `cargo fmt --all -- --check` before this file
+# was added), so this file exists to pin `edition` explicitly rather than to
+# change any formatting behaviour. Adding settings here that diverge from the
+# defaults would trigger a repo-wide reformat, which is out of scope for a
+# hygiene change.
+edition = "2021"

@@ -5,9 +5,239 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.2] - 2026-08-06
 
-_No unreleased changes._
+### Fixed (x86_64 wrong-answer SIMD bug)
+
+- **🔴 x86_64 produced wrong FFT results on every CPU without AVX2 — fixed.**
+  Discovered 2026-08-03 by running the suite on x86_64 for the first time
+  (there is no CI and the primary development host is aarch64):
+  `cargo nextest run -p oxifft --all-features --target x86_64-apple-darwin`
+  (via Rosetta 2, which exposes SSE4.2 and no AVX) failed **93 of 1447**
+  tests with errors of magnitude ~10-100 against a 1e-10 tolerance —
+  a wrong-answer bug, not a precision one — cascading through `chirp_z`,
+  `conv`, `dft::codelets::{notw,simd}`,
+  `dft::solvers::{bluestein,cache_oblivious,rader,simd_butterfly}`,
+  `rdft::solvers::r2r`, `signal::{hilbert,resample}`, `sparse`, and the
+  size-coverage/rustfft-comparison sweeps: everything that bottoms out in the
+  shared SIMD butterfly engine.
+
+  Two independent defects in `dft::solvers::simd_butterfly`'s SSE3 kernel
+  (`dit_butterflies_sse3`, the tier every non-AVX2 x86_64 CPU takes, and the
+  one `dft/codelets/simd/large_sizes.rs`'s `dit_{64,128,256}_precomputed`
+  delegate to on every non-aarch64 target):
+
+  1. **Wrong complex-multiply lane order.** The twiddle product shuffled its
+     second partial product into `[v_im*cos, v_im*sin]` before
+     `_mm_addsub_pd`, computing `[v_re*cos - v_im*cos, v_re*sin + v_im*sin]`
+     instead of `[v_re*cos - v_im*sin, v_re*sin + v_im*cos]`. The two agree
+     only where `cos == sin` (45 degrees), which is why the smallest radix-2
+     stages masked it. The shuffle is removed — `addsub`'s operand was
+     already in the right lane order.
+  2. **Twiddle recurrence drift.** The kernel advanced twiddles with
+     `w *= w_step` per butterfly, accumulating roughly `half_m * EPSILON` of
+     error per stage. Invisible against a 1e-10 scalar comparison, it pushed
+     Bluestein's chirp round-trip (two chained padded power-of-two
+     transforms) past its 1e-13 relative-error gate at n=257/509/1009. The
+     kernel now reads the shared `PrecomputedTwiddles` table, exactly as the
+     AVX2 and NEON kernels already did.
+
+  Result: **x86_64 is now 1455/1455 passing** (`--all-features`,
+  `--target x86_64-apple-darwin`), and aarch64 is green at 1765/1765. Pinned by a new
+  `test_simd_butterfly_matches_naive_dft` that checks the dispatched kernel
+  against a directly evaluated DFT at n=8/16/64/256 in both directions — an
+  absolute-accuracy gate, unlike the pre-existing tests which only compared
+  the SIMD path against the equally-drifting scalar recurrence.
+
+  **Scope caveat, stated plainly:** Rosetta 2 reports SSE4.2 and no AVX
+  (`arch -x86_64 sysctl machdep.cpu.features`), so what the x86_64 run
+  exercises is the **SSE2/SSE3 tier only**. Every AVX / AVX2 / AVX-512 code
+  path in the crate — `simd/avx.rs`, `simd/avx2.rs`, `simd/avx512.rs`,
+  `dft/codelets/hand_avx512.rs`, `dft/solvers/simd_butterfly.rs`'s
+  `dit_butterflies_avx2`, `dft/solvers/stockham/x86_64.rs`,
+  `dft/solvers/generic.rs`, `dft/codelets/simd/large_sizes.rs` and
+  `kernel/complex_mul.rs` — **has still never been executed on any host**,
+  because no AVX2-capable machine is available to this project. Exactly one
+  function out of that set, `dit_butterflies_avx2` (the tier a real post-2013
+  desktop or server would take for this transform), was **hand-audited** as
+  part of this fix: every `_mm256_set_pd`/`_mm256_permute_pd` lane order,
+  every `_mm256_blend_pd` immediate, the radix-4 stage pairing and the fused
+  `W_8`/`W_16` constants check out, and it already read the precomputed
+  table. Do not read "x86_64 fixed" as "the AVX tier is verified".
+
+### Fixed
+
+- **Precomputed-twiddle-table overrun turned into a scalar fallback.**
+  `dit_butterflies_f64` is `pub`; for `n > 65536` both the x86_64 and aarch64
+  SIMD kernels indexed `PrecomputedTwiddles::offsets` (16 entries) out of
+  range and panicked. Such lengths now take the scalar path, which derives
+  twiddles on the fly. Internal callers cap at 4096, so this was reachable
+  only through the public entry point.
+
+### Added
+
+- **`oxifft-adapter-mpi`: `MpiFlags::transposed_in` is implemented** across every
+  slab plan family — `MpiPlan2D`, `MpiPlan3D`, `MpiPlanND`, and (where the flag
+  is meaningful) `MpiRealPlan2D::c2r` / `MpiRealPlan3D::c2r`. It previously
+  returned a "not yet implemented" `MpiError::FftError` from all four
+  constructors, so the standard FFTW-MPI idiom — a `transposed_out` forward
+  followed by a `transposed_in` inverse, which avoids one full `alltoallv` per
+  round trip — could not be expressed at all. With the flag set, each plan
+  mirrors its pipeline: the axis that is complete on the local rank in the
+  transposed distribution is transformed *first*, and a single distributed
+  transpose then restores the slab for the remaining axes. Verified with real
+  `mpirun` runs at 1, 2, 3 and 4 ranks against the same serial references the
+  natural-layout scenarios use, including non-divisible dimensions and the
+  `size > n0` degenerate case (`examples/mpi_integration.rs`).
+- **`MpiPlanND` now honours `transposed_out`** as well. It accepted the flag and
+  silently emitted natural-layout output, which is the same silent-wrong-result
+  shape the `transposed_in` rejection was there to avoid.
+- **`MpiRealPlan{2,3}D::r2c` reject `transposed_in` with an explanatory typed
+  error** rather than a "not yet implemented" one: an r2c plan's input is the
+  real-space slab, which has no transposed layout. This mirrors FFTW-MPI, which
+  pairs `FFTW_MPI_TRANSPOSED_OUT` on r2c with `FFTW_MPI_TRANSPOSED_IN` on c2r.
+- **`MpiPlan2D`/`3D`/`ND::local_footprints()`**: the `(input, output)` local
+  element counts for the plan's flag combination, so callers can size a single
+  in-place buffer correctly when the two sides differ.
+- **The WebAssembly `simd128` backend is now reachable.** `WasmSimdF64` /
+  `WasmSimdF32` were fully implemented and publicly re-exported but no transform
+  path ever constructed one, so a `simd128` build did exactly the same scalar
+  work as a plain one. New `dft::codelets::simd::wasm_backend` provides size-2,
+  size-4 and size-8 codelets for both precisions, and `notw_2_dispatch` /
+  `notw_4_dispatch` / `notw_8_dispatch` route into them on `wasm32` with
+  `target_feature = "simd128"`. The codelets are written against the
+  `SimdVector`/`SimdComplex` traits, so the identical source compiles against the
+  backend's scalar stand-in on the development host, where six new tests check it
+  against a directly evaluated DFT in both directions. **Not verified at run
+  time on WASM:** no WASM runtime is available to this project, so the `v128`
+  instruction sequences inside the trait impls remain unexecuted.
+
+### Security
+
+- **`api::parallel::RawPtr` no longer round-trips pointers through `usize`.**
+  Found by the first MIRI run over the crate's portable unsafe surface, which
+  flagged every `RawPtr` accessor with `warning: integer-to-pointer cast`. The
+  `ptr as usize` / `usize as *mut T` round trip strips the pointer's provenance,
+  so the derived `add`/`from_raw_parts` accesses in `ParallelPlan2D`/`3D`/`ND`
+  were no longer provably in-bounds of the buffer they came from under
+  Stacked/Tree Borrows. `RawPtr` now carries `*mut u8` and casts
+  pointer-to-pointer. Miri is clean over `api::parallel`, `api::memory`,
+  `api::plan`, `kernel::complex_mul`, `dft::problem` and `dft::plan` (98 tests)
+  afterwards; see TODO.md's Quality Gates for what stays out of Miri's reach.
+
+- **`dispatch_hand_avx512_size{16,32,64}_{f32,f64}` now reject wrong-length
+  slices.** These six `pub` functions (and the `notw_16/32/64_dispatch`
+  wrappers that forward to them) handed any-length safe slices to raw-pointer
+  AVX-512 codelets that unconditionally read/wrote exactly N elements; a
+  shorter slice was an out-of-bounds access reachable with no `unsafe` block
+  in the caller. Each entry point now `assert_eq!`s the slice length first.
+- **`DftProblem::sz` / `vecsz` are no longer public fields.** They are
+  `pub(crate)` with read-only `sz()` / `vecsz()` accessors, and a new private
+  `buffer_len` (captured once, at construction, by the `unsafe` constructor)
+  is what bounds every raw-pointer access in `Problem::zero` and
+  `DftPlan::solve`. Previously, safe code holding a legitimately constructed
+  `DftProblem` could enlarge `sz` after the fact and drive both methods past
+  the buffer the `unsafe` constructor was actually promised.
+- **`ThreadPool::parallel_for` now documents the "call `f` exactly once per
+  index in `0..count`" invariant** that `api::parallel`'s raw-pointer row/
+  column/fiber partitioning has always relied on for soundness, and
+  `api::parallel` no longer *trusts* it: a new `IndexClaims` one-shot claim
+  table makes every partitioning site tolerate a pool that calls the closure
+  out of range or more than once, degrading to incomplete results instead of
+  out-of-bounds writes or aliased `&mut` access.
+- **`api::parallel`'s `n0 * n1` / `dims.iter().product()` extent
+  computations are now overflow-checked** (`checked_extent` /
+  `checked_dims_product`), so a wrapped product can no longer pass the
+  buffer-length `assert_eq!` and then be used unwrapped for raw-pointer
+  indexing; `ParallelPlan2D`/`3D`/`ND::new` reject overflowing extents by
+  returning `None`, and the free `*_parallel` functions panic with a named
+  message instead of wrapping silently.
+- **`algorithm_from_solver_name` now re-validates every solver-name arm
+  against the transform size `n`, not just half of them.** Wisdom is
+  attacker-influenceable input (importable from a string, a file, or the
+  system wisdom paths), and an entry is only `(size, name, cost)`. A planted
+  `(1024 "nop" 1.0)` line used to reconstruct `Algorithm::Nop`, after which
+  `execute_inplace` silently returned the caller's input unchanged as an
+  "FFT result" (`execute` panicked instead); a planted `(6 "ct-dit" 1.0)`
+  drove the radix-2 engine at a non-power-of-two size past its
+  `debug_assert!`-only guard. `"nop"`, `"direct"`, `"ct-dit"`, `"ct-dif"`,
+  `"ct-radix4"`, `"ct-radix8"`, `"ct-splitradix"`, `"stockham"`, and
+  `"bluestein"` are now gated the same way the `"composite"`/`"winograd"`/
+  `"generic"`/`"rader"`/mixed-radix arms already were.
+
+### Fixed
+
+- **`GuruPlan` negative-effective-offset checks promoted from
+  `debug_assert!` to `assert!`.** A negative element offset (computable from
+  user-supplied `IoDim` strides) used to be caught with a clear diagnostic in
+  debug builds only; release builds indexed with the near-`usize::MAX` cast
+  instead and panicked with an opaque out-of-bounds message. Both build
+  profiles now report the same named diagnostic.
+- **`ThreadPool::parallel_for_chunks` / `parallel_split` no longer divide by
+  zero, overflow, or underflow** on degenerate arguments (`chunk_size == 0`,
+  `count == 0`, `chunk_size` near `usize::MAX`, a ragged final chunk, or
+  `min_chunk_size == 0`); these are provided trait methods on a public trait
+  with no documented preconditions, so any argument a caller can type now
+  behaves predictably (a zero chunk size is treated as no work) instead of
+  panicking or recursing until the stack overflows.
+- **`DftPlan::awake`** no longer carries a `WakeMode::Full` comment
+  (`// Initialize twiddle factors, etc.`) describing work the match arm never
+  did; both `WakeMode` arms are collapsed into the one real effect (setting
+  the wake state), with a doc comment explaining why and where real
+  twiddle-cache priming would go if this plan ever gains owned state.
+
+### Documentation
+
+- **SVE and WebAssembly SIMD claims corrected** in `README.md`,
+  `PROJECT_STATUS.md`, `oxifft.md`, and the `sve` feature comment in
+  `oxifft/Cargo.toml`: both were advertised as runtime-detected SIMD
+  backends, but neither is wired into any transform path today. SVE now
+  reads a real vector length from `/proc/sys/abi/sve_default_vector_length`
+  on aarch64 Linux (new `simd::parse_sve_vector_length_bytes`, pure Rust, no
+  `libc`) instead of the previous hardcoded 0, and is documented as
+  capability/length-detection only; WebAssembly is documented as scalar
+  today, with the implemented-but-unwired `WasmSimdF64`/`WasmSimdF32`
+  backend noted as a future dispatch target.
+- Added `rustfmt.toml` (pins `edition = "2021"`; the existing tree already
+  conformed to rustfmt's stable defaults, so this adds no reformatting) and
+  `clippy.toml` (`msrv = "1.87"`, matching `[workspace.package] rust-version`).
+- Added `SECURITY.md` (disclosure process, unsafe/soundness scope, untrusted
+  wisdom-parser threat model, fuzz target inventory).
+- Added `# Panics` sections to the public convenience functions in
+  `api/plan/functions.rs`, `api/plan/types_nd.rs`, and `api/plan/types_real.rs`
+  that call `.expect()` on an internal (fallible-by-signature) plan
+  constructor.
+- `TODO.md`'s Phase 7 "CI/CD" checklist no longer claims GitHub Actions
+  workflows are set up; the repository policy (publish workflows only) means
+  there is no CI, which the later Platform Matrix section already stated.
+  Live test-population figures (`TODO.md`, `README.md`) updated to the
+  measured `cargo nextest run --workspace --all-features` / `cargo test --doc
+  --workspace --all-features` counts; the historical v0.2.0/v0.1.0 figures
+  are left as point-in-time records for those releases.
+
+### Added
+
+- 5th fuzz target (`wisdom_measure_roundtrip`): imports a fuzzer-controlled
+  wisdom string, then plans and executes with `Flags::MEASURE` /
+  `Flags::WISDOM_ONLY` — the path that reaches the
+  `algorithm_from_solver_name` gating above.
+- `scripts/feature_matrix_sweep.sh`: hand-rolled (no `cargo-hack`) compile
+  sweep over `--all-features`, every individual feature, `--no-default-features`,
+  the documented no_std feature combinations, and the `thumbv7em-none-eabihf`
+  embedded target.
+
+### Fixed (fuzz harness, not production code)
+
+- **`fuzz_targets/r2c_roundtrip.rs`'s per-element error tolerance** no longer
+  compares each reconstructed element only against its own magnitude. A
+  fuzzer-found input mixing one huge value with a near-zero value elsewhere
+  in the same (small) input made a legitimate floating-point roundoff error
+  at the near-zero index — which scales with the *largest* magnitude
+  anywhere in the input, not with that element's own value — look like a
+  round-trip correctness bug. The tolerance is now `atol + rtol *
+  expected.abs()`, with `atol` scaled to the input's dynamic range; the
+  crash-triggering input is preserved as a permanent regression seed in the
+  (gitignored) local fuzz corpus.
 
 ## [0.4.1] - 2026-07-27
 
@@ -738,6 +968,7 @@ _No unreleased changes._
 - js-sys 0.3 (JavaScript interop)
 
 [Unreleased]: https://github.com/cool-japan/oxifft/compare/v0.4.1...HEAD
+[0.4.2]: https://github.com/cool-japan/oxifft/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/cool-japan/oxifft/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cool-japan/oxifft/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/cool-japan/oxifft/compare/v0.3.1...v0.3.2

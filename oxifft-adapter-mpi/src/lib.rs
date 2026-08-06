@@ -146,13 +146,34 @@ pub struct MpiFlags {
     /// Output data in transposed layout (avoids final transpose).
     /// Corresponds to FFTW_MPI_TRANSPOSED_OUT.
     pub transposed_out: bool,
-    /// Input data is already transposed (corresponds to FFTW_MPI_TRANSPOSED_IN).
+    /// Input data is already in the transposed distribution (corresponds to
+    /// `FFTW_MPI_TRANSPOSED_IN`).
     ///
-    /// **Not yet implemented.** Setting this flag causes `MpiPlan2D::new`,
-    /// `MpiPlan3D::new` and `MpiPlanND::new` to return
-    /// [`MpiError::FftError`] rather than silently
-    /// ignoring it and producing wrong results. It is retained in the API so the
-    /// transposed-input fast path can be added without a further breaking change.
+    /// The transposed distribution is exactly the one [`Self::transposed_out`]
+    /// produces: distributed over the *second* global axis rather than the first
+    /// (`[local_n1][n0]` for [`MpiPlan2D`], `[local_n1][n0][n2]` for
+    /// [`MpiPlan3D`], `[local_stride][n0]` for [`MpiPlanND`] where
+    /// `stride = product(dims[1..])`). The values it carries are *untransformed*
+    /// input; the flag describes layout only.
+    ///
+    /// Setting it mirrors the pipeline — the (now local) first axis is
+    /// transformed before the single transpose that restores the slab, instead of
+    /// after — so the standard FFTW-MPI idiom of a `transposed_out` forward
+    /// followed by a `transposed_in` inverse performs one `alltoallv` per
+    /// transform instead of two.
+    ///
+    /// For the **real** plans the flag describes the half-complex array, so it is
+    /// meaningful on c2r ([`MpiRealPlan2D::c2r`] / [`MpiRealPlan3D::c2r`], whose
+    /// *input* is half-complex) and is rejected with [`MpiError::FftError`] on
+    /// r2c, whose input is the never-transposed real-space slab. This matches
+    /// FFTW-MPI, which pairs `FFTW_MPI_TRANSPOSED_OUT` on r2c with
+    /// `FFTW_MPI_TRANSPOSED_IN` on c2r.
+    ///
+    /// Both transposed flags are a **slab-decomposition** concept and apply only
+    /// to the plans that take an `MpiFlags`. [`PencilPlan3D`] takes a plain
+    /// `oxifft::api::Flags` instead: its 2-D process grid defines no single
+    /// "second axis" to redistribute over, so neither transposed layout exists
+    /// there and neither flag can be passed to it.
     pub transposed_in: bool,
 }
 

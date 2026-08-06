@@ -1,0 +1,8 @@
+# clippy configuration for the OxiFFT workspace.
+#
+# `msrv` matches `[workspace.package] rust-version` in the root Cargo.toml, so
+# `cargo clippy` warns about any construct that would not compile on the
+# workspace's declared minimum-supported Rust version (verified empirically
+# against rustup toolchains 1.75.0-1.88.0; see CHANGELOG.md 0.4.0) instead of
+# silently accepting APIs stabilized after 1.87.
+msrv = "1.87"

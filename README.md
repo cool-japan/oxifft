@@ -17,7 +17,7 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 - **Transform Types**: Complex DFT, Real FFT (R2C/C2R), DCT/DST variants, DHT
 - **Multi-Dimensional**: 1D, 2D, 3D, and N-D transforms
 - **Batch Processing**: Efficient vector-rank handling for multiple transforms
-- **SIMD Optimization**: SSE2, AVX, AVX2, AVX-512, ARM NEON, ARM SVE, WebAssembly SIMD (runtime-detected; currently applied to small fixed-size codelets and Rader/Bluestein pointwise multiplies — the general large-N Stockham butterfly path is still scalar)
+- **SIMD Optimization**: SSE2, AVX, AVX2, AVX-512, and ARM NEON are runtime-detected and applied to small fixed-size codelets and Rader/Bluestein pointwise multiplies (the general large-N Stockham butterfly path is still scalar). WebAssembly `simd128` is dispatched for the size-2/4/8 codelets on `wasm32` builds compiled with `-C target-feature=+simd128` (see `dft::codelets::simd::wasm_backend`). ARM SVE remains **detection-only** — the capability/vector-length probes exist, but no transform path is dispatched through them, and stable Rust has no scalable-vector intrinsics to build one with
 - **Threading**: Rayon integration for parallel execution
 - **Wisdom System**: Plan caching and persistence; `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` consult the runtime wisdom cache before benchmarking, and `Flags::WISDOM_ONLY` plans exclusively from stored wisdom (FFTW semantics)
 - **Auto-tuning**: `Flags::MEASURE`/`PATIENT`/`EXHAUSTIVE` genuinely compare multiple candidate algorithms at plan time and cache the fastest via the wisdom system; the `oxifft_tune` binary (built from `src/bin/oxifft_tune.rs`) benchmarks candidate plans and writes wisdom, and a build-time baseline can be embedded with `OXIFFT_TUNE=1`
@@ -35,12 +35,12 @@ OxiFFT is a 99% Rust port of FFTW3, the world's most respected FFT library. It b
 - **Signal Processing**: Hilbert transform, analytic signal, Welch's PSD, cross-spectral density, coherence, cepstral analysis, FFT-based resampling (`signal` feature)
 - **GPU Acceleration**: Metal (Apple) runs transforms on the GPU today; the CUDA (NVIDIA) backend opens a real context/stream/plan but currently evaluates on the CPU (device kernel dispatch is pending in `oxicuda-fft`). Query the status at runtime via `GpuFft::execution_target()` / `GpuCapabilities::hardware_accelerated`
 - **MPI Distributed Computing**: 2D/3D/N-D distributed FFTs with slab decomposition — provided by the separate `oxifft-adapter-mpi` crate (links a system OpenMPI/MPICH library; see [MPI notes](#mpi))
-- **WebAssembly**: Browser-compatible FFT with WASM SIMD support
+- **WebAssembly**: Browser-compatible FFT via `wasm-bindgen`. The `WasmSimdF64`/`WasmSimdF32` simd128 backend is wired into the size-2/4/8 codelet dispatch when built for `wasm32` with `-C target-feature=+simd128`; larger sizes still take the scalar path. The codelet algebra is unit-tested on the development host against the backend's scalar stand-in, but no WASM runtime is available to this project, so the `v128` instruction sequences themselves have not been executed
 
 ## Project Status
 
 ✅ **Core FFT functionality is COMPLETE**
-✅ **1,730 tests passing** across the workspace (all features; 7 `#[ignore]`d long-running/environment tests), plus **107 doctests, 1 ignored**
+✅ **1,765 tests passing** on aarch64 across the workspace and **1,455** on x86_64 (`-p oxifft`, via Rosetta 2) — all features; 7 (aarch64) / 6 (x86_64) `#[ignore]`d long-running/environment tests — plus **107 doctests, 1 ignored**. The x86_64 run covers the SSE2/SSE3 tier only; see [PROJECT_STATUS.md](./PROJECT_STATUS.md#platform-status) for what the AVX/AVX2/AVX-512 tier is still missing
 ✅ **Zero clippy warnings** (all features)
 ⚠️ **Performance vs. RustFFT/FFTW is mixed** — OxiFFT wins some sizes and loses others (notably large power-of-2, prime, and some composite sizes). The committed FFTW baseline (`benches/baselines/v0.3.0/`: geomean ratio 1.50×, 4/7 v1.0 gates passing) is the source of truth; see [BENCHMARKING.md](./BENCHMARKING.md) and [Known Performance Gaps](#known-performance-gaps-vs-fftw). General parity is **not** yet claimed.
 ✅ **Extensively documented public API** — every rustdoc example compiles and runs under `cargo test --doc`
@@ -391,7 +391,7 @@ f16-support   = ["std"]          # Half-precision (f16)
 f128-support  = ["std"]          # Quad-precision (f128)
 sparse        = ["std"]          # Sparse FFT (FFAST)
 pruned        = ["std"]          # Pruned / partial FFT
-sve           = ["std"]          # ARM SVE (pure Rust; std::arch detection)
+sve           = ["std"]          # ARM SVE capability/length detection only (not yet wired into transforms)
 wasm          = ["std", ...]     # WebAssembly bindings
 streaming     = ["std"]          # STFT / windows / mel / MFCC
 const-fft     = []               # Compile-time fixed-size FFT
@@ -416,6 +416,7 @@ gpu           = ["std", "cuda", "metal"]
 - **[PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md)** - Performance analysis and optimization guide
 - **[TESTING.md](TESTING.md)** - Testing methodology and validation procedures
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines and project policies
+- **[SECURITY.md](SECURITY.md)** - Vulnerability disclosure process, unsafe/soundness scope, fuzz target inventory
 
 ### Architecture & Planning
 

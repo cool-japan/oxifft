@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-oxifft = { path = "../oxifft" }
+oxifft.workspace = true
 num-complex.workspace = true
 criterion.workspace = true
 # rustfft is optional and feature-gated (mirroring `fftw` below), but stays
@@ -24,7 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-oxifft-codegen = { path = "../oxifft-codegen" }
+oxifft-codegen.workspace = true
 
 [features]
 default = ["rustfft-compare"]

@@ -19,6 +19,17 @@ use crate::MpiFlags;
 /// 2. Distributed transpose to distribute n1
 /// 3. Local 1D FFTs along n0 dimension
 /// 4. Optional: Transpose back
+///
+/// # Transposed layouts
+///
+/// [`MpiFlags::transposed_out`](crate::MpiFlags::transposed_out) leaves the
+/// result distributed over `n1` in `[local_n1][n0][n2]` order (step 4 skipped),
+/// and [`MpiFlags::transposed_in`](crate::MpiFlags::transposed_in) declares that
+/// the *input* already arrives in that distribution. With `transposed_in` the
+/// pipeline is mirrored — `n0` is transformed first (it is complete locally),
+/// then a single batched transpose restores the slab for the `n1`/`n2`
+/// transforms — so a `transposed_out` forward followed by a `transposed_in`
+/// inverse costs one `alltoallv` per transform instead of two.
 pub struct MpiPlan3D<'p, T: Float, C: Communicator> {
     /// Global dimensions.
     dims: [usize; 3],
@@ -82,13 +93,6 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan3D<'p, T, C> {
                     n2
                 },
                 message: "Dimension size cannot be zero".to_string(),
-            });
-        }
-
-        if flags.transposed_in {
-            return Err(MpiError::FftError {
-                message: "MpiFlags::transposed_in is not yet implemented for the 3D slab plan"
-                    .to_string(),
             });
         }
 
@@ -159,9 +163,34 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan3D<'p, T, C> {
         )
     }
 
+    /// Local element counts this plan reads and writes, `(input, output)`.
+    ///
+    /// `transposed_in` / `transposed_out` each swap the corresponding side to the
+    /// `[local_n1][n0][n2]` footprint, so the two can differ; `execute_inplace`
+    /// requires a buffer at least as large as their maximum.
+    pub fn local_footprints(&self) -> (usize, usize) {
+        let [n0, n1, n2] = self.dims;
+        let local_n1 = LocalPartition::new(n1, self.pool.size(), self.pool.rank()).local_n;
+        let normal = self.local_n0 * n1 * n2;
+        let transposed = local_n1 * n0 * n2;
+        (
+            if self.flags.transposed_in {
+                transposed
+            } else {
+                normal
+            },
+            if self.flags.transposed_out {
+                transposed
+            } else {
+                normal
+            },
+        )
+    }
+
     /// Execute the distributed FFT in-place.
     ///
-    /// Input layout: `data[i0 * n1 * n2 + i1 * n2 + i2]` where `i0` is local.
+    /// Input layout: `data[i0 * n1 * n2 + i1 * n2 + i2]` where `i0` is local, or
+    /// `data[i1_local * n0 * n2 + i0 * n2 + i2]` when `transposed_in` is set.
     ///
     /// # Errors
     /// Returns `MpiError::SizeMismatch` if data buffer is too small.
@@ -172,24 +201,22 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan3D<'p, T, C> {
 
         let pool = self.pool;
 
-        // The transposed-output path writes `local_n1 * n0 * n2` elements into
-        // `data`, which can exceed the `local_n0 * n1 * n2` input footprint.
-        // Validate the worst case up front to convert a would-be slice-index
-        // panic into an error.
+        // A transposed side reads/writes `local_n1 * n0 * n2` elements, which can
+        // exceed the `local_n0 * n1 * n2` slab footprint. Validate the worst case
+        // up front to convert a would-be slice-index panic into an error.
         let transposed_partition = LocalPartition::new(n1, pool.size(), pool.rank());
         let local_n1 = transposed_partition.local_n;
-        let in_size = self.local_n0 * n1 * n2;
-        let out_size = if self.flags.transposed_out {
-            local_n1 * n0 * n2
-        } else {
-            in_size
-        };
+        let (in_size, out_size) = self.local_footprints();
         let required = in_size.max(out_size);
         if data.len() < required {
             return Err(MpiError::SizeMismatch {
                 expected: required,
                 actual: data.len(),
             });
+        }
+
+        if self.flags.transposed_in {
+            return self.execute_transposed_in(data, local_n1);
         }
 
         // Step 1: Local FFTs along n2 (innermost, always local)
@@ -261,6 +288,94 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan3D<'p, T, C> {
         Ok(())
     }
 
+    /// Transposed-input pipeline: `data` already holds the `[local_n1][n0][n2]`
+    /// distribution that `transposed_out` produces, carrying *untransformed*
+    /// values.
+    ///
+    /// `n0` is complete on this rank in that layout, so it is transformed first
+    /// (stride `n2` within each `i1` plane); one batched transpose then restores
+    /// the `[local_n0][n1][n2]` slab for the `n1` and `n2` transforms. A second
+    /// batched transpose runs only when `transposed_out` is also requested.
+    fn execute_transposed_in(
+        &mut self,
+        data: &mut [Complex<T>],
+        local_n1: usize,
+    ) -> Result<(), MpiError> {
+        let [n0, n1, n2] = self.dims;
+        let pool = self.pool;
+        let transposed_size = local_n1 * n0 * n2;
+        let normal_size = self.local_n0 * n1 * n2;
+
+        // Step 1: local FFTs along n0 (complete on this rank; stride n2).
+        let mut fiber_in = vec![Complex::<T>::zero(); n0];
+        let mut fiber_out = vec![Complex::<T>::zero(); n0];
+        for i1_local in 0..local_n1 {
+            let plane = i1_local * n0 * n2;
+            for i2 in 0..n2 {
+                for i0 in 0..n0 {
+                    fiber_in[i0] = data[plane + i0 * n2 + i2];
+                }
+                self.plan_n0.execute(&fiber_in, &mut fiber_out);
+                for i0 in 0..n0 {
+                    data[plane + i0 * n2 + i2] = fiber_out[i0];
+                }
+            }
+        }
+
+        // Step 2: batched transpose `[local_n1][n0][n2]` -> `[local_n0][n1][n2]`.
+        distributed_transpose_batched(
+            pool,
+            &data[..transposed_size],
+            &mut self.scratch,
+            n1,
+            n0,
+            local_n1,
+            n2,
+        )?;
+
+        // Step 3: local FFTs along n1, then along n2, on the restored slab.
+        let mut buffer_n1 = vec![Complex::<T>::zero(); n1];
+        let mut output_n1 = vec![Complex::<T>::zero(); n1];
+        for i0 in 0..self.local_n0 {
+            for i2 in 0..n2 {
+                for i1 in 0..n1 {
+                    buffer_n1[i1] = self.scratch[i0 * n1 * n2 + i1 * n2 + i2];
+                }
+                self.plan_n1.execute(&buffer_n1, &mut output_n1);
+                for i1 in 0..n1 {
+                    self.scratch[i0 * n1 * n2 + i1 * n2 + i2] = output_n1[i1];
+                }
+            }
+        }
+
+        let mut buffer_n2 = vec![Complex::<T>::zero(); n2];
+        for i0 in 0..self.local_n0 {
+            for i1 in 0..n1 {
+                let offset = i0 * n1 * n2 + i1 * n2;
+                buffer_n2.copy_from_slice(&self.scratch[offset..offset + n2]);
+                self.plan_n2
+                    .execute(&buffer_n2, &mut self.scratch[offset..offset + n2]);
+            }
+        }
+
+        // Step 4: emit in the requested output distribution.
+        if self.flags.transposed_out {
+            distributed_transpose_batched(
+                pool,
+                &self.scratch[..normal_size],
+                data,
+                n0,
+                n1,
+                self.local_n0,
+                n2,
+            )?;
+        } else {
+            data[..normal_size].copy_from_slice(&self.scratch[..normal_size]);
+        }
+
+        Ok(())
+    }
+
     /// Execute the distributed FFT out-of-place.
     ///
     /// # Errors
@@ -270,21 +385,21 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiPlan3D<'p, T, C> {
         input: &[Complex<T>],
         output: &mut [Complex<T>],
     ) -> Result<(), MpiError> {
-        let expected_size = self.local_n0 * self.dims[1] * self.dims[2];
-        if input.len() < expected_size {
+        let (in_size, out_size) = self.local_footprints();
+        if input.len() < in_size {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: in_size,
                 actual: input.len(),
             });
         }
-        if output.len() < expected_size {
+        if output.len() < in_size.max(out_size) {
             return Err(MpiError::SizeMismatch {
-                expected: expected_size,
+                expected: in_size.max(out_size),
                 actual: output.len(),
             });
         }
 
-        output[..expected_size].copy_from_slice(&input[..expected_size]);
+        output[..in_size].copy_from_slice(&input[..in_size]);
         self.execute_inplace(output)
     }
 }

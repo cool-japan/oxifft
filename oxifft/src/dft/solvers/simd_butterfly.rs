@@ -43,11 +43,28 @@ fn vec_to_boxed_twiddles(v: Vec<[f64; 2]>) -> Box<[[f64; 2]; 65535]> {
     unsafe { Box::from_raw(raw) }
 }
 
+/// Largest transform length covered by the precomputed twiddle tables.
+///
+/// The tables hold stages 0..16 (`m` = 2 .. 65536), i.e. `2^16 - 1 = 65535`
+/// entries. A transform longer than this would index `offsets` out of range, so
+/// the SIMD dispatchers hand it to the scalar path instead.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const MAX_PRECOMPUTED_TWIDDLE_N: usize = 65536;
+
 /// DIT butterfly stages with SIMD acceleration for f64.
 ///
 /// Detects CPU features at runtime and uses the fastest available implementation.
+///
+/// `data.len()` is expected to be a power of two. Lengths above 65536 exceed the
+/// precomputed twiddle tables the SIMD kernels index and are handled by the
+/// scalar path (which derives twiddles on the fly) rather than panicking on an
+/// out-of-range stage index.
 #[cfg(target_arch = "x86_64")]
 pub fn dit_butterflies_f64(data: &mut [Complex<f64>], sign: Sign) {
+    if data.len() > MAX_PRECOMPUTED_TWIDDLE_N {
+        dit_butterflies_scalar(data, sign);
+        return;
+    }
     if crate::detect_x86_feature!("avx2") && crate::detect_x86_feature!("fma") {
         // Safety: We've verified AVX2+FMA are available
         unsafe { dit_butterflies_avx2(data, sign) }
@@ -65,8 +82,15 @@ pub fn dit_butterflies_f64(data: &mut [Complex<f64>], sign: Sign) {
 ///
 /// Uses NEON 128-bit SIMD for complex arithmetic.
 /// NEON is always available on aarch64, so no runtime detection is needed.
+///
+/// As on x86_64, lengths above 65536 fall back to the scalar path because the
+/// NEON kernel indexes the precomputed twiddle table.
 #[cfg(target_arch = "aarch64")]
 pub fn dit_butterflies_f64(data: &mut [Complex<f64>], sign: Sign) {
+    if data.len() > MAX_PRECOMPUTED_TWIDDLE_N {
+        dit_butterflies_scalar(data, sign);
+        return;
+    }
     // Safety: NEON is always available on aarch64
     unsafe { dit_butterflies_neon(data, sign) }
 }
@@ -1161,10 +1185,19 @@ unsafe fn dit_butterflies_avx2(data: &mut [Complex<f64>], sign: Sign) {
 /// SSE3 DIT butterfly implementation.
 ///
 /// Processes 1 butterfly (2 complex values) per iteration using 128-bit vectors.
-/// Requires SSE3 for _mm_addsub_pd. Uses twiddle recurrence for efficiency.
+/// Requires SSE3 for `_mm_addsub_pd`.
+///
+/// Twiddles come from the shared [`PrecomputedTwiddles`] table (the same table
+/// the AVX2 path uses), *not* from a per-stage `w *= w_step` recurrence. The
+/// recurrence used to drift by roughly `half_m * f64::EPSILON` over a stage,
+/// which is invisible at the 1e-10 tolerance of a direct scalar comparison but
+/// pushed Bluestein's chirp round-trip (which chains two padded power-of-two
+/// transforms) past its 1e-13 relative-error gate.
 ///
 /// # Safety
-/// Caller must ensure SSE3 is available on the current CPU.
+/// Caller must ensure SSE3 is available on the current CPU. `data.len()` must
+/// be a power of two no greater than 65536 (the extent of the twiddle table);
+/// [`dit_butterflies_f64`] enforces the upper bound before dispatching here.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse3")]
 unsafe fn dit_butterflies_sse3(data: &mut [Complex<f64>], sign: Sign) {
@@ -1173,20 +1206,30 @@ unsafe fn dit_butterflies_sse3(data: &mut [Complex<f64>], sign: Sign) {
 
         let n = data.len();
         let log_n = n.trailing_zeros() as usize;
-        let sign_val = f64::from(sign.value());
+        let twiddles = get_twiddles();
+        let table: &[[f64; 2]; 65535] = if sign == Sign::Forward {
+            &twiddles.forward
+        } else {
+            &twiddles.inverse
+        };
 
-        let mut m = 2;
-        for _ in 0..log_n {
+        let ptr = data.as_mut_ptr() as *mut f64;
+
+        let mut m = 2usize;
+        for stage in 0..log_n {
             let half_m = m / 2;
-            let angle_step = sign_val * core::f64::consts::TAU / (m as f64);
-            let w_step = Complex::cis(angle_step);
-
-            let ptr = data.as_mut_ptr() as *mut f64;
+            // Stage `stage` stores its `half_m` twiddles contiguously as
+            // `[cos, sin]` pairs starting at `offsets[stage]`.
+            let tw_base = table[twiddles.offsets[stage]..].as_ptr();
 
             for k in (0..n).step_by(m) {
-                let mut w = Complex::new(1.0, 0.0);
-
                 for j in 0..half_m {
+                    // `tw` is the pair [cos, sin] in ascending lane order.
+                    let tw = _mm_loadu_pd(tw_base.add(j) as *const f64);
+                    // `_mm_shuffle_pd(a, b, imm)` = [a[imm & 1], b[(imm >> 1) & 1]],
+                    // so 0b01 swaps the lanes: [sin, cos].
+                    let tw_swapped = _mm_shuffle_pd(tw, tw, 0b01);
+
                     // Load u (1 complex = 2 f64)
                     let u_ptr = ptr.add((k + j) * 2);
                     let u = _mm_loadu_pd(u_ptr);
@@ -1195,29 +1238,28 @@ unsafe fn dit_butterflies_sse3(data: &mut [Complex<f64>], sign: Sign) {
                     let v_ptr = ptr.add((k + j + half_m) * 2);
                     let v = _mm_loadu_pd(v_ptr);
 
-                    // Complex multiply: t = v * twiddle
-                    // v = [v_re, v_im]
+                    // Complex multiply: t = v * twiddle, with v = [v_re, v_im].
                     let v_re = _mm_shuffle_pd(v, v, 0b00); // [v_re, v_re]
                     let v_im = _mm_shuffle_pd(v, v, 0b11); // [v_im, v_im]
 
-                    // t_re = v_re * tw_re - v_im * tw_im
-                    // t_im = v_re * tw_im + v_im * tw_re
-                    let prod1 = _mm_mul_pd(v_re, _mm_set_pd(w.im, w.re)); // [v_re*cos, v_re*sin]
-                    let prod2 = _mm_mul_pd(v_im, _mm_set_pd(w.re, w.im)); // [v_im*sin, v_im*cos]
+                    let prod1 = _mm_mul_pd(v_re, tw); // [v_re*cos, v_re*sin]
+                    let prod2 = _mm_mul_pd(v_im, tw_swapped); // [v_im*sin, v_im*cos]
 
-                    // addsub: [a0-b0, a1+b1]
-                    // We want [v_re*cos - v_im*sin, v_re*sin + v_im*cos]
-                    let t = _mm_addsub_pd(prod1, _mm_shuffle_pd(prod2, prod2, 0b01));
+                    // `_mm_addsub_pd(a, b)` yields [a0 - b0, a1 + b1], i.e.
+                    // [v_re*cos - v_im*sin, v_re*sin + v_im*cos] — exactly the
+                    // complex product, because `prod2` is already in the lane
+                    // order `addsub` wants. This site historically shuffled
+                    // `prod2` into [v_im*cos, v_im*sin] before the `addsub`,
+                    // which computed [v_re*cos - v_im*cos, v_re*sin + v_im*sin]
+                    // — a wrong answer for every twiddle whose cos and sin
+                    // differ (it coincidentally agrees at 45 deg, which is why
+                    // the smallest radix-2 stages masked it). Pinned by
+                    // `test_simd_butterfly_matches_naive_dft` below.
+                    let t = _mm_addsub_pd(prod1, prod2);
 
                     // Butterfly
-                    let out_u = _mm_add_pd(u, t);
-                    let out_v = _mm_sub_pd(u, t);
-
-                    _mm_storeu_pd(u_ptr, out_u);
-                    _mm_storeu_pd(v_ptr, out_v);
-
-                    // Advance twiddle using recurrence
-                    w = w * w_step;
+                    _mm_storeu_pd(u_ptr, _mm_add_pd(u, t));
+                    _mm_storeu_pd(v_ptr, _mm_sub_pd(u, t));
                 }
             }
             m *= 2;
@@ -1338,6 +1380,106 @@ mod tests {
 
         for (a, b) in data_scalar.iter().zip(data_simd.iter()) {
             assert!(complex_approx_eq(*a, *b, 1e-9), "Mismatch: {a:?} vs {b:?}");
+        }
+    }
+
+    /// In-place bit-reversal permutation, local to the tests so the naive-DFT
+    /// comparison does not depend on a private helper in `solvers::ct`.
+    fn bit_reverse(data: &mut [Complex<f64>]) {
+        let n = data.len();
+        let bits = n.trailing_zeros();
+        for i in 0..n {
+            let j = (i as u64).reverse_bits() >> (64 - bits);
+            let j = j as usize;
+            if j > i {
+                data.swap(i, j);
+            }
+        }
+    }
+
+    /// Reference DFT evaluated directly from the definition.
+    fn naive_dft(input: &[Complex<f64>], sign: Sign) -> Vec<Complex<f64>> {
+        let n = input.len();
+        let sign_val = f64::from(sign.value());
+        (0..n)
+            .map(|k| {
+                let mut acc = Complex::new(0.0, 0.0);
+                for (j, x) in input.iter().enumerate() {
+                    let angle =
+                        sign_val * core::f64::consts::TAU * ((j * k) % n) as f64 / (n as f64);
+                    acc = acc + *x * Complex::cis(angle);
+                }
+                acc
+            })
+            .collect()
+    }
+
+    /// Absolute-accuracy gate against a directly evaluated DFT.
+    ///
+    /// This is the regression test for the x86_64 SSE3 wrong-answer bug: the
+    /// pre-existing `test_simd_matches_scalar_*` tests only compared the SIMD
+    /// path against `dit_butterflies_scalar`, so they could not distinguish a
+    /// wrong twiddle lane order from a wrong *shared* convention, and their
+    /// 1e-8/1e-10 tolerances were too loose to see the twiddle-recurrence
+    /// drift that the SSE3 path used to accumulate. Sizes 8/16/64/256 all
+    /// exercise at least one twiddle whose cos and sin differ in magnitude
+    /// (the buggy lane order agreed with the correct one only at 45 degrees).
+    #[test]
+    fn test_simd_butterfly_matches_naive_dft() {
+        for &n in &[8_usize, 16, 64, 256] {
+            for sign in [Sign::Forward, Sign::Backward] {
+                let input: Vec<Complex<f64>> = (0..n)
+                    .map(|i| {
+                        let x = i as f64;
+                        Complex::new((0.7 * x).sin() + 0.3 * x, (0.11 * x).cos() - 0.2 * x)
+                    })
+                    .collect();
+
+                let expected = naive_dft(&input, sign);
+
+                let mut actual = input.clone();
+                bit_reverse(&mut actual);
+                dit_butterflies_f64(&mut actual, sign);
+
+                // Scale-aware tolerance: the reference sum itself carries
+                // O(n * eps) rounding, so compare against the transform's own
+                // magnitude rather than an absolute epsilon.
+                let scale = expected
+                    .iter()
+                    .fold(0.0_f64, |acc, c| acc.max(c.re.abs().max(c.im.abs())));
+                let tol = 1e-13 * scale * (n as f64);
+
+                for (i, (a, b)) in expected.iter().zip(actual.iter()).enumerate() {
+                    assert!(
+                        complex_approx_eq(*a, *b, tol),
+                        "n={n} sign={sign:?} index {i}: expected {a:?}, got {b:?} (tol {tol:e})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Lengths beyond the precomputed twiddle table must degrade to the scalar
+    /// path instead of indexing `PrecomputedTwiddles::offsets` out of range.
+    #[test]
+    fn test_simd_butterfly_above_twiddle_table_extent() {
+        // 2^17 = 131072 > 65536, i.e. one stage past the end of the table.
+        let n = 1_usize << 17;
+        let input: Vec<Complex<f64>> = (0..n)
+            .map(|i| Complex::new((i % 13) as f64, (i % 7) as f64))
+            .collect();
+
+        let mut via_dispatch = input.clone();
+        dit_butterflies_f64(&mut via_dispatch, Sign::Forward);
+
+        let mut via_scalar = input;
+        dit_butterflies_scalar(&mut via_scalar, Sign::Forward);
+
+        for (i, (a, b)) in via_scalar.iter().zip(via_dispatch.iter()).enumerate() {
+            assert!(
+                complex_approx_eq(*a, *b, 1e-9),
+                "Mismatch at {i}: {a:?} vs {b:?}"
+            );
         }
     }
 }

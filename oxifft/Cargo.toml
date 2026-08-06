@@ -82,8 +82,12 @@ f16-support = ["std"]
 sparse = ["std"]
 # Pruned FFT support (partial input/output computation). Requires std.
 pruned = ["std"]
-# ARM SVE (Scalable Vector Extension) support. SVE length detection uses
-# `std::arch::is_aarch64_feature_detected!`, so this feature requires std.
+# ARM SVE (Scalable Vector Extension) support. Currently provides capability
+# and vector-length detection only — `has_sve` uses
+# `std::arch::is_aarch64_feature_detected!` and the vector length is read from
+# `/proc/sys/abi/sve_default_vector_length` on Linux (pure Rust, no libc). Not
+# yet wired into any transform path (the `Sve256*` types are portable scalar
+# wrappers). Requires std.
 sve = ["std"]
 # WebAssembly support (wasm-bindgen glue). Requires std.
 wasm = ["std", "dep:wasm-bindgen"]

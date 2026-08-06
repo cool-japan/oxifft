@@ -358,3 +358,44 @@ fn test_simd_notw_256_roundtrip() {
         );
     }
 }
+
+// ── Regression: fixed-size dispatchers must reject wrong-length slices ──────
+//
+// `notw_16/32/64_dispatch` are `pub` and reachable from outside the crate
+// (`oxifft::dft::codelets::simd::…` / the `dft::codelets` re-exports).  On
+// x86_64 with the `avx512` feature they forward to
+// `hand_avx512::dispatch_hand_avx512_size*`, which calls a raw-pointer
+// codelet that unconditionally touches N `Complex<T>` elements.  Passing a
+// shorter slice from entirely safe code used to read and write past the end
+// of the caller's allocation; it must now be a deterministic panic.
+
+#[test]
+#[should_panic(expected = "notw_16_dispatch requires exactly 16 elements")]
+fn notw_16_dispatch_rejects_short_slice() {
+    let mut data = vec![Complex::<f64>::zero(); 2];
+    notw_16_dispatch(&mut data, -1);
+}
+
+#[test]
+#[should_panic(expected = "notw_32_dispatch requires exactly 32 elements")]
+fn notw_32_dispatch_rejects_short_slice() {
+    let mut data = vec![Complex::<f64>::zero(); 2];
+    notw_32_dispatch(&mut data, -1);
+}
+
+#[test]
+#[should_panic(expected = "notw_64_dispatch requires exactly 64 elements")]
+fn notw_64_dispatch_rejects_long_slice() {
+    let mut data = vec![Complex::<f32>::zero(); 65];
+    notw_64_dispatch(&mut data, -1);
+}
+
+/// Direct check of the AVX-512 entry points themselves; only compiled where
+/// they exist.
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+#[test]
+#[should_panic(expected = "requires exactly 16 elements")]
+fn hand_avx512_dispatch_rejects_short_slice() {
+    let mut data = vec![Complex::<f64>::zero(); 2];
+    crate::dft::codelets::hand_avx512::dispatch_hand_avx512_size16_f64(&mut data, -1);
+}

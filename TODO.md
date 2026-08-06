@@ -221,11 +221,23 @@
 - [x] Document threading configuration
 
 ### CI/CD
-- [x] Set up GitHub Actions
-- [x] Add test workflow (all platforms)
-- [x] Add benchmark workflow
-- [x] Add clippy/fmt checks
-- [x] Add documentation build
+
+> **N/A under repository policy, not actually complete.** The five items
+> below were historically checked off, but repository policy permits only
+> publish workflows under `.github/workflows/` (see the "Platform Matrix"
+> section later in this file), so there is no GitHub Actions test/benchmark/
+> clippy-fmt/doc-build workflow and none is planned. A `ci.yml.disabled`
+> file is kept in `.github/workflows/` (inert — GitHub Actions only executes
+> `*.yml`/`*.yaml`) as a reference for what such a workflow would look like
+> if the policy ever changes. All of the checks it would run (tests, clippy,
+> fmt, doc build) are instead run locally/manually; see `TESTING.md` and the
+> "Quality Gates" section below for the current local-verification status.
+
+- [~] Set up GitHub Actions — not applicable under current policy (see above)
+- [~] Add test workflow (all platforms) — run manually/locally instead
+- [~] Add benchmark workflow — run manually/locally instead (`oxifft-bench`)
+- [~] Add clippy/fmt checks — run manually/locally instead
+- [~] Add documentation build — run manually/locally instead (`cargo doc`)
 
 ---
 
@@ -287,7 +299,7 @@
 - **rfft_batch/irfft_batch**: Convenience functions for batched real FFT
 
 ### Test Coverage
-- 1,730 tests passing across the workspace, all features (v0.4.0), + 107 doctests (1 ignored) — unit + integration + rustfft comparison + wisdom + planning + size coverage + GuruPlan + split-complex + codegen + SIMD + signal processing + autodiff + convolution + NUFFT + FrFT + sparse + pruned + streaming + auto-tuning + mixed-radix + multi-rank 3D pencil FFT
+- 1,765 tests passing across the workspace, all features (measured 2026-08-04; `cargo nextest run --workspace --all-features`), + 107 doctests (1 ignored) — unit + integration + rustfft comparison + wisdom + planning + size coverage + GuruPlan + split-complex + codegen + SIMD + signal processing + autodiff + convolution + NUFFT + FrFT + sparse + pruned + streaming + auto-tuning + mixed-radix + multi-rank 3D pencil FFT
 - 28 FFTW comparison tests passing (oxifft-bench with fftw-compare feature)
 - 688 public API items (all documented and tested)
 - 0 unimplemented!() or todo!() in public API surface
@@ -930,8 +942,9 @@ investigators): silent wrong-answer bugs, unwired flagship features, unsound API
 dishonest docs, packaging blockers. Zero silent degradation for v1.0.
 
 **Status legend (as of the v0.4.0 docs pass):** `[x]` = fix landed and the full
-test suite (1,730 tests, all features) is green; `[~]` = partially addressed,
-remaining gap noted; `[ ]` = not yet done.
+test suite (1,765 tests as of 2026-08-04, all features — see "Verification
+Gates" below) is green; `[~]` = partially addressed, remaining gap noted;
+`[ ]` = not yet done.
 
 ### Wave 1 — Correctness & Core Wiring (parallel)
 
@@ -993,13 +1006,19 @@ remaining gap noted; `[ ]` = not yet done.
 
 ### Verification Gates
 
-- [x] cargo nextest run --workspace --all-features: zero failures (1,730 passed, 7 skipped)
+- [x] cargo nextest run --workspace --all-features: zero failures on aarch64 macOS (1,765
+      passed, 7 skipped) **and** on x86_64 via Rosetta 2 (`-p oxifft --target
+      x86_64-apple-darwin`: 1,455 passed, 6 skipped) — measured 2026-08-04, after the SSE3
+      wrong-answer fix; see the Platform Matrix note below for what the x86_64 run does and
+      does not cover
 - [x] cargo clippy --workspace --all-targets --all-features: zero warnings (verified across the
-      full workspace)
+      full workspace, aarch64 host)
 - [x] cargo test --doc --all-features: doctests pass (107 doctests, 1 ignored)
-- [~] Feature matrix: all-features + individual std features compile clean; bare and avx512
-      `--no-default-features` (no_std) now build clean (see nostd-features); full feature-matrix
-      sweep still outstanding
+- [x] Feature matrix: all-features + individual std features compile clean; bare and avx512
+      `--no-default-features` (no_std) build clean (see nostd-features). **2026-08-03: full
+      sweep done** — `scripts/feature_matrix_sweep.sh`, 25/25 rows pass (every one of the 17
+      features individually + combinations, host and `thumbv7em-none-eabihf`); compile-only,
+      see the Platform Matrix section for why that is not the same as runtime correctness
 - [x] cargo deny check: fully clean (bans, advisories, licenses, sources)
 - [x] Adversarial numerics validation (primes/composites/2D/3D/DCT/DST/f32) within tolerance
 - [x] mpirun -n 2 / -n 4 pencil + slab tests pass (validated on an MPI host)
@@ -1051,16 +1070,102 @@ Production-ready for all 14 COOLJAPAN dependent projects.
 > automated CI runs. `[x]` = exercised locally at some point; treat as
 > "verified where run", and re-verify per release. `no_std` core now builds
 > clean on host and embedded targets (see the nostd-features sprint item); a
-> full no_std feature-matrix sweep is still outstanding.
+> full no_std feature-matrix sweep is still outstanding (**update
+> 2026-08-03: now done, see "Feature-matrix sweep" below — clean**).
+>
+> **2026-08-04:** the `[~]`/`[!]` x86_64 rows below are resolved for the tier that
+> can be executed here; read the note that follows for the precise boundary.
 
-- [x] aarch64 macOS / Apple Silicon (NEON) — primary development host
-- [~] x86_64 Linux (SSE2, AVX, AVX2, AVX-512) — verify locally per release
-- [~] x86_64 macOS (SSE2, AVX, AVX2) — verify locally per release
-- [~] x86_64 Windows (SSE2, AVX, AVX2) — verify locally per release
-- [~] aarch64 Linux (NEON) — verify locally per release
-- [~] wasm32-unknown-unknown (WASM SIMD) — verify locally per release
+> **✅ RESOLVED 2026-08-04 — the x86_64 wrong-answer bug is fixed.** The
+> 2026-08-03 pass ran the suite on x86_64 for the first time (there is no CI and
+> the primary dev host is aarch64) and found **93 of 1447 tests failing** with
+> errors of magnitude ~1e1-1e2 against a 1e-10 tolerance — a wrong-answer bug.
+> Root cause and fix (2026-08-04), both in
+> `oxifft/src/dft/solvers/simd_butterfly.rs`'s `dit_butterflies_sse3` — the tier
+> every x86_64 CPU without AVX2 takes, and the one
+> `dft/codelets/simd/large_sizes.rs`'s `dit_{64,128,256}_precomputed` delegate to
+> on every non-aarch64 target:
+>
+> 1. **Wrong complex-multiply lane order.** `_mm_addsub_pd`'s second operand was
+>    shuffled to `[v_im*cos, v_im*sin]` first, computing
+>    `[v_re*cos - v_im*cos, v_re*sin + v_im*sin]` rather than
+>    `[v_re*cos - v_im*sin, v_re*sin + v_im*cos]`. The two coincide only at 45
+>    degrees, which is why the smallest radix-2 stages hid it. Fixed by deleting
+>    the shuffle (`prod2` was already in `addsub`'s lane order).
+> 2. **Twiddle-recurrence drift.** The kernel advanced twiddles with
+>    `w *= w_step`, drifting ~`half_m * EPSILON` per stage. Invisible at the
+>    1e-10 tolerance of the scalar comparison tests, but enough to push
+>    Bluestein's chirp round-trip past its 1e-13 gate at n=257/509/1009. Fixed by
+>    reading the shared `PrecomputedTwiddles` table, as the AVX2 and NEON kernels
+>    already did.
+>
+> **x86_64 is now 1455/1455** (`cargo nextest run -p oxifft --all-features
+> --target x86_64-apple-darwin`, Rosetta 2) and aarch64 is green at
+> 1765 passed / 7 skipped. Pinned by the new
+> `dft::solvers::simd_butterfly::tests::test_simd_butterfly_matches_naive_dft`,
+> an absolute-accuracy gate against a directly evaluated DFT (the pre-existing
+> `test_simd_matches_scalar_*` tests compared the SIMD path only against the
+> equally-drifting scalar recurrence, so they could not see either defect
+> clearly).
+>
+> **⚠️ Do not over-claim.** Rosetta 2 reports SSE4.2 and no AVX
+> (`arch -x86_64 sysctl machdep.cpu.features`), so the tier actually executed is
+> **SSE2/SSE3 only**. The crate's whole AVX / AVX2 / AVX-512 surface —
+> `simd/avx.rs`, `simd/avx2.rs`, `simd/avx512.rs`,
+> `dft/codelets/hand_avx512.rs`, `dit_butterflies_avx2`,
+> `dft/solvers/stockham/x86_64.rs`, `dft/solvers/generic.rs`,
+> `dft/codelets/simd/large_sizes.rs`, `kernel/complex_mul.rs` — **has never been
+> executed on any host**: no AVX2-capable machine is available to this project.
+> Exactly one function of that set, `dit_butterflies_avx2` (what a real
+> post-2013 x86_64 desktop/server would run for this transform), was
+> **hand-audited** during this fix — every `_mm256_set_pd`/`_mm256_permute_pd`
+> lane order, every `_mm256_blend_pd` immediate, the radix-4 stage pairing and
+> the fused `W_8`/`W_16` constants check out, and it already used the
+> precomputed table. The rows below say "SSE2/SSE3 verified", not "x86_64
+> verified".
+
+- [x] aarch64 macOS / Apple Silicon (NEON) — primary development host; 1,765
+      passed, 0 failed, 7 skipped (`cargo nextest run --workspace
+      --all-features`, 2026-08-04)
+- [x] x86_64 macOS, **SSE2/SSE3 tier** — 1,455 passed, 0 failed, 6 skipped
+      (`cargo nextest run -p oxifft --all-features --target x86_64-apple-darwin`
+      via Rosetta 2, 2026-08-04). The AVX/AVX2 tiers are *not* reachable under
+      Rosetta and remain unexecuted; see the note above.
+- [~] x86_64 Linux (SSE2, AVX, AVX2, AVX-512) — compiles clean (`cargo check
+      --target x86_64-unknown-linux-gnu --all-features`); shares the fixed
+      `target_arch = "x86_64"` source with x86_64 macOS, so its SSE2/SSE3 tier is
+      covered by that run, but AVX2/AVX-512 remain unexecuted anywhere
+- [~] x86_64 Windows (SSE2, AVX, AVX2) — compiles clean (`cargo check --target
+      x86_64-pc-windows-msvc --all-features`); same caveat as x86_64 Linux
+- [~] aarch64 Linux (NEON) — compiles clean (`cargo check --target
+      aarch64-unknown-linux-gnu --all-features`); shares the
+      `target_arch = "aarch64"` NEON source verified passing on aarch64 macOS
+      above, but not independently test-run
+- [~] wasm32-unknown-unknown (WASM SIMD) — compiles clean, both scalar and
+      `-C target-feature=+simd128` (2026-08-04: `cargo clippy --no-default-features
+      --features std,wasm,... --target wasm32-unknown-unknown`; `threading` is
+      rejected by a `compile_error!` on wasm32 by design). **The `simd128`
+      codelets are now wired into dispatch** (`dft::codelets::simd::wasm_backend`,
+      reached from `notw_{2,4,8}_dispatch`); their butterfly algebra is unit-tested
+      on the host against the scalar stand-in backend, but no WASM runtime is
+      available here, so the `v128` trait impls themselves remain unexecuted.
 - [x] no_std (embedded target, with alloc) — `cargo check -p oxifft --no-default-features
-      --target thumbv7em-none-eabihf` builds clean (verified 2026-07-27)
+      --target thumbv7em-none-eabihf` builds clean (verified 2026-07-27,
+      re-verified 2026-08-03 as part of the feature-matrix sweep below)
+
+
+### Feature-matrix sweep (2026-08-03)
+
+`scripts/feature_matrix_sweep.sh` (new) checks `--all-features`, bare
+`--no-default-features`, default features, and every one of the 17 features
+individually on the host (aarch64-apple-darwin), plus bare/`avx512`/
+`const-fft`/`fftw-compat` (the features documented "no_std + alloc capable")
+on `thumbv7em-none-eabihf`. **Result: 25/25 rows pass** — every feature
+compiles cleanly alone and in combination, on both targets. `portable_simd`
+on the embedded target is skipped (needs a nightly toolchain with that
+target installed; not assumed present). This is a **compile-only** sweep —
+it says nothing about runtime correctness, which is exactly where the
+x86_64 regression above lives despite every relevant row compiling clean.
 
 ### Quality Gates
 
@@ -1072,9 +1177,45 @@ Production-ready for all 14 COOLJAPAN dependent projects.
     - **Goal:** Eliminate production `.unwrap()` at rader_omega.rs:91, spectral.rs:363-364, threading/mod.rs:385-389. Confirm 0 todo!()/unimplemented!() hits. Replace with `?`/`ok_or_else`/`expect("invariant: ...")`.
     - **Note:** All `.unwrap()` calls in those files were confirmed to be inside `#[cfg(test)]` test modules — no production unwraps existed. 0 `todo!()/unimplemented!()` in production code confirmed.
     - **Files:** `oxifft/src/kernel/rader_omega.rs`, `oxifft/src/signal/spectral.rs`, `oxifft/src/threading/mod.rs`
-- [ ] MIRI passes for all unsafe code: `cargo +nightly miri test`
+- [~] MIRI passes for all unsafe code: `cargo +nightly miri test`
+    - **2026-08-04: first MIRI run.** Scoped, because Miri cannot execute the
+      architecture-specific SIMD intrinsics that hold most of the crate's `unsafe`
+      (`simd/{avx,avx2,avx512,sse2,neon}.rs`, `dft/codelets/hand_avx512.rs`,
+      `wasm/simd.rs`) and because `threading`'s rayon-backed pool trips a Stacked
+      Borrows violation *inside `rayon-core` itself*
+      (`rayon_core::registry`, reached from `threading/rayon_impl.rs:66`) which is
+      not this crate's code to fix. Run on the portable/pointer-arithmetic core
+      with `--no-default-features --features std`, **98 tests, all green, no UB
+      and no diagnostics**: `api::parallel` (19 tests — the `RawPtr` +
+      `IndexClaims` raw-pointer row/column/fiber partitioning) and
+      `api::memory` + `api::plan` + `kernel::complex_mul` + `dft::problem` +
+      `dft::plan` (79 tests). `kernel::twiddle` was dropped from the set: its
+      table-construction tests do not finish in a reasonable time under the
+      interpreter.
+    - **Found and fixed:** `api::parallel::RawPtr` stored pointers as `usize` and
+      cast back with `usize as *mut T`. Miri flagged every such site
+      (`warning: integer-to-pointer cast`): the round trip strips provenance, so
+      the reconstructed pointer's accesses are no longer provably in-bounds of the
+      original allocation. `RawPtr` now carries `*mut u8` and casts
+      pointer-to-pointer, preserving provenance. Miri is clean on the scoped set
+      afterwards.
+    - **Still deferred:** the arch-gated SIMD modules (out of Miri's reach by
+      construction) and the rayon-backed `threading` tests (third-party UB).
 - [~] Fuzz testing run for >24 hours without findings
     - **Refinement (2026-04-24):** Scaffolding done (3 harnesses: plan_create, r2c_roundtrip, wisdom_parse), 24h production runs deferred to follow-up.
+    - **Refinement (2026-08-03):** Now 5 harnesses (`oxifft/fuzz/fuzz_targets/`):
+      plan_create, r2c_roundtrip, wisdom_parse, wisdom_parse_binary, and the
+      new wisdom_measure_roundtrip (imports a fuzzed wisdom string, then plans
+      + executes with `Flags::MEASURE`/`Flags::WISDOM_ONLY` — the path that
+      reaches `algorithm_from_solver_name`'s applicability gating). All five
+      build with `cargo +nightly fuzz build` and were smoke-run (20-60s each,
+      no crash) as part of this pass; `r2c_roundtrip`'s own tolerance model
+      was found miscalibrated for wide-dynamic-range inputs (fixed — see
+      CHANGELOG.md Unreleased/Documentation, and the in-file comment at the
+      fixed assertion) and re-run clean for 160k+ iterations afterward. Full
+      >24h production runs (the actual quality-gate ask) remain deferred: that
+      is a dedicated-compute-budget task, not something a single verification
+      pass can complete.
 
 ### Release Steps
 

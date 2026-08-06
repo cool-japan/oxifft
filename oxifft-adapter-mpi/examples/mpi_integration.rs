@@ -509,6 +509,365 @@ fn check_real_3d<C: mpi::topology::Communicator>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Transposed-INPUT scenarios (`MpiFlags::transposed_in`)
+//
+// The input is laid out in the same distribution `transposed_out` emits, but
+// carries *untransformed* values. The result must equal the same serial
+// reference the natural-layout runs are checked against — so these validate the
+// mirrored pipeline end to end, not just self-consistency.
+// ---------------------------------------------------------------------------
+
+fn check_slab_2d_transposed_in<C: mpi::topology::Communicator>(
+    pool: &MpiPool<C>,
+    n0: usize,
+    n1: usize,
+    transposed_out: bool,
+) -> Result<(), String> {
+    let (size, rank) = (pool.size(), pool.rank());
+    let reference = reference_2d(n0, n1);
+    let tpart = LocalPartition::new(n1, size, rank);
+    let part0 = LocalPartition::new(n0, size, rank);
+
+    // Transposed input: data[local_col * n0 + row] = sample(row * n1 + global_col).
+    let alloc = (tpart.local_n * n0).max(part0.local_n * n1).max(1);
+    let mut data = vec![Complex::<f64>::zero(); alloc];
+    for lc in 0..tpart.local_n {
+        let gc = tpart.local_start + lc;
+        for row in 0..n0 {
+            data[lc * n0 + row] = sample(row * n1 + gc);
+        }
+    }
+
+    let mut flags = MpiFlags::estimate().transposed_in();
+    if transposed_out {
+        flags = flags.transposed_out();
+    }
+    let mut plan = MpiPlan2D::new(n0, n1, Direction::Forward, flags, pool)
+        .map_err(|e| format!("[rank {rank}] MpiPlan2D::new(T/I) failed: {e}"))?;
+    plan.execute_inplace(&mut data)
+        .map_err(|e| format!("[rank {rank}] slab2d T/I execute_inplace failed: {e}"))?;
+
+    if transposed_out {
+        for lc in 0..tpart.local_n {
+            let gc = tpart.local_start + lc;
+            for row in 0..n0 {
+                let e = max_abs_err(data[lc * n0 + row], reference[row * n1 + gc]);
+                if e > TOL {
+                    return Err(format!(
+                        "[rank {rank}] slab2d T/I+T/O {n0}x{n1}: col {gc} row {row} err {e:.2e}"
+                    ));
+                }
+            }
+        }
+    } else {
+        for i0 in 0..part0.local_n {
+            let g0 = part0.local_start + i0;
+            for j in 0..n1 {
+                let e = max_abs_err(data[i0 * n1 + j], reference[g0 * n1 + j]);
+                if e > TOL {
+                    return Err(format!(
+                        "[rank {rank}] slab2d T/I {n0}x{n1}: row {g0} col {j} err {e:.2e}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_slab_3d_transposed_in<C: mpi::topology::Communicator>(
+    pool: &MpiPool<C>,
+    n0: usize,
+    n1: usize,
+    n2: usize,
+    transposed_out: bool,
+) -> Result<(), String> {
+    let (size, rank) = (pool.size(), pool.rank());
+    let reference = reference_3d(n0, n1, n2);
+    let tpart = LocalPartition::new(n1, size, rank);
+    let part0 = LocalPartition::new(n0, size, rank);
+
+    // Transposed input: data[i1l * n0 * n2 + i0 * n2 + i2].
+    let alloc = (tpart.local_n * n0 * n2)
+        .max(part0.local_n * n1 * n2)
+        .max(1);
+    let mut data = vec![Complex::<f64>::zero(); alloc];
+    for i1l in 0..tpart.local_n {
+        let g1 = tpart.local_start + i1l;
+        for i0 in 0..n0 {
+            for i2 in 0..n2 {
+                data[i1l * n0 * n2 + i0 * n2 + i2] = sample(i0 * n1 * n2 + g1 * n2 + i2);
+            }
+        }
+    }
+
+    let mut flags = MpiFlags::estimate().transposed_in();
+    if transposed_out {
+        flags = flags.transposed_out();
+    }
+    let mut plan = MpiPlan3D::new(n0, n1, n2, Direction::Forward, flags, pool)
+        .map_err(|e| format!("[rank {rank}] MpiPlan3D::new(T/I) failed: {e}"))?;
+    plan.execute_inplace(&mut data)
+        .map_err(|e| format!("[rank {rank}] slab3d T/I execute_inplace failed: {e}"))?;
+
+    if transposed_out {
+        for i1l in 0..tpart.local_n {
+            let g1 = tpart.local_start + i1l;
+            for i0 in 0..n0 {
+                for i2 in 0..n2 {
+                    let got = data[i1l * n0 * n2 + i0 * n2 + i2];
+                    let e = max_abs_err(got, reference[i0 * n1 * n2 + g1 * n2 + i2]);
+                    if e > TOL {
+                        return Err(format!(
+                            "[rank {rank}] slab3d T/I+T/O {n0}x{n1}x{n2}: ({i0},{g1},{i2}) err {e:.2e}"
+                        ));
+                    }
+                }
+            }
+        }
+    } else {
+        for i0 in 0..part0.local_n {
+            let g0 = part0.local_start + i0;
+            for i1 in 0..n1 {
+                for i2 in 0..n2 {
+                    let got = data[i0 * n1 * n2 + i1 * n2 + i2];
+                    let e = max_abs_err(got, reference[g0 * n1 * n2 + i1 * n2 + i2]);
+                    if e > TOL {
+                        return Err(format!(
+                            "[rank {rank}] slab3d T/I {n0}x{n1}x{n2}: ({g0},{i1},{i2}) err {e:.2e}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_nd_transposed_in<C: mpi::topology::Communicator>(
+    pool: &MpiPool<C>,
+    dims: &[usize],
+    transposed_out: bool,
+) -> Result<(), String> {
+    let (size, rank) = (pool.size(), pool.rank());
+    let n0 = dims[0];
+    let stride: usize = dims[1..].iter().product();
+    let reference = match dims.len() {
+        1 => reference_1d(dims[0]),
+        2 => reference_2d(dims[0], dims[1]),
+        3 => reference_3d(dims[0], dims[1], dims[2]),
+        _ => {
+            return Err(format!(
+                "[rank {rank}] check_nd_transposed_in: unsupported ndim {}",
+                dims.len()
+            ))
+        }
+    };
+
+    let tpart = LocalPartition::new(stride, size, rank);
+    let part0 = LocalPartition::new(n0, size, rank);
+
+    // Transposed input: data[local_stride_idx * n0 + row].
+    let alloc = (tpart.local_n * n0).max(part0.local_n * stride).max(1);
+    let mut data = vec![Complex::<f64>::zero(); alloc];
+    for ls in 0..tpart.local_n {
+        let gs = tpart.local_start + ls;
+        for row in 0..n0 {
+            data[ls * n0 + row] = sample(row * stride + gs);
+        }
+    }
+
+    let mut flags = MpiFlags::estimate().transposed_in();
+    if transposed_out {
+        flags = flags.transposed_out();
+    }
+    let mut plan = MpiPlanND::new(dims, Direction::Forward, flags, pool)
+        .map_err(|e| format!("[rank {rank}] MpiPlanND::new(T/I) failed: {e}"))?;
+    plan.execute_inplace(&mut data)
+        .map_err(|e| format!("[rank {rank}] nd T/I execute_inplace failed: {e}"))?;
+
+    if transposed_out {
+        for ls in 0..tpart.local_n {
+            let gs = tpart.local_start + ls;
+            for row in 0..n0 {
+                let e = max_abs_err(data[ls * n0 + row], reference[row * stride + gs]);
+                if e > TOL {
+                    return Err(format!(
+                        "[rank {rank}] nd T/I+T/O {dims:?}: (row {row}, off {gs}) err {e:.2e}"
+                    ));
+                }
+            }
+        }
+    } else {
+        for i0 in 0..part0.local_n {
+            let g0 = part0.local_start + i0;
+            for r in 0..stride {
+                let e = max_abs_err(data[i0 * stride + r], reference[g0 * stride + r]);
+                if e > TOL {
+                    return Err(format!(
+                        "[rank {rank}] nd T/I {dims:?}: (row {g0}, off {r}) err {e:.2e}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// N-D with `transposed_out` only (natural input, transposed output). Before
+/// this pass `MpiPlanND` accepted the flag and silently produced natural-layout
+/// output instead, so this pins the layout it now emits.
+fn check_nd_transposed_out<C: mpi::topology::Communicator>(
+    pool: &MpiPool<C>,
+    dims: &[usize],
+) -> Result<(), String> {
+    let (size, rank) = (pool.size(), pool.rank());
+    let n0 = dims[0];
+    let stride: usize = dims[1..].iter().product();
+    let reference = match dims.len() {
+        2 => reference_2d(dims[0], dims[1]),
+        3 => reference_3d(dims[0], dims[1], dims[2]),
+        _ => {
+            return Err(format!(
+                "[rank {rank}] check_nd_transposed_out: unsupported ndim {}",
+                dims.len()
+            ))
+        }
+    };
+
+    let tpart = LocalPartition::new(stride, size, rank);
+    let part0 = LocalPartition::new(n0, size, rank);
+
+    let alloc = (tpart.local_n * n0).max(part0.local_n * stride).max(1);
+    let mut data = vec![Complex::<f64>::zero(); alloc];
+    for i0 in 0..part0.local_n {
+        let g0 = part0.local_start + i0;
+        for r in 0..stride {
+            data[i0 * stride + r] = sample(g0 * stride + r);
+        }
+    }
+
+    let mut plan = MpiPlanND::new(
+        dims,
+        Direction::Forward,
+        MpiFlags::estimate().transposed_out(),
+        pool,
+    )
+    .map_err(|e| format!("[rank {rank}] MpiPlanND::new(T/O) failed: {e}"))?;
+    plan.execute_inplace(&mut data)
+        .map_err(|e| format!("[rank {rank}] nd T/O execute_inplace failed: {e}"))?;
+
+    for ls in 0..tpart.local_n {
+        let gs = tpart.local_start + ls;
+        for row in 0..n0 {
+            let e = max_abs_err(data[ls * n0 + row], reference[row * stride + gs]);
+            if e > TOL {
+                return Err(format!(
+                    "[rank {rank}] nd T/O {dims:?}: (row {row}, off {gs}) err {e:.2e}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The FFTW-MPI round-trip idiom for real transforms: forward r2c with
+/// `transposed_out`, inverse c2r with `transposed_in`. Each direction performs
+/// one `alltoallv` instead of two, and the pair must reproduce the input.
+fn check_real_2d_transposed_roundtrip<C: mpi::topology::Communicator>(
+    pool: &MpiPool<C>,
+    n0: usize,
+    n1: usize,
+) -> Result<(), String> {
+    let (size, rank) = (pool.size(), pool.rank());
+    let (local_n0, local_0_start, real_alloc, complex_alloc) = local_size_2d_r2c(n0, n1, pool);
+    let n1c = n1 / 2 + 1;
+    let tpart = LocalPartition::new(n1c, size, rank);
+
+    let mut input = vec![0.0f64; real_alloc.max(1)];
+    for i0 in 0..local_n0 {
+        for j in 0..n1 {
+            input[i0 * n1 + j] = rsample((local_0_start + i0) * n1 + j);
+        }
+    }
+
+    let mut r2c = MpiRealPlan2D::r2c(n0, n1, MpiFlags::estimate().transposed_out(), pool)
+        .map_err(|e| format!("[rank {rank}] real2d r2c(T/O) failed: {e}"))?;
+    let mut spec = vec![Complex::<f64>::zero(); complex_alloc.max(tpart.local_n * n0).max(1)];
+    r2c.execute_r2c(&input, &mut spec)
+        .map_err(|e| format!("[rank {rank}] real2d execute_r2c(T/O) failed: {e}"))?;
+
+    let mut c2r = MpiRealPlan2D::c2r(n0, n1, MpiFlags::estimate().transposed_in(), pool)
+        .map_err(|e| format!("[rank {rank}] real2d c2r(T/I) failed: {e}"))?;
+    let mut recon = vec![0.0f64; real_alloc.max(1)];
+    c2r.execute_c2r(&spec, &mut recon)
+        .map_err(|e| format!("[rank {rank}] real2d execute_c2r(T/I) failed: {e}"))?;
+
+    for i0 in 0..local_n0 {
+        let g0 = local_0_start + i0;
+        for j in 0..n1 {
+            let e = (recon[i0 * n1 + j] - input[i0 * n1 + j]).abs();
+            if e > TOL {
+                return Err(format!(
+                    "[rank {rank}] real2d T/O->T/I roundtrip {n0}x{n1}: row {g0} col {j} err {e:.2e}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_real_3d_transposed_roundtrip<C: mpi::topology::Communicator>(
+    pool: &MpiPool<C>,
+    n0: usize,
+    n1: usize,
+    n2: usize,
+) -> Result<(), String> {
+    let (size, rank) = (pool.size(), pool.rank());
+    let (local_n0, local_0_start, real_alloc, complex_alloc) = local_size_3d_r2c(n0, n1, n2, pool);
+    let n2c = n2 / 2 + 1;
+    let tpart = LocalPartition::new(n1, size, rank);
+
+    let mut input = vec![0.0f64; real_alloc.max(1)];
+    for i0 in 0..local_n0 {
+        for i1 in 0..n1 {
+            for i2 in 0..n2 {
+                input[i0 * n1 * n2 + i1 * n2 + i2] =
+                    rsample((local_0_start + i0) * n1 * n2 + i1 * n2 + i2);
+            }
+        }
+    }
+
+    let mut r2c = MpiRealPlan3D::r2c(n0, n1, n2, MpiFlags::estimate().transposed_out(), pool)
+        .map_err(|e| format!("[rank {rank}] real3d r2c(T/O) failed: {e}"))?;
+    let mut spec = vec![Complex::<f64>::zero(); complex_alloc.max(tpart.local_n * n0 * n2c).max(1)];
+    r2c.execute_r2c(&input, &mut spec)
+        .map_err(|e| format!("[rank {rank}] real3d execute_r2c(T/O) failed: {e}"))?;
+
+    let mut c2r = MpiRealPlan3D::c2r(n0, n1, n2, MpiFlags::estimate().transposed_in(), pool)
+        .map_err(|e| format!("[rank {rank}] real3d c2r(T/I) failed: {e}"))?;
+    let mut recon = vec![0.0f64; real_alloc.max(1)];
+    c2r.execute_c2r(&spec, &mut recon)
+        .map_err(|e| format!("[rank {rank}] real3d execute_c2r(T/I) failed: {e}"))?;
+
+    for i0 in 0..local_n0 {
+        let g0 = local_0_start + i0;
+        for i1 in 0..n1 {
+            for i2 in 0..n2 {
+                let idx = i0 * n1 * n2 + i1 * n2 + i2;
+                let e = (recon[idx] - input[idx]).abs();
+                if e > TOL {
+                    return Err(format!(
+                        "[rank {rank}] real3d T/O->T/I roundtrip {n0}x{n1}x{n2}: ({g0},{i1},{i2}) err {e:.2e}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_pencil<C: mpi::topology::Communicator>(
     pool: &MpiPool<C>,
     grid: PencilGrid,
@@ -608,15 +967,40 @@ fn check_error_paths<C: mpi::topology::Communicator>(pool: &MpiPool<C>) -> Resul
     let rank = pool.rank();
     let ti = MpiFlags::estimate().transposed_in();
 
-    // transposed_in must be rejected (not silently ignored) by every slab plan.
-    if MpiPlan2D::<f64, _>::new(8, 4, Direction::Forward, ti, pool).is_ok() {
-        return Err(format!("[rank {rank}] MpiPlan2D accepted transposed_in"));
+    // transposed_in is implemented for every complex slab plan; construction must
+    // now succeed (the numerical checks live in the `*_transposed_in` scenarios).
+    if MpiPlan2D::<f64, _>::new(8, 4, Direction::Forward, ti, pool).is_err() {
+        return Err(format!("[rank {rank}] MpiPlan2D rejected transposed_in"));
     }
-    if MpiPlan3D::<f64, _>::new(4, 4, 4, Direction::Forward, ti, pool).is_ok() {
-        return Err(format!("[rank {rank}] MpiPlan3D accepted transposed_in"));
+    if MpiPlan3D::<f64, _>::new(4, 4, 4, Direction::Forward, ti, pool).is_err() {
+        return Err(format!("[rank {rank}] MpiPlan3D rejected transposed_in"));
     }
-    if MpiPlanND::<f64, _>::new(&[4, 4], Direction::Forward, ti, pool).is_ok() {
-        return Err(format!("[rank {rank}] MpiPlanND accepted transposed_in"));
+    if MpiPlanND::<f64, _>::new(&[4, 4], Direction::Forward, ti, pool).is_err() {
+        return Err(format!("[rank {rank}] MpiPlanND rejected transposed_in"));
+    }
+
+    // For the real plans the flag describes the half-complex array: meaningful on
+    // c2r (whose input is half-complex), rejected on r2c (whose input is the
+    // real-space slab). Likewise transposed_out is r2c-only.
+    if MpiRealPlan2D::<f64, _>::r2c(8, 8, ti, pool).is_ok() {
+        return Err(format!(
+            "[rank {rank}] MpiRealPlan2D::r2c accepted transposed_in"
+        ));
+    }
+    if MpiRealPlan3D::<f64, _>::r2c(4, 4, 4, ti, pool).is_ok() {
+        return Err(format!(
+            "[rank {rank}] MpiRealPlan3D::r2c accepted transposed_in"
+        ));
+    }
+    if MpiRealPlan2D::<f64, _>::c2r(8, 8, ti, pool).is_err() {
+        return Err(format!(
+            "[rank {rank}] MpiRealPlan2D::c2r rejected transposed_in"
+        ));
+    }
+    if MpiRealPlan3D::<f64, _>::c2r(4, 4, 4, ti, pool).is_err() {
+        return Err(format!(
+            "[rank {rank}] MpiRealPlan3D::c2r rejected transposed_in"
+        ));
     }
 
     // Distribution metadata for slab plans.
@@ -713,6 +1097,32 @@ fn main() {
     record(check_real_3d(&pool, 4, 6, 5, false)); // odd last dim
     record(check_real_3d(&pool, 6, 5, 4, false)); // non-divisible n0
     record(check_real_3d(&pool, 3, 4, 6, true)); // transposed_out, non-divisible
+
+    // ---- Transposed INPUT (`transposed_in`), with and without transposed_out ----
+    record(check_slab_2d_transposed_in(&pool, 8, 4, false));
+    record(check_slab_2d_transposed_in(&pool, 8, 4, true));
+    record(check_slab_2d_transposed_in(&pool, 10, 6, false)); // non-divisible
+    record(check_slab_2d_transposed_in(&pool, 3, 5, false)); // size<ranks case
+
+    record(check_slab_3d_transposed_in(&pool, 4, 4, 4, false));
+    record(check_slab_3d_transposed_in(&pool, 4, 4, 4, true));
+    record(check_slab_3d_transposed_in(&pool, 6, 5, 3, false)); // non-divisible
+    record(check_slab_3d_transposed_in(&pool, 2, 3, 3, false)); // size<ranks case
+
+    record(check_nd_transposed_in(&pool, &[8], false));
+    record(check_nd_transposed_in(&pool, &[4, 6], false));
+    record(check_nd_transposed_in(&pool, &[4, 6], true));
+    record(check_nd_transposed_in(&pool, &[4, 4, 4], false));
+    record(check_nd_transposed_in(&pool, &[6, 5, 3], false)); // non-divisible
+
+    // N-D transposed_out alone (previously accepted but silently ignored).
+    record(check_nd_transposed_out(&pool, &[4, 6]));
+    record(check_nd_transposed_out(&pool, &[6, 5, 3]));
+
+    record(check_real_2d_transposed_roundtrip(&pool, 8, 8));
+    record(check_real_2d_transposed_roundtrip(&pool, 6, 5)); // non-divisible + odd last
+    record(check_real_3d_transposed_roundtrip(&pool, 4, 4, 4));
+    record(check_real_3d_transposed_roundtrip(&pool, 6, 5, 4)); // non-divisible n0
 
     // ---- Pencil 3D: grid chosen from size, divisible + non-divisible ----
     let grid = pick_grid(size);

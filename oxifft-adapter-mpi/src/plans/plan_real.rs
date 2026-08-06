@@ -44,11 +44,23 @@ enum RealKind {
     C2r,
 }
 
-/// Reject a `transposed_in` flag, which no real slab plan implements yet.
-fn reject_transposed_in(flags: MpiFlags, plan: &str) -> Result<(), MpiError> {
+/// Reject `transposed_in` on an **r2c** plan.
+///
+/// `transposed_in` describes the distribution of the *half-complex* array, which
+/// for r2c is the output, not the input: an r2c plan's input is the real-space
+/// slab `[local_n0][…][n_last]`, and there is no transposed real-space layout for
+/// it to be in. This matches FFTW-MPI, where `FFTW_MPI_TRANSPOSED_IN` is
+/// meaningful for c2r and `FFTW_MPI_TRANSPOSED_OUT` for r2c. The round-trip
+/// idiom is therefore `r2c` + `transposed_out` followed by `c2r` +
+/// `transposed_in`, which skips one `alltoallv` in each direction.
+fn reject_transposed_in_r2c(flags: MpiFlags, plan: &str) -> Result<(), MpiError> {
     if flags.transposed_in {
         return Err(MpiError::FftError {
-            message: format!("MpiFlags::transposed_in is not yet implemented for {plan}"),
+            message: format!(
+                "MpiFlags::transposed_in is not meaningful for {plan}: an r2c plan's input is the \
+                 real-space slab, which is never transposed. Use transposed_out on the r2c plan \
+                 and transposed_in on the matching c2r plan."
+            ),
         });
     }
     Ok(())
@@ -95,8 +107,10 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan2D<'p, T, C> {
     ///
     /// # Errors
     /// Returns [`MpiError::InvalidDimension`] if a dimension is zero,
-    /// [`MpiError::FftError`] if `transposed_in` is set or a local sub-plan
-    /// cannot be built.
+    /// [`MpiError::FftError`] if `transposed_in` is set (an r2c plan's input is
+    /// the real-space slab, which is never transposed — set `transposed_out`
+    /// here and `transposed_in` on the matching c2r plan instead) or a local
+    /// sub-plan cannot be built.
     pub fn r2c(
         n0: usize,
         n1: usize,
@@ -108,10 +122,15 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan2D<'p, T, C> {
 
     /// Create a 2D complex-to-real distributed plan (normalized inverse).
     ///
+    /// Set `transposed_in` on `flags` to consume the `[local_n1c][n0]`
+    /// half-complex distribution emitted by a 2D r2c plan built with
+    /// `transposed_out`; that pairing skips one `alltoallv` in each direction.
+    ///
     /// # Errors
     /// Returns [`MpiError::InvalidDimension`] if a dimension is zero,
-    /// [`MpiError::FftError`] if `transposed_in`/`transposed_out` is set or a
-    /// local sub-plan cannot be built.
+    /// [`MpiError::FftError`] if `transposed_out` is set (a c2r plan's output is
+    /// the real-space slab, which is never transposed) or a local sub-plan
+    /// cannot be built.
     pub fn c2r(
         n0: usize,
         n1: usize,
@@ -135,7 +154,9 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan2D<'p, T, C> {
                 message: "Dimension size cannot be zero".to_string(),
             });
         }
-        reject_transposed_in(flags, "the 2D real slab plan")?;
+        if kind == RealKind::R2c {
+            reject_transposed_in_r2c(flags, "the 2D r2c slab plan")?;
+        }
         if kind == RealKind::C2r && flags.transposed_out {
             return Err(MpiError::FftError {
                 message: "MpiFlags::transposed_out is not supported for the 2D c2r slab plan"
@@ -279,9 +300,11 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan2D<'p, T, C> {
 
     /// Execute the distributed complex-to-real transform (**normalized**).
     ///
-    /// `input` is the local half-complex slab `[local_n0][n1/2 + 1]`; `output` is
-    /// the local real slab `[local_n0][n1]`, normalized by `1 / (n0 * n1)` so that
-    /// r2c -> c2r is the identity.
+    /// `input` is the local half-complex slab `[local_n0][n1/2 + 1]` — or, when
+    /// `transposed_in` is set, the transposed half-complex distribution
+    /// `[local_n1c][n0]` produced by an r2c plan with `transposed_out`. `output`
+    /// is the local real slab `[local_n0][n1]`, normalized by `1 / (n0 * n1)` so
+    /// that r2c -> c2r is the identity.
     ///
     /// # Errors
     /// Returns [`MpiError::FftError`] if this is not a c2r plan,
@@ -299,9 +322,14 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan2D<'p, T, C> {
         let tpart = LocalPartition::new(n1c, pool.size(), pool.rank());
         let local_n1c = tpart.local_n;
 
-        if input.len() < local_n0 * n1c {
+        let in_size = if self.flags.transposed_in {
+            local_n1c * n0
+        } else {
+            local_n0 * n1c
+        };
+        if input.len() < in_size {
             return Err(MpiError::SizeMismatch {
-                expected: local_n0 * n1c,
+                expected: in_size,
                 actual: input.len(),
             });
         }
@@ -312,16 +340,23 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan2D<'p, T, C> {
             });
         }
 
-        // Step 1: distributed complex inverse FFT along n0.
-        distributed_transpose(
-            pool,
-            &input[..local_n0 * n1c],
-            &mut self.scratch,
-            n0,
-            n1c,
-            local_n0,
-            local_0_start,
-        )?;
+        // Step 1: distributed complex inverse FFT along n0. With `transposed_in`
+        // the caller already handed us the `[local_n1c][n0]` distribution the
+        // forward transpose would have produced, so that collective is skipped and
+        // the input is simply adopted as the transposed working set.
+        if self.flags.transposed_in {
+            self.scratch[..in_size].copy_from_slice(&input[..in_size]);
+        } else {
+            distributed_transpose(
+                pool,
+                &input[..local_n0 * n1c],
+                &mut self.scratch,
+                n0,
+                n1c,
+                local_n0,
+                local_0_start,
+            )?;
+        }
         self.fft_columns_n0(local_n1c);
         distributed_transpose(
             pool,
@@ -406,8 +441,10 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan3D<'p, T, C> {
     ///
     /// # Errors
     /// Returns [`MpiError::InvalidDimension`] if a dimension is zero,
-    /// [`MpiError::FftError`] if `transposed_in` is set or a local sub-plan
-    /// cannot be built.
+    /// [`MpiError::FftError`] if `transposed_in` is set (an r2c plan's input is
+    /// the real-space slab, which is never transposed — set `transposed_out`
+    /// here and `transposed_in` on the matching c2r plan instead) or a local
+    /// sub-plan cannot be built.
     pub fn r2c(
         n0: usize,
         n1: usize,
@@ -420,10 +457,15 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan3D<'p, T, C> {
 
     /// Create a 3D complex-to-real distributed plan (normalized inverse).
     ///
+    /// Set `transposed_in` on `flags` to consume the `[local_n1][n0][n2c]`
+    /// half-complex distribution emitted by a 3D r2c plan built with
+    /// `transposed_out`; that pairing skips one `alltoallv` in each direction.
+    ///
     /// # Errors
     /// Returns [`MpiError::InvalidDimension`] if a dimension is zero,
-    /// [`MpiError::FftError`] if `transposed_in`/`transposed_out` is set or a
-    /// local sub-plan cannot be built.
+    /// [`MpiError::FftError`] if `transposed_out` is set (a c2r plan's output is
+    /// the real-space slab, which is never transposed) or a local sub-plan
+    /// cannot be built.
     pub fn c2r(
         n0: usize,
         n1: usize,
@@ -456,7 +498,9 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan3D<'p, T, C> {
                 message: "Dimension size cannot be zero".to_string(),
             });
         }
-        reject_transposed_in(flags, "the 3D real slab plan")?;
+        if kind == RealKind::R2c {
+            reject_transposed_in_r2c(flags, "the 3D r2c slab plan")?;
+        }
         if kind == RealKind::C2r && flags.transposed_out {
             return Err(MpiError::FftError {
                 message: "MpiFlags::transposed_out is not supported for the 3D c2r slab plan"
@@ -592,8 +636,10 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan3D<'p, T, C> {
 
     /// Execute the distributed complex-to-real transform (**normalized**).
     ///
-    /// `input` is the local half-complex slab `[local_n0][n1][n2/2 + 1]`; `output`
-    /// is the local real slab `[local_n0][n1][n2]`, normalized by
+    /// `input` is the local half-complex slab `[local_n0][n1][n2/2 + 1]` — or,
+    /// when `transposed_in` is set, the transposed half-complex distribution
+    /// `[local_n1][n0][n2/2 + 1]` produced by an r2c plan with `transposed_out`.
+    /// `output` is the local real slab `[local_n0][n1][n2]`, normalized by
     /// `1 / (n0 * n1 * n2)` so that r2c -> c2r is the identity.
     ///
     /// # Errors
@@ -611,9 +657,14 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan3D<'p, T, C> {
         let (local_n0, local_n1) = (self.local_n0, self.local_n1);
         let pool = self.pool;
 
-        if input.len() < local_n0 * n1 * n2c {
+        let in_size = if self.flags.transposed_in {
+            local_n1 * n0 * n2c
+        } else {
+            local_n0 * n1 * n2c
+        };
+        if input.len() < in_size {
             return Err(MpiError::SizeMismatch {
-                expected: local_n0 * n1 * n2c,
+                expected: in_size,
                 actual: input.len(),
             });
         }
@@ -624,16 +675,22 @@ impl<'p, T: Float + MpiFloat, C: Communicator> MpiRealPlan3D<'p, T, C> {
             });
         }
 
-        // Step 1: distributed complex inverse FFT along n0.
-        distributed_transpose_batched(
-            pool,
-            &input[..local_n0 * n1 * n2c],
-            &mut self.scratch,
-            n0,
-            n1,
-            local_n0,
-            n2c,
-        )?;
+        // Step 1: distributed complex inverse FFT along n0. With `transposed_in`
+        // the caller already handed us the `[local_n1][n0][n2c]` distribution the
+        // forward transpose would have produced, so that collective is skipped.
+        if self.flags.transposed_in {
+            self.scratch[..in_size].copy_from_slice(&input[..in_size]);
+        } else {
+            distributed_transpose_batched(
+                pool,
+                &input[..local_n0 * n1 * n2c],
+                &mut self.scratch,
+                n0,
+                n1,
+                local_n0,
+                n2c,
+            )?;
+        }
         self.fft_fibers_n0(local_n1);
         distributed_transpose_batched(
             pool,

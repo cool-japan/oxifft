@@ -606,3 +606,24 @@ fn test_guru_2d_various_sizes() {
         );
     }
 }
+
+/// Regression: a negative effective element offset must produce the *named*
+/// diagnostic in release builds too.
+///
+/// The offset checks in `GuruPlan::execute` used to be `debug_assert!`, so a
+/// release build turned a negative `isize` offset into a near-`usize::MAX`
+/// slice index and reported an opaque "index out of bounds" panic instead of
+/// pointing at the offending `IoDim` stride.
+#[test]
+#[should_panic(expected = "is negative")]
+fn negative_effective_offset_reports_the_offending_stride() {
+    // A negative input stride with a zero base offset: element 1 lands at -1.
+    let dims = Tensor::new(vec![IoDim::new(4, -1, 1)]);
+    let howmany = Tensor::empty();
+    let plan = GuruPlan::<f64>::dft(&dims, &howmany, Direction::Forward, Flags::ESTIMATE)
+        .expect("guru plan for a 4-point transform");
+
+    let input = generate_input(4);
+    let mut output = vec![Complex::<f64>::zero(); 4];
+    plan.execute(&input, &mut output);
+}

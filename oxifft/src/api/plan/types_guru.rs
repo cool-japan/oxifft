@@ -158,10 +158,12 @@ impl<T: Float> GuruPlan<T> {
     ///
     /// Panics if buffers are too small for the specified layout.
     ///
-    /// Panics (in debug builds with an earlier diagnostic; in release builds
-    /// via an out-of-bounds slice index) if the computed element offset is
-    /// negative. This can happen when [`crate::IoDim`] strides are negative
-    /// and the batch index is large enough that `base_offset + i * stride < 0`.
+    /// Panics, in **both** debug and release builds and with a diagnostic
+    /// naming the offending index, if a computed element offset is negative.
+    /// This can happen when [`crate::IoDim`] strides are negative and the batch
+    /// index is large enough that `base_offset + i * stride < 0`; the check
+    /// used to be `debug_assert!`-only, so release builds reported it as an
+    /// opaque near-`usize::MAX` slice-index panic instead.
     /// Always ensure that for every element `i` in `0..n`, the expression
     /// `in_offset + i * is` and `out_offset + i * os` evaluate to a
     /// non-negative value.
@@ -236,7 +238,7 @@ impl<T: Float> GuruPlan<T> {
             input_contiguous = (0..n)
                 .map(|i| {
                     let idx = in_offset + (i as isize) * in_stride;
-                    debug_assert!(
+                    assert!(
                         idx >= 0,
                         "input offset {idx} is negative (in_offset={in_offset}, i={i}, stride={in_stride}); \
                          negative effective offsets produce out-of-bounds access"
@@ -250,7 +252,7 @@ impl<T: Float> GuruPlan<T> {
         self.plans[0].execute(input_slice, &mut temp);
         for i in 0..n {
             let idx = out_offset + (i as isize) * out_stride;
-            debug_assert!(
+            assert!(
                 idx >= 0,
                 "output offset {idx} is negative (out_offset={out_offset}, i={i}, stride={out_stride}); \
                  negative effective offsets produce out-of-bounds access"
@@ -279,7 +281,7 @@ impl<T: Float> GuruPlan<T> {
         let total = self.transform_size();
         for flat_idx in 0..total {
             let src_offset = self.compute_nd_offset(flat_idx, base_offset, true);
-            debug_assert!(
+            assert!(
                 src_offset >= 0,
                 "input offset {src_offset} is negative (flat_idx={flat_idx}, base_offset={base_offset}); \
                  ensure IoDim strides produce non-negative offsets for all elements"
@@ -292,7 +294,7 @@ impl<T: Float> GuruPlan<T> {
         let total = self.transform_size();
         for flat_idx in 0..total {
             let dst_offset = self.compute_nd_offset(flat_idx, base_offset, false);
-            debug_assert!(
+            assert!(
                 dst_offset >= 0,
                 "output offset {dst_offset} is negative (flat_idx={flat_idx}, base_offset={base_offset}); \
                  ensure IoDim strides produce non-negative offsets for all elements"
@@ -367,7 +369,7 @@ impl<T: Float> GuruPlan<T> {
             let mut work = vec![Complex::<T>::zero(); n];
             for (flat_idx, item) in work.iter_mut().enumerate().take(n) {
                 let src_offset = self.compute_nd_offset(flat_idx, offset, true);
-                debug_assert!(
+                assert!(
                     src_offset >= 0,
                     "in-place offset {src_offset} is negative (flat_idx={flat_idx}, base_offset={offset}); \
                      ensure IoDim strides produce non-negative offsets for all elements"
@@ -385,7 +387,7 @@ impl<T: Float> GuruPlan<T> {
             }
             for (flat_idx, &item) in result.iter().enumerate().take(n) {
                 let dst_offset = self.compute_nd_offset(flat_idx, offset, false);
-                debug_assert!(
+                assert!(
                     dst_offset >= 0,
                     "in-place dst offset {dst_offset} is negative (flat_idx={flat_idx}, base_offset={offset}); \
                      ensure IoDim strides produce non-negative offsets for all elements"
