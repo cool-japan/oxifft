@@ -80,9 +80,9 @@ fftw = "0.8"
 wasm-bindgen = "0.2"
 
 # oxicuda GPU backends
-oxicuda-driver = { version = "0.5.4" }
-oxicuda-fft = { version = "0.5.4" }
-oxicuda-metal = { version = "0.5.4" }
+oxicuda-driver = { version = "0.5.5" }
+oxicuda-fft = { version = "0.5.5" }
+oxicuda-metal = { version = "0.5.5" }
 
 # ndarray integration (opt-in via ndarray feature)
 ndarray = "0.17.2"
